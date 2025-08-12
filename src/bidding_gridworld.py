@@ -87,11 +87,11 @@ class BiddingGridworld(gym.Env):
         # Initialize positions
         self.agent_position = np.array([0, 0], dtype=np.int32)
         
-        # Place targets at different corners/edges to create interesting dynamics
-        # Target 0 (for agent 0) - top right area
+        # Place targets at different locations to create interesting dynamics
+        # Target 0 (for agent 0) - bottom right corner
         self.target_0_position = np.array([self.grid_size-1, self.grid_size-1], dtype=np.int32)
         
-        # Target 1 (for agent 1) - bottom left area  
+        # Target 1 (for agent 1) - top right corner
         self.target_1_position = np.array([0, self.grid_size-1], dtype=np.int32)
         
         # Track which targets have been reached

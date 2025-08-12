@@ -10,9 +10,13 @@ class ZeroSumQLearning:
     Q-learning algorithm for two-player zero-sum Markov games.
     
     This implements Nash-Q learning where:
-    1. We maintain Q-tables for both players (protagonist and adversary)
+    1. We maintain ONE Q-table storing protagonist's payoffs (adversary gets -payoff)
     2. Q-value updates require solving a matrix game at each state
     3. The value of the next state is determined by the Nash equilibrium
+    
+    In zero-sum games, we only need one payoff matrix since:
+    - Protagonist's payoff: Q[s][a_p][a_a] 
+    - Adversary's payoff: -Q[s][a_p][a_a]
     """
     
     def __init__(
@@ -49,14 +53,14 @@ class ZeroSumQLearning:
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
         
-        # Q-tables: Q[state][protagonist_action][adversary_action] = protagonist_reward
-        # We store Q-values from protagonist's perspective (adversary gets negative)
+        # Single Q-table for zero-sum game: Q[state][protagonist_action][adversary_action] 
+        # Stores protagonist's expected payoff; adversary's payoff is implicitly -Q[s][a_p][a_a]
         self.q_table = defaultdict(lambda: np.zeros((self.protagonist_actions, self.adversary_actions)))
         
-        # Value function: V[state] = Nash equilibrium value
+        # Value function: V[state] = Nash equilibrium value for protagonist
         self.value_function = defaultdict(float)
         
-        # Policy: mixed strategies from Nash equilibrium
+        # Mixed strategies from Nash equilibrium for both players
         self.protagonist_policy = defaultdict(lambda: np.ones(self.protagonist_actions) / self.protagonist_actions)
         self.adversary_policy = defaultdict(lambda: np.ones(self.adversary_actions) / self.adversary_actions)
         
@@ -109,34 +113,39 @@ class ZeroSumQLearning:
         """
         Solve the zero-sum matrix game to find Nash equilibrium.
         
+        In zero-sum games, we only need to solve ONE linear program. The protagonist's
+        strategy comes from the primal solution, and the adversary's strategy comes
+        from the dual solution of the same LP.
+        
         Args:
             payoff_matrix: Matrix of shape (protagonist_actions, adversary_actions)
-                          representing protagonist's payoffs
+                          representing protagonist's payoffs (adversary gets -payoff_matrix)
         
         Returns:
-            protagonist_strategy: Mixed strategy for protagonist
-            adversary_strategy: Mixed strategy for adversary  
-            game_value: Value of the game for protagonist
+            protagonist_strategy: Mixed strategy for protagonist (row player)
+            adversary_strategy: Mixed strategy for adversary (column player)
+            game_value: Value of the game for protagonist (adversary gets -game_value)
         """
         try:
-            # Use linear programming to solve the matrix game
-            # For protagonist (row player): max min_j sum_i x_i * payoff_matrix[i,j]
-            # Convert to LP: maximize v subject to sum_i x_i * payoff_matrix[i,j] >= v for all j
-            
             m, n = payoff_matrix.shape
             
-            # Solve for protagonist's strategy
+            # Solve the protagonist's problem: max v subject to:
+            # sum_i x_i * payoff_matrix[i,j] >= v for all j
+            # sum_i x_i = 1
+            # x_i >= 0
+            
             c = np.zeros(m + 1)
             c[-1] = -1  # Maximize v (minimize -v)
             
             # Constraints: sum_i x_i * payoff_matrix[i,j] >= v for all j
+            # Rewritten as: -sum_i x_i * payoff_matrix[i,j] + v <= 0
             A_ub = np.zeros((n, m + 1))
             for j in range(n):
-                A_ub[j, :m] = -payoff_matrix[:, j]  # Negative because we're using <=
+                A_ub[j, :m] = -payoff_matrix[:, j]
                 A_ub[j, -1] = 1
             b_ub = np.zeros(n)
             
-            # Equality constraint: sum x_i = 1
+            # Equality constraint: sum_i x_i = 1
             A_eq = np.zeros((1, m + 1))
             A_eq[0, :m] = 1
             b_eq = np.array([1])
@@ -144,52 +153,94 @@ class ZeroSumQLearning:
             # Bounds: x_i >= 0, v unbounded
             bounds = [(0, None)] * m + [(None, None)]
             
-            result = scipy.optimize.linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
+            result = scipy.optimize.linprog(
+                c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, 
+                bounds=bounds, method='highs'
+            )
             
             if result.success:
                 protagonist_strategy = result.x[:m]
                 game_value = result.x[-1]
+                
+                # Extract adversary's strategy from dual variables
+                # The dual variables correspond to the inequality constraints
+                if hasattr(result, 'ineqlin') and result.ineqlin is not None:
+                    # Dual variables from inequality constraints
+                    adversary_strategy = result.ineqlin.marginals
+                    # Normalize to ensure it's a valid probability distribution
+                    if np.sum(adversary_strategy) > 0:
+                        adversary_strategy = adversary_strategy / np.sum(adversary_strategy)
+                    else:
+                        adversary_strategy = np.ones(n) / n
+                else:
+                    # Fallback: solve adversary's problem if dual not available
+                    adversary_strategy = self._solve_adversary_fallback(payoff_matrix)
+                    
             else:
-                # Fallback to uniform strategy
+                # Fallback to uniform strategies
                 protagonist_strategy = np.ones(m) / m
-                game_value = 0.0
-            
-            # Solve for adversary's strategy (minimizing protagonist's payoff)
-            # Transpose the game for adversary
-            adversary_payoff = -payoff_matrix.T
-            
-            c_adv = np.zeros(n + 1)
-            c_adv[-1] = -1  # Maximize v for adversary (minimize protagonist's payoff)
-            
-            A_ub_adv = np.zeros((m, n + 1))
-            for i in range(m):
-                A_ub_adv[i, :n] = -adversary_payoff[:, i]
-                A_ub_adv[i, -1] = 1
-            b_ub_adv = np.zeros(m)
-            
-            A_eq_adv = np.zeros((1, n + 1))
-            A_eq_adv[0, :n] = 1
-            b_eq_adv = np.array([1])
-            
-            bounds_adv = [(0, None)] * n + [(None, None)]
-            
-            result_adv = scipy.optimize.linprog(c_adv, A_ub=A_ub_adv, b_ub=b_ub_adv, 
-                                              A_eq=A_eq_adv, b_eq=b_eq_adv, bounds=bounds_adv, method='highs')
-            
-            if result_adv.success:
-                adversary_strategy = result_adv.x[:n]
-            else:
                 adversary_strategy = np.ones(n) / n
-            
+                game_value = 0.0
+                
             return protagonist_strategy, adversary_strategy, game_value
             
         except Exception as e:
             print(f"Warning: Matrix game solving failed: {e}")
             # Fallback to uniform strategies
+            m, n = payoff_matrix.shape
             protagonist_strategy = np.ones(m) / m
             adversary_strategy = np.ones(n) / n
             game_value = 0.0
             return protagonist_strategy, adversary_strategy, game_value
+    
+    def _solve_adversary_fallback(self, payoff_matrix: np.ndarray) -> np.ndarray:
+        """
+        Fallback method to solve for adversary's strategy if dual solution unavailable.
+        
+        Args:
+            payoff_matrix: Protagonist's payoff matrix
+            
+        Returns:
+            adversary_strategy: Optimal mixed strategy for adversary
+        """
+        try:
+            m, n = payoff_matrix.shape
+            
+            # Adversary minimizes protagonist's payoff: min u subject to:
+            # sum_j y_j * payoff_matrix[i,j] <= u for all i
+            # sum_j y_j = 1
+            # y_j >= 0
+            
+            c = np.zeros(n + 1)
+            c[-1] = 1  # Minimize u
+            
+            # Constraints: sum_j y_j * payoff_matrix[i,j] <= u for all i
+            A_ub = np.zeros((m, n + 1))
+            for i in range(m):
+                A_ub[i, :n] = payoff_matrix[i, :]
+                A_ub[i, -1] = -1
+            b_ub = np.zeros(m)
+            
+            # Equality constraint: sum_j y_j = 1
+            A_eq = np.zeros((1, n + 1))
+            A_eq[0, :n] = 1
+            b_eq = np.array([1])
+            
+            # Bounds: y_j >= 0, u unbounded
+            bounds = [(0, None)] * n + [(None, None)]
+            
+            result = scipy.optimize.linprog(
+                c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                bounds=bounds, method='highs'
+            )
+            
+            if result.success:
+                return result.x[:n]
+            else:
+                return np.ones(n) / n
+                
+        except Exception:
+            return np.ones(n) / n
     
     def get_action(self, observation: Dict, bid_upper_bound: int, training: bool = True) -> Dict:
         """
@@ -337,6 +388,21 @@ class ZeroSumQLearning:
             'q_table_size': len(self.q_table),
             'average_q_value': np.mean([np.mean(q_matrix) for q_matrix in self.q_table.values()]) if self.q_table else 0.0
         }
+    
+    def get_adversary_payoff_matrix(self, observation: Dict) -> np.ndarray:
+        """
+        Get the adversary's payoff matrix for a given state.
+        In zero-sum games, this is simply the negative of the protagonist's payoffs.
+        
+        Args:
+            observation: State observation
+            
+        Returns:
+            Adversary's payoff matrix (negative of protagonist's)
+        """
+        state_key = self._state_to_key(observation)
+        protagonist_payoffs = self.q_table[state_key]
+        return -protagonist_payoffs
 
 
 if __name__ == "__main__":
