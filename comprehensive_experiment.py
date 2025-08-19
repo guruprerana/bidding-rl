@@ -37,6 +37,7 @@ class ComprehensiveTrainer:
     def __init__(self, base_log_dir: str = "logs", experiment_name: str = ""):
         """Initialize the trainer with timestamped logging directory."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        experiment_name = experiment_name if experiment_name else "3x3grid_10000_iters_exp7"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         
         # Create subdirectories
@@ -53,12 +54,13 @@ class ComprehensiveTrainer:
         print(f"Experiment directory: {self.log_dir}")
         
         # Training parameters
-        self.grid_size = 5
-        self.bid_upper_bound = 4
-        self.episodes = 1000
-        self.learning_rate = 0.1
+        self.grid_size = 3
+        self.bid_upper_bound = 2
+        self.episodes = 10000
+        self.learning_rate = 0.05
         self.discount_factor = 0.95
-        self.epsilon = 0.3
+        self.epsilon = 0.5
+        self.min_epsilon = 0.1
         
         # Save experiment configuration
         self.save_config()
@@ -96,16 +98,19 @@ class ComprehensiveTrainer:
         
         # Calculate action space size
         action_space_size = 4 * (self.bid_upper_bound + 1)
-        observation_space_size = self.grid_size * self.grid_size * 2 * (self.grid_size * self.grid_size)
+        observation_space_size = self.grid_size * self.grid_size * 2
         
         # Create Q-learning agent
         agent = ZeroSumQLearning(
             protagonist_action_space_size=action_space_size,
             adversary_action_space_size=action_space_size,
             observation_space_size=observation_space_size,
+            bid_upper_bound=self.bid_upper_bound,
+            wrapper=env,
             learning_rate=self.learning_rate,
             discount_factor=self.discount_factor,
-            epsilon=self.epsilon
+            epsilon=self.epsilon,
+            epsilon_min=self.min_epsilon,
         )
         
         # Training tracking
@@ -121,9 +126,10 @@ class ComprehensiveTrainer:
             obs, info = env.reset()
             total_reward = 0
             steps = 0
-            max_steps = 100
+            terminated = False
+            truncated = False
             
-            while steps < max_steps:
+            while (not terminated) and (not truncated):
                 action = agent.get_action(obs, self.bid_upper_bound, training=True)
                 next_obs, rewards, terminated, truncated, info = env.step(action)
                 
@@ -133,9 +139,6 @@ class ComprehensiveTrainer:
                 total_reward += protagonist_reward
                 obs = next_obs
                 steps += 1
-                
-                if terminated or truncated:
-                    break
             
             agent.end_episode()
             episode_rewards.append(total_reward)
@@ -284,10 +287,11 @@ class ComprehensiveTrainer:
             obs, info = env.reset()
             total_reward = 0
             steps = 0
-            max_steps = 50
+            terminated = False
+            truncated = False
             
             # Record episode
-            while steps < max_steps:
+            while (not terminated) and (not truncated):
                 # Extract agent position for visualization
                 agent_pos = obs["agent_position"]
                 row = agent_pos // self.grid_size
@@ -325,9 +329,6 @@ class ComprehensiveTrainer:
                 
                 obs = next_obs
                 steps += 1
-                
-                if terminated or truncated:
-                    break
             
             # Save episode data
             episode_data = {
@@ -455,18 +456,35 @@ class ComprehensiveTrainer:
         
         # Create dummy agents with same parameters
         action_space_size = 4 * (self.bid_upper_bound + 1)
-        observation_space_size = self.grid_size * self.grid_size * 2 * (self.grid_size * self.grid_size)
+        observation_space_size = self.grid_size * self.grid_size * 2
+        
+        # Create dummy wrapper instances for loading
+        from src.zero_sum_wrapper import ZeroSumBiddingWrapper
+        dummy_wrapper_0 = ZeroSumBiddingWrapper(
+            target_agent_id=0,
+            grid_size=self.grid_size,
+            bid_upper_bound=self.bid_upper_bound
+        )
+        dummy_wrapper_1 = ZeroSumBiddingWrapper(
+            target_agent_id=1,
+            grid_size=self.grid_size,
+            bid_upper_bound=self.bid_upper_bound
+        )
         
         agent_0 = ZeroSumQLearning(
             protagonist_action_space_size=action_space_size,
             adversary_action_space_size=action_space_size,
-            observation_space_size=observation_space_size
+            observation_space_size=observation_space_size,
+            bid_upper_bound=self.bid_upper_bound,
+            wrapper=dummy_wrapper_0
         )
         
         agent_1 = ZeroSumQLearning(
             protagonist_action_space_size=action_space_size,
             adversary_action_space_size=action_space_size,
-            observation_space_size=observation_space_size
+            observation_space_size=observation_space_size,
+            bid_upper_bound=self.bid_upper_bound,
+            wrapper=dummy_wrapper_1
         )
         
         # Load models
@@ -505,9 +523,10 @@ class ComprehensiveTrainer:
             obs, info = env.reset()
             total_rewards = {"agent_0": 0, "agent_1": 0}
             steps = 0
-            max_steps = 100
+            terminated = False
+            truncated = False
             
-            while steps < max_steps:
+            while (not terminated) and (not truncated):
                 # Convert observation to format expected by each trained agent
                 # Each agent was trained to pursue their specific target
                 
@@ -515,14 +534,12 @@ class ComprehensiveTrainer:
                 wrapped_obs_0 = {
                     "agent_position": obs["agent_position"],
                     "target_reached": obs["targets_reached"][0],  # Target 0 status
-                    "target_position": (self.grid_size - 1) * self.grid_size + (self.grid_size - 1)  # Bottom-right corner
                 }
                 
                 # For agent 1: create observation focused on target 1  
                 wrapped_obs_1 = {
                     "agent_position": obs["agent_position"],
                     "target_reached": obs["targets_reached"][1],  # Target 1 status
-                    "target_position": 0 * self.grid_size + (self.grid_size - 1)  # Top-right corner
                 }
                 
                 # Get actions from both agents pursuing their respective targets

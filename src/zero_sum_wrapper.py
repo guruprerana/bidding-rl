@@ -70,8 +70,7 @@ class ZeroSumBiddingWrapper(gym.Env):
         # Observation space: same as underlying environment but from perspective of both players
         self.observation_space = spaces.Dict({
             "agent_position": spaces.Discrete(grid_size * grid_size),
-            "target_reached": spaces.Discrete(2),  # Only track the target of interest
-            "target_position": spaces.Discrete(grid_size * grid_size)  # Position of the target
+            "target_reached": spaces.Discrete(2)  # Only track the target of interest
         })
         
         # Store target position for the protagonist
@@ -148,13 +147,9 @@ class ZeroSumBiddingWrapper(gym.Env):
     
     def _convert_observation(self, obs: Dict) -> Dict:
         """Convert BiddingGridworld observation to zero-sum format."""
-        # Flatten target position
-        target_pos_discrete = self.target_position[0] * self.env.grid_size + self.target_position[1]
-        
         return {
             "agent_position": obs["agent_position"],
-            "target_reached": obs["targets_reached"][self.target_agent_id],
-            "target_position": target_pos_discrete
+            "target_reached": obs["targets_reached"][self.target_agent_id]
         }
     
     def _convert_rewards(self, rewards: Dict) -> Dict:
@@ -193,6 +188,18 @@ class ZeroSumBiddingWrapper(gym.Env):
             print(f"Zero-Sum Game - Target Agent: {self.target_agent_id}")
             print(f"Target Position: {self.target_position}")
         return self.env.render(mode)
+    
+    def observation_to_state_key(self, observation: Dict) -> Tuple[int, int]:
+        """
+        Convert observation to a consistent state key tuple.
+        
+        Args:
+            observation: Observation dict with 'agent_position' and 'target_reached'
+            
+        Returns:
+            Tuple of (agent_position, target_reached) as integers
+        """
+        return (int(observation["agent_position"]), int(observation["target_reached"]))
     
     def close(self):
         """Close the environment."""

@@ -24,10 +24,12 @@ class ZeroSumQLearning:
         protagonist_action_space_size: int,
         adversary_action_space_size: int,
         observation_space_size: int,
+        bid_upper_bound: int,
+        wrapper,
         learning_rate: float = 0.1,
         discount_factor: float = 0.95,
         epsilon: float = 0.1,
-        epsilon_decay: float = 0.995,
+        epsilon_decay: float = 0.9995,
         epsilon_min: float = 0.01
     ):
         """
@@ -37,6 +39,8 @@ class ZeroSumQLearning:
             protagonist_action_space_size: Number of actions for protagonist
             adversary_action_space_size: Number of actions for adversary
             observation_space_size: Size of observation space
+            bid_upper_bound: Maximum bid value
+            wrapper: ZeroSumBiddingWrapper instance for state key generation
             learning_rate: Learning rate for Q-value updates
             discount_factor: Discount factor for future rewards
             epsilon: Initial epsilon for epsilon-greedy exploration
@@ -46,6 +50,8 @@ class ZeroSumQLearning:
         self.protagonist_actions = protagonist_action_space_size
         self.adversary_actions = adversary_action_space_size
         self.observation_space_size = observation_space_size
+        self.bid_upper_bound = bid_upper_bound
+        self.wrapper = wrapper
         
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
@@ -68,17 +74,9 @@ class ZeroSumQLearning:
         self.episode_count = 0
         self.step_count = 0
         
-    def _state_to_key(self, observation: Dict) -> str:
+    def _state_to_key(self, observation: Dict) -> Tuple[int, int]:
         """Convert observation to a hashable key for Q-table indexing."""
-        # Flatten the observation dictionary into a tuple
-        items = []
-        for key in sorted(observation.keys()):
-            value = observation[key]
-            if isinstance(value, np.ndarray):
-                items.append(tuple(value.flatten()))
-            else:
-                items.append(value)
-        return str(tuple(items))
+        return self.wrapper.observation_to_state_key(observation)
     
     def _action_to_index(self, action: Dict) -> Tuple[int, int]:
         """Convert action dictionary to action indices."""
@@ -88,8 +86,9 @@ class ZeroSumQLearning:
         adversary_action = action["adversary"]
         
         # Convert 2D action (direction, bid) to 1D index
-        prot_idx = protagonist_action["direction"] * (max(self.protagonist_actions // 4, 1)) + protagonist_action["bid"]
-        adv_idx = adversary_action["direction"] * (max(self.adversary_actions // 4, 1)) + adversary_action["bid"]
+        directions_per_bid = self.bid_upper_bound + 1
+        prot_idx = protagonist_action["direction"] * directions_per_bid + protagonist_action["bid"]
+        adv_idx = adversary_action["direction"] * directions_per_bid + adversary_action["bid"]
         
         return prot_idx, adv_idx
     
@@ -162,19 +161,13 @@ class ZeroSumQLearning:
                 protagonist_strategy = result.x[:m]
                 game_value = result.x[-1]
                 
-                # Extract adversary's strategy from dual variables
-                # The dual variables correspond to the inequality constraints
-                if hasattr(result, 'ineqlin') and result.ineqlin is not None:
-                    # Dual variables from inequality constraints
-                    adversary_strategy = result.ineqlin.marginals
-                    # Normalize to ensure it's a valid probability distribution
-                    if np.sum(adversary_strategy) > 0:
-                        adversary_strategy = adversary_strategy / np.sum(adversary_strategy)
-                    else:
-                        adversary_strategy = np.ones(n) / n
-                else:
-                    # Fallback: solve adversary's problem if dual not available
-                    adversary_strategy = self._solve_adversary_fallback(payoff_matrix)
+                # Always solve adversary's problem separately for robustness
+                # Dual variable extraction from scipy.optimize.linprog is unreliable
+                adversary_strategy = self._solve_adversary_fallback(payoff_matrix)
+                
+                # Normalize strategies to ensure they're valid probability distributions
+                protagonist_strategy = self._normalize_strategy(protagonist_strategy)
+                adversary_strategy = self._normalize_strategy(adversary_strategy)
                     
             else:
                 # Fallback to uniform strategies
@@ -235,12 +228,40 @@ class ZeroSumQLearning:
             )
             
             if result.success:
-                return result.x[:n]
+                adversary_strategy = result.x[:n]
+                return self._normalize_strategy(adversary_strategy)
             else:
                 return np.ones(n) / n
                 
         except Exception:
             return np.ones(n) / n
+    
+    def _normalize_strategy(self, strategy: np.ndarray) -> np.ndarray:
+        """
+        Normalize a strategy to ensure it's a valid probability distribution.
+        
+        Args:
+            strategy: Raw strategy vector that may have negative values or not sum to 1
+            
+        Returns:
+            Normalized strategy that sums to 1 and has no negative values
+        """
+        # Clip negative values to zero
+        strategy = np.maximum(strategy, 0.0)
+        
+        # If all values are zero, use uniform distribution
+        if np.sum(strategy) == 0:
+            return np.ones(len(strategy)) / len(strategy)
+        
+        # Normalize to sum to 1
+        strategy = strategy / np.sum(strategy)
+        
+        # Add small epsilon to avoid zero probabilities
+        epsilon = 1e-10
+        strategy = strategy + epsilon
+        strategy = strategy / np.sum(strategy)
+        
+        return strategy
     
     def get_action(self, observation: Dict, bid_upper_bound: int, training: bool = True) -> Dict:
         """
@@ -265,10 +286,14 @@ class ZeroSumQLearning:
             protagonist_strategy = self.protagonist_policy[state_key]
             adversary_strategy = self.adversary_policy[state_key]
             
+            # Normalize strategies as an extra safety check
+            protagonist_strategy = self._normalize_strategy(protagonist_strategy)
+            adversary_strategy = self._normalize_strategy(adversary_strategy)
+            
             prot_action = np.random.choice(self.protagonist_actions, p=protagonist_strategy)
             adv_action = np.random.choice(self.adversary_actions, p=adversary_strategy)
         
-        return self._index_to_action(prot_action, adv_action, bid_upper_bound)
+        return self._index_to_action(prot_action, adv_action, self.bid_upper_bound)
     
     def update(
         self, 
@@ -301,22 +326,22 @@ class ZeroSumQLearning:
             next_value = 0.0
         else:
             next_payoff_matrix = self.q_table[next_state_key]
-            prot_strategy, adv_strategy, game_value = self._solve_matrix_game(next_payoff_matrix)
+            _, _, game_value = self._solve_matrix_game(next_payoff_matrix)
             next_value = game_value
-            
-            # Update policies for next state
-            self.protagonist_policy[next_state_key] = prot_strategy
-            self.adversary_policy[next_state_key] = adv_strategy
-            self.value_function[next_state_key] = game_value
         
         # Q-learning update
         target = reward + self.discount_factor * next_value
         new_q = current_q + self.learning_rate * (target - current_q)
         self.q_table[state_key][prot_action_idx, adv_action_idx] = new_q
         
-        # Update current state's Nash equilibrium
+        # Update current state's Nash equilibrium after Q-table update
         current_payoff_matrix = self.q_table[state_key]
         prot_strategy, adv_strategy, game_value = self._solve_matrix_game(current_payoff_matrix)
+        
+        # Ensure strategies are valid probability distributions
+        prot_strategy = self._normalize_strategy(prot_strategy)
+        adv_strategy = self._normalize_strategy(adv_strategy)
+        
         self.protagonist_policy[state_key] = prot_strategy
         self.adversary_policy[state_key] = adv_strategy
         self.value_function[state_key] = game_value
@@ -418,6 +443,7 @@ if __name__ == "__main__":
         protagonist_action_space_size=protagonist_actions,
         adversary_action_space_size=adversary_actions,
         observation_space_size=observation_space_size,
+        bid_upper_bound=3,
         learning_rate=0.1,
         discount_factor=0.95,
         epsilon=0.3
