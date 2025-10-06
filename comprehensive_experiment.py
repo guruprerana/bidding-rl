@@ -1,9 +1,9 @@
 """
-Comprehensive training and evaluation script for Zero-Sum Q-Learning on BiddingGridworld.
+Comprehensive training and evaluation script for Zero-Sum DQN on BiddingGridworld.
 
 This script:
-1. Trains both agents using Zero-Sum Q-Learning
-2. Saves learned Q-tables and training logs
+1. Trains both agents using Zero-Sum DQN
+2. Saves learned models and training logs
 3. Records rollout videos/MP4s after training
 4. Loads both policies and makes them compete in the original environment
 5. Records and saves competition rollouts
@@ -22,22 +22,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from pathlib import Path
+import torch
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.bidding_gridworld import BiddingGridworld
 from src.zero_sum_wrapper import ZeroSumBiddingWrapper
-from src.zero_sum_qlearning import ZeroSumQLearning
+from src.zero_sum_dqn import ZeroSumDQN, ZeroSumDQNPolicy
 
 
 class ComprehensiveTrainer:
-    """Comprehensive trainer for Zero-Sum Q-Learning experiments."""
+    """Comprehensive trainer for Zero-Sum DQN experiments."""
     
     def __init__(self, base_log_dir: str = "logs", experiment_name: str = ""):
         """Initialize the trainer with timestamped logging directory."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_name = experiment_name if experiment_name else "3x3grid_10000_iters_exp7"
+        experiment_name = experiment_name if experiment_name else "3x3grid_10000_iters_dqn_exp1"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         
         # Create subdirectories
@@ -56,7 +57,7 @@ class ComprehensiveTrainer:
         # Training parameters
         self.grid_size = 3
         self.bid_upper_bound = 2
-        self.episodes = 10000
+        self.training_timesteps = 10000
         self.learning_rate = 0.05
         self.discount_factor = 0.95
         self.epsilon = 0.5
@@ -70,19 +71,19 @@ class ComprehensiveTrainer:
         config = {
             "grid_size": self.grid_size,
             "bid_upper_bound": self.bid_upper_bound,
-            "episodes": self.episodes,
+            "training_timesteps": self.training_timesteps,
             "learning_rate": self.learning_rate,
             "discount_factor": self.discount_factor,
             "epsilon": self.epsilon,
             "timestamp": datetime.now().isoformat(),
-            "description": "Zero-Sum Q-Learning training and competition experiment"
+            "description": "Zero-Sum DQN training and competition experiment"
         }
         
         with open(self.log_dir / "config.json", 'w') as f:
             json.dump(config, f, indent=2)
     
-    def train_agent(self, target_agent_id: int) -> Tuple[ZeroSumQLearning, List[float], Dict]:
-        """Train a single agent using Zero-Sum Q-Learning."""
+    def train_agent(self, target_agent_id: int) -> Tuple[ZeroSumDQN, List[float], Dict]:
+        """Train a single agent using Zero-Sum DQN."""
         print(f"\n{'='*60}")
         print(f"Training Agent {target_agent_id} (Target: {target_agent_id})")
         print(f"{'='*60}")
@@ -98,19 +99,30 @@ class ComprehensiveTrainer:
         
         # Calculate action space size
         action_space_size = 4 * (self.bid_upper_bound + 1)
-        observation_space_size = self.grid_size * self.grid_size * 2
         
-        # Create Q-learning agent
-        agent = ZeroSumQLearning(
-            protagonist_action_space_size=action_space_size,
-            adversary_action_space_size=action_space_size,
-            observation_space_size=observation_space_size,
-            bid_upper_bound=self.bid_upper_bound,
-            wrapper=env,
+        # Network architecture parameters
+        policy_kwargs = {
+            "net_arch": [64, 64],  # Two hidden layers with 128 units each
+            "activation_fn": torch.nn.ReLU,
+            "normalize_images": False
+        }
+        
+        # Create DQN agent
+        agent = ZeroSumDQN(
+            policy=ZeroSumDQNPolicy,
+            env=env,
+            protagonist_actions=action_space_size,
+            adversary_actions=action_space_size,
             learning_rate=self.learning_rate,
-            discount_factor=self.discount_factor,
-            epsilon=self.epsilon,
-            epsilon_min=self.min_epsilon,
+            gamma=self.discount_factor,
+            exploration_initial_eps=self.epsilon,
+            exploration_final_eps=self.min_epsilon,
+            learning_starts=1000,
+            batch_size=32,
+            buffer_size=50000,
+            target_update_interval=1000,
+            policy_kwargs=policy_kwargs,
+            verbose=1
         )
         
         # Training tracking
@@ -119,10 +131,15 @@ class ComprehensiveTrainer:
         success_rates = []
         training_log = []
         
-        print(f"Starting training for {self.episodes} episodes...")
+        print(f"Starting training for {self.training_timesteps} timesteps...")
         start_time = time.time()
-        
-        for episode in range(self.episodes):
+
+        # Learn using the DQN's learn method
+        agent.learn(total_timesteps=self.training_timesteps)
+
+        # Evaluate trained agent to get episode rewards for plotting
+        num_eval_episodes = 5
+        for episode in range(num_eval_episodes):
             obs, info = env.reset()
             total_reward = 0
             steps = 0
@@ -130,17 +147,15 @@ class ComprehensiveTrainer:
             truncated = False
             
             while (not terminated) and (not truncated):
-                action = agent.get_action(obs, self.bid_upper_bound, training=True)
-                next_obs, rewards, terminated, truncated, info = env.step(action)
+                action, _ = agent.predict(obs, deterministic=True)
                 
-                protagonist_reward = rewards["protagonist"]
-                agent.update(obs, action, protagonist_reward, next_obs, terminated)
+                next_obs, reward, terminated, truncated, info = env.step(action[0])
                 
+                protagonist_reward = reward
                 total_reward += protagonist_reward
                 obs = next_obs
                 steps += 1
             
-            agent.end_episode()
             episode_rewards.append(total_reward)
             episode_lengths.append(steps)
             
@@ -150,27 +165,25 @@ class ComprehensiveTrainer:
             success_rate = sum(1 for r in recent_rewards if r > 5) / len(recent_rewards)
             success_rates.append(success_rate)
             
-            # Log progress
-            if (episode + 1) % 100 == 0:
-                stats = agent.get_stats()
-                avg_reward = np.mean(episode_rewards[-100:])
-                avg_length = np.mean(episode_lengths[-100:])
-                
-                log_entry = {
-                    "episode": episode + 1,
-                    "avg_reward": avg_reward,
-                    "avg_length": avg_length,
-                    "success_rate": success_rate,
-                    "epsilon": stats["epsilon"],
-                    "q_table_size": stats["q_table_size"],
-                    "elapsed_time": time.time() - start_time
-                }
-                training_log.append(log_entry)
-                
-                print(f"Episode {episode + 1}/{self.episodes}: "
-                      f"Avg Reward: {avg_reward:.2f}, "
-                      f"Success Rate: {success_rate:.2%}, "
-                      f"Q-table size: {stats['q_table_size']}")
+            # Log progress every episode during evaluation
+            avg_reward = np.mean(episode_rewards)
+            avg_length = np.mean(episode_lengths)
+
+            log_entry = {
+                "episode": episode + 1,
+                "avg_reward": avg_reward,
+                "avg_length": avg_length,
+                "success_rate": success_rate,
+                "exploration_rate": agent.exploration_rate if hasattr(agent, 'exploration_rate') else 0.0,
+                "num_timesteps": agent.num_timesteps if hasattr(agent, 'num_timesteps') else 0,
+                "elapsed_time": time.time() - start_time
+            }
+            training_log.append(log_entry)
+
+            print(f"Eval Episode {episode + 1}/{num_eval_episodes}: "
+                  f"Reward: {total_reward:.2f}, "
+                  f"Avg Reward: {avg_reward:.2f}, "
+                  f"Success Rate: {success_rate:.2%}")
         
         env.close()
         
@@ -187,7 +200,11 @@ class ComprehensiveTrainer:
             "episode_rewards": episode_rewards,
             "episode_lengths": episode_lengths,
             "success_rates": success_rates,
-            "final_stats": agent.get_stats(),
+            "final_stats": {
+                "num_timesteps": agent.num_timesteps if hasattr(agent, 'num_timesteps') else 0,
+                "exploration_rate": agent.exploration_rate if hasattr(agent, 'exploration_rate') else 0.0,
+                "learning_rate": agent.learning_rate if hasattr(agent, 'learning_rate') else self.learning_rate
+            },
             "training_time": training_time
         }
         
@@ -197,10 +214,10 @@ class ComprehensiveTrainer:
         
         return agent, episode_rewards, metrics
     
-    def save_model(self, agent: ZeroSumQLearning, target_agent_id: int):
+    def save_model(self, agent: ZeroSumDQN, target_agent_id: int):
         """Save trained model."""
-        model_path = self.models_dir / f"agent_{target_agent_id}_model.pkl"
-        agent.save_model(str(model_path))
+        model_path = self.models_dir / f"agent_{target_agent_id}_model.zip"
+        agent.save(str(model_path))
         print(f"Model saved: {model_path}")
     
     def plot_training_results(self, rewards_0: List[float], rewards_1: List[float]):
@@ -265,7 +282,7 @@ class ComprehensiveTrainer:
         
         print(f"Training plots saved: {plot_path}")
     
-    def record_rollout(self, agent: ZeroSumQLearning, target_agent_id: int, 
+    def record_rollout(self, agent: ZeroSumDQN, target_agent_id: int, 
                       num_episodes: int = 5, filename_prefix: str = "rollout"):
         """Record rollout videos/MP4s for a trained agent."""
         print(f"Recording rollouts for Agent {target_agent_id}...")
@@ -292,39 +309,60 @@ class ComprehensiveTrainer:
             
             # Record episode
             while (not terminated) and (not truncated):
-                # Extract agent position for visualization
-                agent_pos = obs["agent_position"]
-                row = agent_pos // self.grid_size
-                col = agent_pos % self.grid_size
-                
-                # Handle zero-sum wrapper observation format
-                if "targets_reached" in obs:
-                    # Original environment format (array)
-                    targets_reached = obs["targets_reached"].copy()
-                else:
-                    # Zero-sum wrapper format (scalar for single target)
-                    targets_reached = [0, 0]  # Initialize both targets as not reached
-                    targets_reached[target_agent_id] = obs["target_reached"]
-                
+                # obs is now a numpy array: [agent_row, agent_col, target_row, target_col, target_reached]
+                agent_row_norm = obs[0]
+                agent_col_norm = obs[1]
+                target_reached = int(obs[4])
+
+                # Denormalize positions
+                denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+                row = int(agent_row_norm * denom)
+                col = int(agent_col_norm * denom)
+
+                # For visualization, track both targets
+                targets_reached = [0, 0]
+                targets_reached[target_agent_id] = target_reached
+
                 states.append({
                     "agent_position": (row, col),
                     "targets_reached": targets_reached,
                     "step": steps
                 })
                 
-                action = agent.get_action(obs, self.bid_upper_bound, training=False)
+                action_idx, _ = agent.predict(obs, deterministic=True)
+                action = action_idx[0]  # Extract the discrete action
                 actions.append(action)
                 
-                next_obs, episode_rewards, terminated, truncated, info = env.step(action)
-                rewards.append(episode_rewards["protagonist"])
-                total_reward += episode_rewards["protagonist"]
+                next_obs, episode_reward, terminated, truncated, info = env.step(action)
+                rewards.append(episode_reward)
+                total_reward += episode_reward
                 
                 # Store step details including bids and actions for visualization
+                # Convert discrete action back to readable format using wrapper's conversion
+                if hasattr(env, '_discrete_to_dict_action'):
+                    action_dict = env._discrete_to_dict_action(action)
+                    prot_action = action_dict["protagonist"]
+                    adv_action = action_dict["adversary"] 
+                else:
+                    # Fallback - reconstruct from discrete action
+                    actions_per_player = env.actions_per_player
+                    prot_idx = action // actions_per_player
+                    adv_idx = action % actions_per_player
+                    directions_per_bid = env._bid_upper_bound + 1
+                    prot_action = {
+                        "direction": prot_idx // directions_per_bid,
+                        "bid": prot_idx % directions_per_bid
+                    }
+                    adv_action = {
+                        "direction": adv_idx // directions_per_bid,
+                        "bid": adv_idx % directions_per_bid
+                    }
+                
                 step_details.append({
                     "bids": info.get("bids", {}),
                     "winning_agent": info.get("winning_agent", -1),
-                    "protagonist_action": action.get("protagonist", {}),
-                    "adversary_action": action.get("adversary", {})
+                    "protagonist_action": prot_action,
+                    "adversary_action": adv_action
                 })
                 
                 obs = next_obs
@@ -354,7 +392,8 @@ class ComprehensiveTrainer:
     
     def _direction_to_string(self, direction: int) -> str:
         """Convert direction number to readable string."""
-        directions = ["Up", "Right", "Down", "Left"]
+        # Must match BiddingGridworld: 0=Left, 1=Right, 2=Up, 3=Down
+        directions = ["Left", "Right", "Up", "Down"]
         return directions[direction] if 0 <= direction <= 3 else "Unknown"
     
     def create_rollout_mp4(self, episode_data: Dict, mp4_path: Path):
@@ -450,50 +489,17 @@ class ComprehensiveTrainer:
         
         plt.close()
     
-    def load_models(self) -> Tuple[ZeroSumQLearning, ZeroSumQLearning]:
+    def load_models(self) -> Tuple[ZeroSumDQN, ZeroSumDQN]:
         """Load both trained models."""
         print("Loading trained models...")
         
-        # Create dummy agents with same parameters
-        action_space_size = 4 * (self.bid_upper_bound + 1)
-        observation_space_size = self.grid_size * self.grid_size * 2
-        
-        # Create dummy wrapper instances for loading
-        from src.zero_sum_wrapper import ZeroSumBiddingWrapper
-        dummy_wrapper_0 = ZeroSumBiddingWrapper(
-            target_agent_id=0,
-            grid_size=self.grid_size,
-            bid_upper_bound=self.bid_upper_bound
-        )
-        dummy_wrapper_1 = ZeroSumBiddingWrapper(
-            target_agent_id=1,
-            grid_size=self.grid_size,
-            bid_upper_bound=self.bid_upper_bound
-        )
-        
-        agent_0 = ZeroSumQLearning(
-            protagonist_action_space_size=action_space_size,
-            adversary_action_space_size=action_space_size,
-            observation_space_size=observation_space_size,
-            bid_upper_bound=self.bid_upper_bound,
-            wrapper=dummy_wrapper_0
-        )
-        
-        agent_1 = ZeroSumQLearning(
-            protagonist_action_space_size=action_space_size,
-            adversary_action_space_size=action_space_size,
-            observation_space_size=observation_space_size,
-            bid_upper_bound=self.bid_upper_bound,
-            wrapper=dummy_wrapper_1
-        )
-        
-        # Load models
-        agent_0.load_model(str(self.models_dir / "agent_0_model.pkl"))
-        agent_1.load_model(str(self.models_dir / "agent_1_model.pkl"))
+        # Load models using DQN.load
+        agent_0 = ZeroSumDQN.load(str(self.models_dir / "agent_0_model.zip"))
+        agent_1 = ZeroSumDQN.load(str(self.models_dir / "agent_1_model.zip"))
         
         return agent_0, agent_1
     
-    def run_competition(self, agent_0: ZeroSumQLearning, agent_1: ZeroSumQLearning, 
+    def run_competition(self, agent_0: ZeroSumDQN, agent_1: ZeroSumDQN, 
                        num_episodes: int = 10):
         """Run cooperative evaluation where both agents try to reach their respective targets."""
         print(f"\n{'='*60}")
@@ -527,27 +533,47 @@ class ComprehensiveTrainer:
             truncated = False
             
             while (not terminated) and (not truncated):
-                # Convert observation to format expected by each trained agent
-                # Each agent was trained to pursue their specific target
-                
+                # obs from BiddingGridworld is 8-element array:
+                # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm,
+                #  target1_row_norm, target1_col_norm, target0_reached, target1_reached]
+
                 # For agent 0: create observation focused on target 0
-                wrapped_obs_0 = {
-                    "agent_position": obs["agent_position"],
-                    "target_reached": obs["targets_reached"][0],  # Target 0 status
-                }
-                
-                # For agent 1: create observation focused on target 1  
-                wrapped_obs_1 = {
-                    "agent_position": obs["agent_position"],
-                    "target_reached": obs["targets_reached"][1],  # Target 1 status
-                }
+                # Format: [agent_row, agent_col, target_row, target_col, target_reached]
+                wrapped_obs_0 = np.array([
+                    obs[0],  # agent_row_norm
+                    obs[1],  # agent_col_norm
+                    obs[2],  # target0_row_norm
+                    obs[3],  # target0_col_norm
+                    obs[6],  # target0_reached
+                ], dtype=np.float32)
+
+                # For agent 1: create observation focused on target 1
+                wrapped_obs_1 = np.array([
+                    obs[0],  # agent_row_norm
+                    obs[1],  # agent_col_norm
+                    obs[4],  # target1_row_norm
+                    obs[5],  # target1_col_norm
+                    obs[7],  # target1_reached
+                ], dtype=np.float32)
                 
                 # Get actions from both agents pursuing their respective targets
-                action_0_data = agent_0.get_action(wrapped_obs_0, self.bid_upper_bound, training=False)
-                agent_0_action = action_0_data["protagonist"]  # Agent 0 pursuing target 0
+                action_0_idx, _ = agent_0.predict(wrapped_obs_0, deterministic=True)
+                action_1_idx, _ = agent_1.predict(wrapped_obs_1, deterministic=True)
                 
-                action_1_data = agent_1.get_action(wrapped_obs_1, self.bid_upper_bound, training=False)
-                agent_1_action = action_1_data["protagonist"]  # Agent 1 pursuing target 1
+                # Convert action indices to direction/bid format
+                directions_per_bid = self.bid_upper_bound + 1
+                
+                # Agent 0 action
+                prot_idx_0 = action_0_idx[0] // agent_0.adversary_actions
+                prot_direction_0 = prot_idx_0 // directions_per_bid
+                prot_bid_0 = prot_idx_0 % directions_per_bid
+                agent_0_action = {"direction": prot_direction_0, "bid": prot_bid_0}
+                
+                # Agent 1 action  
+                prot_idx_1 = action_1_idx[0] // agent_1.adversary_actions
+                prot_direction_1 = prot_idx_1 // directions_per_bid
+                prot_bid_1 = prot_idx_1 % directions_per_bid
+                agent_1_action = {"direction": prot_direction_1, "bid": prot_bid_1}
                 
                 # Format actions for original environment
                 action = {
@@ -557,32 +583,40 @@ class ComprehensiveTrainer:
                 
                 # Execute step
                 next_obs, rewards, terminated, truncated, step_info = env.step(action)
-                
+
+                # Extract position and target status from observation array
+                # obs: [agent_row_norm, agent_col_norm, t0_row, t0_col, t1_row, t1_col, t0_reached, t1_reached]
+                denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+                agent_row = int(obs[0] * denom)
+                agent_col = int(obs[1] * denom)
+                agent_position = agent_row * self.grid_size + agent_col
+                targets_reached = [int(obs[6]), int(obs[7])]
+
                 # Log step details
                 step_detail = {
                     "step": steps,
-                    "agent_pos": obs["agent_position"],
-                    "targets_reached": obs["targets_reached"].copy(),
+                    "agent_pos": agent_position,
+                    "targets_reached": targets_reached.copy(),
                     "actions": action,
                     "rewards": rewards,
                     "winning_agent": step_info["winning_agent"],
                     "bids": step_info["bids"],
                     "targets_status": {
-                        "target_0_reached": bool(obs["targets_reached"][0]),
-                        "target_1_reached": bool(obs["targets_reached"][1])
+                        "target_0_reached": bool(targets_reached[0]),
+                        "target_1_reached": bool(targets_reached[1])
                     }
                 }
-                
+
                 episode_log["states"].append(obs.copy())
                 episode_log["actions"].append(action)
                 episode_log["rewards"].append(rewards)
                 episode_log["step_details"].append(step_detail)
-                
+
                 total_rewards["agent_0"] += rewards["agent_0"]
                 total_rewards["agent_1"] += rewards["agent_1"]
-                
+
                 # Show which agent wins the bidding and current target status
-                target_status = f"Targets: 0={'✓' if obs['targets_reached'][0] else '✗'}, 1={'✓' if obs['targets_reached'][1] else '✗'}"
+                target_status = f"Targets: 0={'✓' if targets_reached[0] else '✗'}, 1={'✓' if targets_reached[1] else '✗'}"
                 print(f"  Step {steps + 1}: Agent {step_info['winning_agent']} wins bid "
                       f"(Bids: 0={step_info['bids']['agent_0']}, 1={step_info['bids']['agent_1']}) "
                       f"| {target_status} | Rewards: {rewards}")
@@ -594,16 +628,17 @@ class ComprehensiveTrainer:
                     break
             
             # Episode summary - success is measured by target achievement
-            targets_reached = obs["targets_reached"]
-            both_targets_reached = targets_reached[0] == 1 and targets_reached[1] == 1
-            agent_0_success = targets_reached[0] == 1
-            agent_1_success = targets_reached[1] == 1
+            # Extract final target status from observation array
+            final_targets_reached = [int(obs[6]), int(obs[7])]
+            both_targets_reached = final_targets_reached[0] == 1 and final_targets_reached[1] == 1
+            agent_0_success = final_targets_reached[0] == 1
+            agent_1_success = final_targets_reached[1] == 1
             
             episode_log["total_rewards"] = total_rewards
             episode_log["both_targets_reached"] = both_targets_reached
             episode_log["agent_0_success"] = agent_0_success
             episode_log["agent_1_success"] = agent_1_success
-            episode_log["final_targets"] = targets_reached.copy()
+            episode_log["final_targets"] = final_targets_reached.copy()
             episode_log["steps"] = steps
             episode_log["cooperation_outcome"] = "success" if both_targets_reached else "partial" if (agent_0_success or agent_1_success) else "failure"
             
@@ -686,16 +721,21 @@ class ComprehensiveTrainer:
     def create_competition_mp4(self, episode_data: Dict, mp4_path: Path):
         """Create animated MP4 of cooperative episode."""
         fig, ax = plt.subplots(figsize=(10, 8))
-        
+
         def animate(frame):
             ax.clear()
-            
+
             if frame >= len(episode_data["states"]):
                 return
-            
+
             state = episode_data["states"][frame]
-            agent_pos = state["agent_position"]
-            targets_reached = state["targets_reached"]
+            # state is now a numpy array from BiddingGridworld
+            # [agent_row_norm, agent_col_norm, t0_row, t0_col, t1_row, t1_col, t0_reached, t1_reached]
+            denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+            agent_row = int(state[0] * denom)
+            agent_col = int(state[1] * denom)
+            agent_pos = agent_row * self.grid_size + agent_col
+            targets_reached = [int(state[6]), int(state[7])]
             
             if frame < len(episode_data["step_details"]):
                 step_detail = episode_data["step_details"][frame]
@@ -788,7 +828,7 @@ class ComprehensiveTrainer:
     def run_full_experiment(self):
         """Run the complete experiment pipeline."""
         print(f"\n{'='*80}")
-        print("STARTING COMPREHENSIVE ZERO-SUM Q-LEARNING EXPERIMENT")
+        print("STARTING COMPREHENSIVE ZERO-SUM DQN EXPERIMENT")
         print(f"{'='*80}")
         
         start_time = time.time()
@@ -823,7 +863,7 @@ class ComprehensiveTrainer:
             "experiment_completed": True,
             "total_time": total_time,
             "log_directory": str(self.log_dir),
-            "training_episodes": self.episodes,
+            "training_timesteps": self.training_timesteps,
             "cooperation_episodes": 5,
             "agent_0_final_performance": metrics_0["final_stats"],
             "agent_1_final_performance": metrics_1["final_stats"],

@@ -55,23 +55,21 @@ class ZeroSumBiddingWrapper(gym.Env):
             render_mode=render_mode
         )
         
-        # Action space: each player submits direction and bid
-        self.action_space = spaces.Dict({
-            "protagonist": spaces.Dict({
-                "direction": spaces.Discrete(4),
-                "bid": spaces.Discrete(bid_upper_bound + 1)
-            }),
-            "adversary": spaces.Dict({
-                "direction": spaces.Discrete(4),
-                "bid": spaces.Discrete(bid_upper_bound + 1)
-            })
-        })
+        # Store bid bound for action conversion
+        self._bid_upper_bound = bid_upper_bound
+        
+        # Action space: flattened for DQN compatibility
+        # Each player has 4 directions * (bid_upper_bound + 1) bids possible actions
+        actions_per_player = 4 * (bid_upper_bound + 1)
+        # Total action space is all combinations of protagonist and adversary actions
+        total_actions = actions_per_player * actions_per_player
+        self.action_space = spaces.Discrete(total_actions)
+        
+        # Store for action conversion
+        self.actions_per_player = actions_per_player
         
         # Observation space: same as underlying environment but from perspective of both players
-        self.observation_space = spaces.Dict({
-            "agent_position": spaces.Discrete(grid_size * grid_size),
-            "target_reached": spaces.Discrete(2)  # Only track the target of interest
-        })
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(5,))
         
         # Store target position for the protagonist
         if self.target_agent_id == 0:
@@ -100,13 +98,13 @@ class ZeroSumBiddingWrapper(gym.Env):
     
     def step(
         self, 
-        action: Dict
+        action: int
     ) -> Tuple[Dict, Dict, bool, bool, Dict]:
         """
         Execute one step in the zero-sum game.
         
         Args:
-            action: Dictionary with 'protagonist' and 'adversary' actions
+            action: Discrete action index
         
         Returns:
             observation: Converted observation
@@ -115,25 +113,51 @@ class ZeroSumBiddingWrapper(gym.Env):
             truncated: Whether episode was truncated
             info: Additional information
         """
+        # Convert discrete action to dict format
+        action_dict = self._discrete_to_dict_action(action)
+            
         # Convert zero-sum actions to BiddingGridworld format
-        bidding_action = self._convert_action(action)
+        bidding_action = self._convert_action(action_dict)
         
         # Execute step in underlying environment
         obs, rewards, terminated, truncated, info = self.env.step(bidding_action)
         
-        # Convert to zero-sum rewards
-        zero_sum_rewards = self._convert_rewards(rewards)
+        # Convert to zero-sum rewards (return scalar reward for protagonist)
+        protagonist_reward = rewards[f"agent_{self.target_agent_id}"]
         
         # Convert observation and info
         zero_sum_obs = self._convert_observation(obs)
         zero_sum_info = self._convert_info(info)
         
+        # Add detailed rewards to info for analysis
+        zero_sum_info["rewards"] = {
+            "protagonist": protagonist_reward,
+            "adversary": -protagonist_reward
+        }
+        
         # Termination condition: only when protagonist's target is reached
         # (we ignore the other target for this zero-sum game)
-        target_reached = obs["targets_reached"][self.target_agent_id] == 1
-        terminated = target_reached
+        # target_reached = obs["targets_reached"][self.target_agent_id] == 1
+        # terminated = target_reached
         
-        return zero_sum_obs, zero_sum_rewards, terminated, truncated, zero_sum_info
+        return zero_sum_obs, protagonist_reward, terminated, truncated, zero_sum_info
+    
+    def _discrete_to_dict_action(self, action: int) -> Dict:
+        """Convert discrete action index to dict format."""
+        # Extract protagonist and adversary action indices
+        prot_action_idx = action // self.actions_per_player
+        adv_action_idx = action % self.actions_per_player
+        
+        # Convert each action index to direction and bid
+        def idx_to_direction_bid(idx):
+            direction = idx // (self._bid_upper_bound + 1)
+            bid = idx % (self._bid_upper_bound + 1)
+            return {"direction": direction, "bid": bid}
+        
+        return {
+            "protagonist": idx_to_direction_bid(prot_action_idx),
+            "adversary": idx_to_direction_bid(adv_action_idx)
+        }
     
     def _convert_action(self, action: Dict) -> Dict:
         """Convert zero-sum action format to BiddingGridworld format."""
@@ -145,25 +169,32 @@ class ZeroSumBiddingWrapper(gym.Env):
         
         return bidding_action
     
-    def _convert_observation(self, obs: Dict) -> Dict:
+    def _convert_observation(self, obs):
         """Convert BiddingGridworld observation to zero-sum format."""
-        return {
-            "agent_position": obs["agent_position"],
-            "target_reached": obs["targets_reached"][self.target_agent_id]
-        }
-    
-    def _convert_rewards(self, rewards: Dict) -> Dict:
-        """Convert BiddingGridworld rewards to zero-sum format."""
-        protagonist_reward = rewards[f"agent_{self.target_agent_id}"]
-        
-        # Pure zero-sum: adversary reward is simply negative of protagonist reward
-        adversary_reward = -protagonist_reward
-        
-        return {
-            "protagonist": protagonist_reward,
-            "adversary": adversary_reward
-        }
-    
+        # obs format from BiddingGridworld (8 elements):
+        # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm,
+        #  target1_row_norm, target1_col_norm, target0_reached, target1_reached]
+
+        # Extract relevant target position based on target_agent_id
+        if self.target_agent_id == 0:
+            target_row = obs[2]
+            target_col = obs[3]
+            target_reached = obs[6]
+        else:
+            target_row = obs[4]
+            target_col = obs[5]
+            target_reached = obs[7]
+
+        # Return observation focused on protagonist's target
+        # [agent_row, agent_col, target_row, target_col, target_reached]
+        return np.array([
+            obs[0],  # agent_row_norm
+            obs[1],  # agent_col_norm
+            target_row,
+            target_col,
+            target_reached
+        ], dtype=np.float32)
+
     def _convert_info(self, info: Dict) -> Dict:
         """Convert BiddingGridworld info to zero-sum format."""
         # Add distance to target for the protagonist
@@ -188,19 +219,7 @@ class ZeroSumBiddingWrapper(gym.Env):
             print(f"Zero-Sum Game - Target Agent: {self.target_agent_id}")
             print(f"Target Position: {self.target_position}")
         return self.env.render(mode)
-    
-    def observation_to_state_key(self, observation: Dict) -> Tuple[int, int]:
-        """
-        Convert observation to a consistent state key tuple.
-        
-        Args:
-            observation: Observation dict with 'agent_position' and 'target_reached'
-            
-        Returns:
-            Tuple of (agent_position, target_reached) as integers
-        """
-        return (int(observation["agent_position"]), int(observation["target_reached"]))
-    
+
     def close(self):
         """Close the environment."""
         return self.env.close()

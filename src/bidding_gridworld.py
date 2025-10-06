@@ -63,11 +63,10 @@ class BiddingGridworld(gym.Env):
             })
         })
         
-        # Observation space: discrete position of shared agent and discrete flags for targets reached
-        self.observation_space = spaces.Dict({
-            "agent_position": spaces.Discrete(grid_size * grid_size),  # Flattened grid position
-            "targets_reached": spaces.MultiDiscrete([2, 2])  # Two binary flags for targets
-        })
+        # Observation space: Box vector for NN policies (normalized to [0, 1])
+        # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm,
+        #  target1_row_norm, target1_col_norm, target0_reached, target1_reached]
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(8,), dtype=np.float32)
         
         # Initialize environment state
         self.reset()
@@ -76,7 +75,7 @@ class BiddingGridworld(gym.Env):
         self, 
         seed: Optional[int] = None, 
         options: Optional[Dict] = None
-    ) -> Tuple[Dict, Dict]:
+    ) -> Tuple[np.ndarray, Dict]:
         """Reset the environment to initial state."""
         super().reset(seed=seed)
         
@@ -106,7 +105,7 @@ class BiddingGridworld(gym.Env):
         
         return observation, info
     
-    def step(self, action: Dict) -> Tuple[Dict, Dict, bool, bool, Dict]:
+    def step(self, action: Dict) -> Tuple[np.ndarray, Dict, bool, bool, Dict]:
         """
         Execute one step in the environment.
         
@@ -169,8 +168,8 @@ class BiddingGridworld(gym.Env):
         rewards = self._calculate_rewards(bid_0, bid_1, winning_agent, target_0_just_reached, target_1_just_reached)
         
         # Check termination conditions
-        terminated = bool(np.all(self.targets_reached == 1))  # Both targets reached
-        truncated = self.step_count >= self.max_steps
+        # terminated = bool(np.all(self.targets_reached == 1))  # Both targets reached
+        terminated = truncated = self.step_count >= self.max_steps
         
         observation = self._get_observation()
         info = self._get_info()
@@ -222,15 +221,28 @@ class BiddingGridworld(gym.Env):
         
         return rewards
     
-    def _get_observation(self) -> Dict:
-        """Get current observation."""
-        # Convert 2D position to flattened discrete position
-        agent_pos_discrete = self.agent_position[0] * self.grid_size + self.agent_position[1]
-        
-        return {
-            "agent_position": agent_pos_discrete,
-            "targets_reached": self.targets_reached.copy()
-        }
+    def _get_observation(self) -> np.ndarray:
+        """Get current observation as a normalized vector in [0, 1]."""
+        # Normalize positions to [0,1]; guard division for grid_size==1
+        denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+        agent_row_norm = float(self.agent_position[0]) / denom
+        agent_col_norm = float(self.agent_position[1]) / denom
+        t0_row_norm = float(self.target_0_position[0]) / denom
+        t0_col_norm = float(self.target_0_position[1]) / denom
+        t1_row_norm = float(self.target_1_position[0]) / denom
+        t1_col_norm = float(self.target_1_position[1]) / denom
+
+        obs = np.array([
+            agent_row_norm,
+            agent_col_norm,
+            t0_row_norm,
+            t0_col_norm,
+            t1_row_norm,
+            t1_col_norm,
+            float(self.targets_reached[0]),
+            float(self.targets_reached[1]),
+        ], dtype=np.float32)
+        return obs
     
     def _get_info(self) -> Dict:
         """Get additional information."""
@@ -312,7 +324,7 @@ if __name__ == "__main__":
     
     # Reset environment
     obs, info = env.reset(seed=42)
-    print("Initial observation:")
+    print("Initial observation (Box vector):")
     print(obs)
     env.render()
     
