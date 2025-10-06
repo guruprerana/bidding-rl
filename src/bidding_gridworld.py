@@ -22,6 +22,8 @@ class BiddingGridworld(gym.Env):
     def __init__(
         self,
         grid_size: int = 10,
+        num_agents: int = 2,
+        target_positions: Optional[List[Tuple[int, int]]] = None,
         bid_upper_bound: int = 10,
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
@@ -29,17 +31,32 @@ class BiddingGridworld(gym.Env):
     ):
         """
         Initialize the BiddingGridworld environment.
-        
+
         Args:
             grid_size: Size of the square gridworld (default: 10)
+            num_agents: Number of agents/targets (default: 2)
+            target_positions: Optional list of (row, col) tuples for target positions.
+                            If None, random positions will be assigned. (default: None)
             bid_upper_bound: Maximum bid value (default: 10)
             bid_penalty: Penalty multiplier for bids (default: 0.1)
             target_reward: Reward for reaching target (default: 10.0)
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
-        
+
+        assert num_agents >= 2, "Must have at least 2 agents"
+
+        if target_positions is not None:
+            assert len(target_positions) == num_agents, \
+                f"target_positions must have {num_agents} positions, got {len(target_positions)}"
+            for pos in target_positions:
+                assert len(pos) == 2, f"Each position must be (row, col), got {pos}"
+                assert 0 <= pos[0] < grid_size and 0 <= pos[1] < grid_size, \
+                    f"Position {pos} out of bounds for grid_size {grid_size}"
+
         self.grid_size = grid_size
+        self.num_agents = num_agents
+        self.initial_target_positions = target_positions  # Store for reset
         self.bid_upper_bound = bid_upper_bound
         self.bid_penalty = bid_penalty
         self.target_reward = target_reward
@@ -53,20 +70,18 @@ class BiddingGridworld(gym.Env):
         # - direction: discrete action (0-3 for L,R,U,D)
         # - bid: integer value (0 to bid_upper_bound)
         self.action_space = spaces.Dict({
-            "agent_0": spaces.Dict({
-                "direction": spaces.Discrete(4),
-                "bid": spaces.Discrete(bid_upper_bound + 1)
-            }),
-            "agent_1": spaces.Dict({
+            f"agent_{i}": spaces.Dict({
                 "direction": spaces.Discrete(4),
                 "bid": spaces.Discrete(bid_upper_bound + 1)
             })
+            for i in range(num_agents)
         })
         
         # Observation space: Box vector for NN policies (normalized to [0, 1])
-        # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm,
-        #  target1_row_norm, target1_col_norm, target0_reached, target1_reached]
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(8,), dtype=np.float32)
+        # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ..., target0_reached, target1_reached, ...]
+        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags)
+        obs_dim = 2 + 2 * num_agents + num_agents
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
         
         # Initialize environment state
         self.reset()
@@ -85,16 +100,24 @@ class BiddingGridworld(gym.Env):
         
         # Initialize positions
         self.agent_position = np.array([0, 0], dtype=np.int32)
-        
-        # Place targets at different locations to create interesting dynamics
-        # Target 0 (for agent 0) - bottom right corner
-        self.target_0_position = np.array([self.grid_size-1, self.grid_size-1], dtype=np.int32)
-        
-        # Target 1 (for agent 1) - top right corner
-        self.target_1_position = np.array([0, self.grid_size-1], dtype=np.int32)
-        
+
+        # Place targets - use specified positions or random
+        self.target_positions = []
+        if self.initial_target_positions is not None:
+            # Use specified positions
+            for pos in self.initial_target_positions:
+                self.target_positions.append(np.array(pos, dtype=np.int32))
+        else:
+            # Generate random unique positions for targets
+            available_positions = [(r, c) for r in range(self.grid_size)
+                                 for c in range(self.grid_size)
+                                 if (r, c) != (0, 0)]  # Exclude agent start position
+            selected_positions = random.sample(available_positions, self.num_agents)
+            for pos in selected_positions:
+                self.target_positions.append(np.array(pos, dtype=np.int32))
+
         # Track which targets have been reached
-        self.targets_reached = np.array([0, 0], dtype=np.int32)
+        self.targets_reached = np.zeros(self.num_agents, dtype=np.int32)
         
         # Step counter
         self.step_count = 0
@@ -121,51 +144,38 @@ class BiddingGridworld(gym.Env):
             info: Additional information
         """
         self.step_count += 1
-        
-        # Extract actions and bids
-        agent_0_action = action["agent_0"]
-        agent_1_action = action["agent_1"]
-        
-        direction_0 = agent_0_action["direction"]
-        bid_0 = agent_0_action["bid"]
-        
-        direction_1 = agent_1_action["direction"] 
-        bid_1 = agent_1_action["bid"]
-        
-        # Determine winner of the bid
-        if bid_0 > bid_1:
-            winning_direction = direction_0
-            winning_agent = 0
-        elif bid_1 > bid_0:
-            winning_direction = direction_1
-            winning_agent = 1
-        else:
-            # Tie - randomly choose winner
-            if np.random.random() < 0.5:
-                winning_direction = direction_0
-                winning_agent = 0
-            else:
-                winning_direction = direction_1
-                winning_agent = 1
+
+        # Extract actions and bids for all agents
+        agent_actions = {}
+        agent_bids = {}
+        for i in range(self.num_agents):
+            agent_key = f"agent_{i}"
+            agent_actions[i] = action[agent_key]
+            agent_bids[i] = action[agent_key]["bid"]
+
+        # Determine winner of the bid (highest bidder)
+        max_bid = max(agent_bids.values())
+        winners = [agent_id for agent_id, bid in agent_bids.items() if bid == max_bid]
+
+        # If tie, randomly choose among winners
+        winning_agent = random.choice(winners)
+        winning_direction = agent_actions[winning_agent]["direction"]
         
         # Execute the winning action
         new_position = self._move_agent(self.agent_position, winning_direction)
         self.agent_position = new_position
         
-        # Check if targets are reached for the first time this step
-        target_0_just_reached = False
-        target_1_just_reached = False
-        
-        if np.array_equal(self.agent_position, self.target_0_position) and self.targets_reached[0] == 0:
-            self.targets_reached[0] = 1
-            target_0_just_reached = True
-        
-        if np.array_equal(self.agent_position, self.target_1_position) and self.targets_reached[1] == 0:
-            self.targets_reached[1] = 1
-            target_1_just_reached = True
-        
-        # Calculate rewards for both agents
-        rewards = self._calculate_rewards(bid_0, bid_1, winning_agent, target_0_just_reached, target_1_just_reached)
+        # Check if any targets are reached for the first time this step
+        targets_just_reached = {}
+        for i in range(self.num_agents):
+            if np.array_equal(self.agent_position, self.target_positions[i]) and self.targets_reached[i] == 0:
+                self.targets_reached[i] = 1
+                targets_just_reached[i] = True
+            else:
+                targets_just_reached[i] = False
+
+        # Calculate rewards for all agents
+        rewards = self._calculate_rewards(agent_bids, winning_agent, targets_just_reached)
         
         # Check termination conditions
         # terminated = bool(np.all(self.targets_reached == 1))  # Both targets reached
@@ -174,8 +184,8 @@ class BiddingGridworld(gym.Env):
         observation = self._get_observation()
         info = self._get_info()
         info["winning_agent"] = winning_agent
-        info["bids"] = {"agent_0": bid_0, "agent_1": bid_1}
-        
+        info["bids"] = {f"agent_{i}": bid for i, bid in agent_bids.items()}
+
         return observation, rewards, terminated, truncated, info
     
     def _move_agent(self, position: np.ndarray, direction: int) -> np.ndarray:
@@ -194,31 +204,27 @@ class BiddingGridworld(gym.Env):
         return new_position
     
     def _calculate_rewards(
-        self, 
-        bid_0: int, 
-        bid_1: int, 
+        self,
+        agent_bids: Dict[int, int],
         winning_agent: int,
-        target_0_just_reached: bool,
-        target_1_just_reached: bool
+        targets_just_reached: Dict[int, bool]
     ) -> Dict[str, float]:
-        """Calculate rewards for both agents."""
-        rewards = {"agent_0": 0.0, "agent_1": 0.0}
-        
+        """Calculate rewards for all agents."""
+        rewards = {f"agent_{i}": 0.0 for i in range(self.num_agents)}
+
         # Bid penalties and rewards
-        # Each agent pays penalty for their own bid and receives reward from opponent's bid
-        rewards["agent_0"] -= self.bid_penalty * bid_0  # Agent 0 pays for their bid
-        rewards["agent_0"] += self.bid_penalty * bid_1  # Agent 0 gets reward from Agent 1's bid
-        
-        rewards["agent_1"] -= self.bid_penalty * bid_1  # Agent 1 pays for their bid
-        rewards["agent_1"] += self.bid_penalty * bid_0  # Agent 1 gets reward from Agent 0's bid
-        
-        # Target rewards (only given when target is reached for the first time)
-        if target_0_just_reached:
-            rewards["agent_0"] += self.target_reward
-        
-        if target_1_just_reached:
-            rewards["agent_1"] += self.target_reward
-        
+        # Each agent pays penalty for their own bid and receives reward from all other agents' bids
+        for i in range(self.num_agents):
+            # Pay for own bid
+            rewards[f"agent_{i}"] -= self.bid_penalty * agent_bids[i]
+            # Receive reward from other agents' bids (disabled currently)
+            # for j in range(self.num_agents):
+            #     if i != j:
+            #         rewards[f"agent_{i}"] += self.bid_penalty * agent_bids[j]
+
+            if targets_just_reached[i]:
+                rewards[f"agent_{i}"] += self.target_reward
+
         return rewards
     
     def _get_observation(self) -> np.ndarray:
@@ -227,33 +233,37 @@ class BiddingGridworld(gym.Env):
         denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
         agent_row_norm = float(self.agent_position[0]) / denom
         agent_col_norm = float(self.agent_position[1]) / denom
-        t0_row_norm = float(self.target_0_position[0]) / denom
-        t0_col_norm = float(self.target_0_position[1]) / denom
-        t1_row_norm = float(self.target_1_position[0]) / denom
-        t1_col_norm = float(self.target_1_position[1]) / denom
 
-        obs = np.array([
-            agent_row_norm,
-            agent_col_norm,
-            t0_row_norm,
-            t0_col_norm,
-            t1_row_norm,
-            t1_col_norm,
-            float(self.targets_reached[0]),
-            float(self.targets_reached[1]),
-        ], dtype=np.float32)
+        # Build observation: [agent_pos, target_0_pos, ..., target_n_pos, target_0_reached, ..., target_n_reached]
+        obs_list = [agent_row_norm, agent_col_norm]
+
+        # Add all target positions
+        for target_pos in self.target_positions:
+            t_row_norm = float(target_pos[0]) / denom
+            t_col_norm = float(target_pos[1]) / denom
+            obs_list.extend([t_row_norm, t_col_norm])
+
+        # Add all target reached flags
+        for i in range(self.num_agents):
+            obs_list.append(float(self.targets_reached[i]))
+
+        obs = np.array(obs_list, dtype=np.float32)
         return obs
     
     def _get_info(self) -> Dict:
         """Get additional information."""
-        return {
+        info = {
             "step_count": self.step_count,
             "max_steps": self.max_steps,
-            "manhattan_distance_to_target_0": abs(self.agent_position[0] - self.target_0_position[0]) + 
-                                            abs(self.agent_position[1] - self.target_0_position[1]),
-            "manhattan_distance_to_target_1": abs(self.agent_position[0] - self.target_1_position[0]) + 
-                                            abs(self.agent_position[1] - self.target_1_position[1])
         }
+
+        # Add manhattan distance to each target
+        for i in range(self.num_agents):
+            distance = abs(self.agent_position[0] - self.target_positions[i][0]) + \
+                      abs(self.agent_position[1] - self.target_positions[i][1])
+            info[f"manhattan_distance_to_target_{i}"] = distance
+
+        return info
     
     def render(self, mode: str = "human"):
         """Render the environment."""
@@ -266,19 +276,25 @@ class BiddingGridworld(gym.Env):
         """Render the environment as text."""
         print(f"\nStep: {self.step_count}")
         print(f"Agent position: {self.agent_position}")
-        print(f"Target 0 position: {self.target_0_position} (reached: {bool(self.targets_reached[0])})")
-        print(f"Target 1 position: {self.target_1_position} (reached: {bool(self.targets_reached[1])})")
-        
+
+        # Print all target positions
+        for i in range(self.num_agents):
+            print(f"Target {i} position: {self.target_positions[i]} (reached: {bool(self.targets_reached[i])})")
+
         # Create grid visualization
         grid = np.full((self.grid_size, self.grid_size), '.', dtype=str)
-        
-        # Place targets
-        grid[self.target_0_position[0], self.target_0_position[1]] = '0' if not self.targets_reached[0] else '✓'
-        grid[self.target_1_position[0], self.target_1_position[1]] = '1' if not self.targets_reached[1] else '✓'
-        
+
+        # Place targets (use number or checkmark)
+        for i in range(self.num_agents):
+            target_pos = self.target_positions[i]
+            if not self.targets_reached[i]:
+                grid[target_pos[0], target_pos[1]] = str(i) if i < 10 else '*'
+            else:
+                grid[target_pos[0], target_pos[1]] = '✓'
+
         # Place agent (overwrites target if on same position)
         grid[self.agent_position[0], self.agent_position[1]] = 'A'
-        
+
         print("\nGrid:")
         for row in grid:
             print(' '.join(row))
@@ -296,18 +312,15 @@ class BiddingGridworld(gym.Env):
         pass
 
 
-def create_random_action(bid_upper_bound: int = 10) -> Dict:
+def create_random_action(num_agents: int = 2, bid_upper_bound: int = 10) -> Dict:
     """Helper function to create a random action for testing."""
-    return {
-        "agent_0": {
+    action = {}
+    for i in range(num_agents):
+        action[f"agent_{i}"] = {
             "direction": np.random.randint(0, 4),
             "bid": np.random.randint(0, bid_upper_bound + 1)
-        },
-        "agent_1": {
-            "direction": np.random.randint(0, 4), 
-            "bid": np.random.randint(0, bid_upper_bound + 1)
         }
-    }
+    return action
 
 
 if __name__ == "__main__":
@@ -330,9 +343,9 @@ if __name__ == "__main__":
     
     # Run a few steps
     for step in range(10):
-        action = create_random_action(env.bid_upper_bound)
+        action = create_random_action(env.num_agents, env.bid_upper_bound)
         print(f"\nStep {step + 1}")
-        print(f"Actions: Agent 0: {action['agent_0']}, Agent 1: {action['agent_1']}")
+        print(f"Actions: {action}")
         
         obs, rewards, terminated, truncated, info = env.step(action)
         
