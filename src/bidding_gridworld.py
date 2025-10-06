@@ -27,6 +27,7 @@ class BiddingGridworld(gym.Env):
         bid_upper_bound: int = 10,
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
+        max_steps: int = 100,
         render_mode: Optional[str] = None
     ):
         """
@@ -40,6 +41,7 @@ class BiddingGridworld(gym.Env):
             bid_upper_bound: Maximum bid value (default: 10)
             bid_penalty: Penalty multiplier for bids (default: 0.1)
             target_reward: Reward for reaching target (default: 10.0)
+            max_steps: Maximum number of steps per episode (default: 100)
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
@@ -60,6 +62,7 @@ class BiddingGridworld(gym.Env):
         self.bid_upper_bound = bid_upper_bound
         self.bid_penalty = bid_penalty
         self.target_reward = target_reward
+        self.max_steps = max_steps
         self.render_mode = render_mode
         
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
@@ -118,10 +121,9 @@ class BiddingGridworld(gym.Env):
 
         # Track which targets have been reached
         self.targets_reached = np.zeros(self.num_agents, dtype=np.int32)
-        
+
         # Step counter
         self.step_count = 0
-        self.max_steps = self.grid_size * self.grid_size * 2  # Reasonable episode length
         
         observation = self._get_observation()
         info = self._get_info()
@@ -176,10 +178,13 @@ class BiddingGridworld(gym.Env):
 
         # Calculate rewards for all agents
         rewards = self._calculate_rewards(agent_bids, winning_agent, targets_just_reached)
-        
+
         # Check termination conditions
-        # terminated = bool(np.all(self.targets_reached == 1))  # Both targets reached
-        terminated = truncated = self.step_count >= self.max_steps
+        all_targets_reached = bool(np.all(self.targets_reached == 1))
+        max_steps_reached = self.step_count >= self.max_steps
+
+        terminated = all_targets_reached
+        truncated = max_steps_reached and not all_targets_reached
         
         observation = self._get_observation()
         info = self._get_info()
@@ -360,3 +365,191 @@ if __name__ == "__main__":
             break
     
     env.close()
+
+
+class MovingTargetBiddingGridworld(BiddingGridworld):
+    """
+    A variant of BiddingGridworld where targets move dynamically.
+
+    Each target has a direction and moves at each step with the following logic:
+    - With 0.1 probability, the target randomly changes direction
+    - If a target hits a wall/edge, it must choose a new valid direction
+    - Target positions are updated after agent movement
+    """
+
+    def __init__(
+        self,
+        grid_size: int = 10,
+        num_agents: int = 2,
+        target_positions: Optional[List[Tuple[int, int]]] = None,
+        bid_upper_bound: int = 10,
+        bid_penalty: float = 0.1,
+        target_reward: float = 10.0,
+        direction_change_prob: float = 0.1,
+        render_mode: Optional[str] = None
+    ):
+        """
+        Initialize the MovingTargetBiddingGridworld environment.
+
+        Args:
+            grid_size: Size of the square gridworld (default: 10)
+            num_agents: Number of agents/targets (default: 2)
+            target_positions: Optional list of (row, col) tuples for initial target positions.
+                            If None, random positions will be assigned. (default: None)
+            bid_upper_bound: Maximum bid value (default: 10)
+            bid_penalty: Penalty multiplier for bids (default: 0.1)
+            target_reward: Reward for reaching target (default: 10.0)
+            direction_change_prob: Probability of randomly changing direction (default: 0.1)
+            render_mode: Rendering mode (default: None)
+        """
+        super().__init__(
+            grid_size=grid_size,
+            num_agents=num_agents,
+            target_positions=target_positions,
+            bid_upper_bound=bid_upper_bound,
+            bid_penalty=bid_penalty,
+            target_reward=target_reward,
+            render_mode=render_mode
+        )
+
+        self.direction_change_prob = direction_change_prob
+
+        # Initialize target directions (will be set in reset)
+        self.target_directions = []
+
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        options: Optional[Dict] = None
+    ) -> Tuple[np.ndarray, Dict]:
+        """Reset the environment with moving targets."""
+        obs, info = super().reset(seed=seed, options=options)
+
+        # Initialize random directions for each target
+        self.target_directions = []
+        for _ in range(self.num_agents):
+            # Random initial direction: 0=Left, 1=Right, 2=Up, 3=Down
+            self.target_directions.append(np.random.randint(0, 4))
+
+        return obs, info
+
+    def step(self, action: Dict) -> Tuple[np.ndarray, Dict, bool, bool, Dict]:
+        """
+        Execute one step with moving targets.
+
+        The step sequence is:
+        1. Agent moves based on bidding
+        2. Check if any targets are reached
+        3. Targets move
+        4. Return observation with updated target positions
+        """
+        # Execute parent step (agent movement and reward calculation)
+        obs, rewards, terminated, truncated, info = super().step(action)
+
+        # Move targets after agent has moved
+        self._move_targets()
+
+        # Update observation with new target positions
+        obs = self._get_observation()
+        info = self._get_info()
+        info["winning_agent"] = info.get("winning_agent", -1)
+        info["bids"] = info.get("bids", {})
+
+        return obs, rewards, terminated, truncated, info
+
+    def _move_targets(self):
+        """Move all targets according to their directions."""
+        for i in range(self.num_agents):
+            # Skip moving targets that have been reached
+            if self.targets_reached[i] == 1:
+                continue
+
+            # With probability direction_change_prob, randomly change direction
+            if np.random.random() < self.direction_change_prob:
+                self.target_directions[i] = np.random.randint(0, 4)
+
+            # Calculate new position
+            current_pos = self.target_positions[i]
+            new_pos = self._move_target_in_direction(current_pos, self.target_directions[i])
+
+            # Check if hit a wall (new_pos == current_pos means we couldn't move)
+            if np.array_equal(new_pos, current_pos):
+                # Hit a wall, choose a new valid direction
+                valid_directions = self._get_valid_directions(current_pos)
+                if valid_directions:
+                    self.target_directions[i] = np.random.choice(valid_directions)
+                    new_pos = self._move_target_in_direction(current_pos, self.target_directions[i])
+
+            # Update target position
+            self.target_positions[i] = new_pos
+
+    def _move_target_in_direction(self, position: np.ndarray, direction: int) -> np.ndarray:
+        """Move target in the specified direction, respecting grid boundaries."""
+        new_position = position.copy()
+
+        if direction == 0:  # Left
+            new_position[1] = max(0, position[1] - 1)
+        elif direction == 1:  # Right
+            new_position[1] = min(self.grid_size - 1, position[1] + 1)
+        elif direction == 2:  # Up
+            new_position[0] = max(0, position[0] - 1)
+        elif direction == 3:  # Down
+            new_position[0] = min(self.grid_size - 1, position[0] + 1)
+
+        return new_position
+
+    def _get_valid_directions(self, position: np.ndarray) -> List[int]:
+        """Get list of valid directions from current position (not hitting walls)."""
+        valid = []
+
+        # Check each direction
+        if position[1] > 0:  # Can go left
+            valid.append(0)
+        if position[1] < self.grid_size - 1:  # Can go right
+            valid.append(1)
+        if position[0] > 0:  # Can go up
+            valid.append(2)
+        if position[0] < self.grid_size - 1:  # Can go down
+            valid.append(3)
+
+        return valid
+
+
+if __name__ == "__main__":
+    # Test the MovingTargetBiddingGridworld
+    print("\n" + "="*60)
+    print("Testing MovingTargetBiddingGridworld")
+    print("="*60)
+
+    env = MovingTargetBiddingGridworld(
+        grid_size=5,
+        num_agents=2,
+        bid_upper_bound=3,
+        bid_penalty=0.1,
+        target_reward=10.0,
+        direction_change_prob=0.2  # Higher probability for testing
+    )
+
+    obs, info = env.reset(seed=42)
+    print("\nInitial state:")
+    env.render()
+
+    # Run a few steps to see targets moving
+    for step in range(10):
+        action = create_random_action(env.num_agents, env.bid_upper_bound)
+        print(f"\nStep {step + 1}")
+        print(f"Actions: {action}")
+
+        obs, rewards, terminated, truncated, info = env.step(action)
+
+        print(f"Rewards: {rewards}")
+        print(f"Winner: Agent {info['winning_agent']}")
+
+        env.render()
+
+        if terminated or truncated:
+            print("Episode finished!")
+            break
+
+    env.close()
+    print("\n✅ MovingTargetBiddingGridworld testing completed!")
