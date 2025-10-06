@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from typing import Dict, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union
 from bidding_gridworld import BiddingGridworld
 
 

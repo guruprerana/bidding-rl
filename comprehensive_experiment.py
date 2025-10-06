@@ -38,7 +38,7 @@ class ComprehensiveTrainer:
     def __init__(self, base_log_dir: str = "logs", experiment_name: str = ""):
         """Initialize the trainer with timestamped logging directory."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_name = experiment_name if experiment_name else "3x3grid_10000_iters_dqn_exp1"
+        experiment_name = experiment_name if experiment_name else "6x6grid_3targets_dqn_exp1"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         
         # Create subdirectories
@@ -55,13 +55,21 @@ class ComprehensiveTrainer:
         print(f"Experiment directory: {self.log_dir}")
         
         # Training parameters
-        self.grid_size = 3
+        self.grid_size = 6
+        self.num_agents = 3
         self.bid_upper_bound = 2
-        self.training_timesteps = 10000
+        self.training_timesteps = 20000
         self.learning_rate = 0.05
         self.discount_factor = 0.95
         self.epsilon = 0.5
         self.min_epsilon = 0.1
+
+        # Define target positions: corners and center
+        self.target_positions = [
+            (0, 5),  # Top-right
+            (5, 0),  # Bottom-left
+            (5, 5),  # Bottom-right
+        ]
         
         # Save experiment configuration
         self.save_config()
@@ -70,13 +78,15 @@ class ComprehensiveTrainer:
         """Save experiment configuration."""
         config = {
             "grid_size": self.grid_size,
+            "num_agents": self.num_agents,
+            "target_positions": self.target_positions,
             "bid_upper_bound": self.bid_upper_bound,
             "training_timesteps": self.training_timesteps,
             "learning_rate": self.learning_rate,
             "discount_factor": self.discount_factor,
             "epsilon": self.epsilon,
             "timestamp": datetime.now().isoformat(),
-            "description": "Zero-Sum DQN training and competition experiment"
+            "description": "Zero-Sum DQN training and competition experiment with 3 agents on 6x6 grid"
         }
         
         with open(self.log_dir / "config.json", 'w') as f:
@@ -91,7 +101,9 @@ class ComprehensiveTrainer:
         # Create environment
         env = ZeroSumBiddingWrapper(
             target_agent_id=target_agent_id,
+            num_agents=self.num_agents,
             grid_size=self.grid_size,
+            target_positions=self.target_positions,
             bid_upper_bound=self.bid_upper_bound,
             bid_penalty=0.1,
             target_reward=10.0
@@ -289,12 +301,14 @@ class ComprehensiveTrainer:
         
         env = ZeroSumBiddingWrapper(
             target_agent_id=target_agent_id,
+            num_agents=self.num_agents,
             grid_size=self.grid_size,
+            target_positions=self.target_positions,
             bid_upper_bound=self.bid_upper_bound,
             bid_penalty=0.1,
             target_reward=10.0
         )
-        
+
         for episode in range(num_episodes):
             states = []
             actions = []
@@ -319,8 +333,8 @@ class ComprehensiveTrainer:
                 row = int(agent_row_norm * denom)
                 col = int(agent_col_norm * denom)
 
-                # For visualization, track both targets
-                targets_reached = [0, 0]
+                # For visualization, track all targets
+                targets_reached = [0] * self.num_agents
                 targets_reached[target_agent_id] = target_reached
 
                 states.append({
@@ -419,33 +433,27 @@ class ComprehensiveTrainer:
             for i in range(self.grid_size + 1):
                 ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
-            
-            # Draw targets
-            target_0_pos = (self.grid_size - 1, self.grid_size - 1)  # Bottom-right
-            target_1_pos = (0, self.grid_size - 1)  # Top-right
-            
-            if targets_reached[0] == 0:
-                ax.add_patch(plt.Rectangle((target_0_pos[1] - 0.4, target_0_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightblue', edgecolor='blue'))
-                ax.text(target_0_pos[1], target_0_pos[0], '0', ha='center', va='center', fontsize=12, fontweight='bold')
-            else:
-                ax.add_patch(plt.Rectangle((target_0_pos[1] - 0.4, target_0_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
-                ax.text(target_0_pos[1], target_0_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
-            
-            if targets_reached[1] == 0:
-                ax.add_patch(plt.Rectangle((target_1_pos[1] - 0.4, target_1_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightcoral', edgecolor='red'))
-                ax.text(target_1_pos[1], target_1_pos[0], '1', ha='center', va='center', fontsize=12, fontweight='bold')
-            else:
-                ax.add_patch(plt.Rectangle((target_1_pos[1] - 0.4, target_1_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
-                ax.text(target_1_pos[1], target_1_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
-            
+
+            # Draw targets dynamically
+            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
+            edge_colors = ['blue', 'red', 'orange']
+
+            for i in range(self.num_agents):
+                target_pos = self.target_positions[i]
+
+                if targets_reached[i] == 0:
+                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
+                                             0.8, 0.8, facecolor=target_colors[i], edgecolor=edge_colors[i]))
+                    ax.text(target_pos[1], target_pos[0], str(i), ha='center', va='center', fontsize=12, fontweight='bold')
+                else:
+                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
+                                             0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
+                    ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
+
             # Draw agent
             ax.add_patch(plt.Circle((agent_pos[1], agent_pos[0]), 0.3, facecolor='yellow', edgecolor='orange'))
             ax.text(agent_pos[1], agent_pos[0], 'A', ha='center', va='center', fontsize=10, fontweight='bold')
-            
+
             # Title and info
             target_id = episode_data["target_agent_id"]
             step = state["step"]
@@ -499,15 +507,17 @@ class ComprehensiveTrainer:
         
         return agent_0, agent_1
     
-    def run_competition(self, agent_0: ZeroSumDQN, agent_1: ZeroSumDQN, 
+    def run_competition(self, agents: List[ZeroSumDQN],
                        num_episodes: int = 10):
-        """Run cooperative evaluation where both agents try to reach their respective targets."""
+        """Run cooperative evaluation where all agents try to reach their respective targets."""
         print(f"\n{'='*60}")
-        print("COOPERATIVE EVALUATION: Both Agents Pursuing Their Targets")
+        print(f"COOPERATIVE EVALUATION: All {self.num_agents} Agents Pursuing Their Targets")
         print(f"{'='*60}")
         
         env = BiddingGridworld(
             grid_size=self.grid_size,
+            num_agents=self.num_agents,
+            target_positions=self.target_positions,
             bid_upper_bound=self.bid_upper_bound,
             bid_penalty=0.1,
             target_reward=10.0
@@ -527,72 +537,71 @@ class ComprehensiveTrainer:
             }
             
             obs, info = env.reset()
-            total_rewards = {"agent_0": 0, "agent_1": 0}
+            total_rewards = {f"agent_{i}": 0 for i in range(self.num_agents)}
             steps = 0
             terminated = False
             truncated = False
-            
+
             while (not terminated) and (not truncated):
-                # obs from BiddingGridworld is 8-element array:
-                # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm,
-                #  target1_row_norm, target1_col_norm, target0_reached, target1_reached]
+                # obs from BiddingGridworld is (2 + 2*num_agents + num_agents)-element array:
+                # [agent_row_norm, agent_col_norm,
+                #  target0_row_norm, target0_col_norm, ..., targetN_row_norm, targetN_col_norm,
+                #  target0_reached, ..., targetN_reached]
 
-                # For agent 0: create observation focused on target 0
-                # Format: [agent_row, agent_col, target_row, target_col, target_reached]
-                wrapped_obs_0 = np.array([
-                    obs[0],  # agent_row_norm
-                    obs[1],  # agent_col_norm
-                    obs[2],  # target0_row_norm
-                    obs[3],  # target0_col_norm
-                    obs[6],  # target0_reached
-                ], dtype=np.float32)
+                # Create wrapped observations for each agent
+                wrapped_observations = []
+                for agent_id in range(self.num_agents):
+                    # Extract agent's target position and reached status
+                    target_idx_base = 2 + 2 * agent_id
+                    target_reached_idx = 2 + 2 * self.num_agents + agent_id
 
-                # For agent 1: create observation focused on target 1
-                wrapped_obs_1 = np.array([
-                    obs[0],  # agent_row_norm
-                    obs[1],  # agent_col_norm
-                    obs[4],  # target1_row_norm
-                    obs[5],  # target1_col_norm
-                    obs[7],  # target1_reached
-                ], dtype=np.float32)
+                    wrapped_obs = np.array([
+                        obs[0],  # agent_row_norm
+                        obs[1],  # agent_col_norm
+                        obs[target_idx_base],      # target_row_norm
+                        obs[target_idx_base + 1],  # target_col_norm
+                        obs[target_reached_idx],   # target_reached
+                    ], dtype=np.float32)
+                    wrapped_observations.append(wrapped_obs)
                 
-                # Get actions from both agents pursuing their respective targets
-                action_0_idx, _ = agent_0.predict(wrapped_obs_0, deterministic=True)
-                action_1_idx, _ = agent_1.predict(wrapped_obs_1, deterministic=True)
-                
-                # Convert action indices to direction/bid format
+                # Get actions from all agents pursuing their respective targets
+                agent_actions = {}
                 directions_per_bid = self.bid_upper_bound + 1
-                
-                # Agent 0 action
-                prot_idx_0 = action_0_idx[0] // agent_0.adversary_actions
-                prot_direction_0 = prot_idx_0 // directions_per_bid
-                prot_bid_0 = prot_idx_0 % directions_per_bid
-                agent_0_action = {"direction": prot_direction_0, "bid": prot_bid_0}
-                
-                # Agent 1 action  
-                prot_idx_1 = action_1_idx[0] // agent_1.adversary_actions
-                prot_direction_1 = prot_idx_1 // directions_per_bid
-                prot_bid_1 = prot_idx_1 % directions_per_bid
-                agent_1_action = {"direction": prot_direction_1, "bid": prot_bid_1}
-                
+
+                for agent_id in range(self.num_agents):
+                    action_idx, _ = agents[agent_id].predict(wrapped_observations[agent_id], deterministic=True)
+
+                    # Convert action index to direction/bid format
+                    prot_idx = action_idx[0] // agents[agent_id].adversary_actions
+                    prot_direction = prot_idx // directions_per_bid
+                    prot_bid = prot_idx % directions_per_bid
+
+                    agent_actions[f"agent_{agent_id}"] = {
+                        "direction": prot_direction,
+                        "bid": prot_bid
+                    }
+
                 # Format actions for original environment
-                action = {
-                    "agent_0": agent_0_action,
-                    "agent_1": agent_1_action
-                }
+                action = agent_actions
                 
                 # Execute step
                 next_obs, rewards, terminated, truncated, step_info = env.step(action)
 
                 # Extract position and target status from observation array
-                # obs: [agent_row_norm, agent_col_norm, t0_row, t0_col, t1_row, t1_col, t0_reached, t1_reached]
                 denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
                 agent_row = int(obs[0] * denom)
                 agent_col = int(obs[1] * denom)
                 agent_position = agent_row * self.grid_size + agent_col
-                targets_reached = [int(obs[6]), int(obs[7])]
+
+                # Extract all target reached statuses
+                targets_reached = []
+                target_reached_start_idx = 2 + 2 * self.num_agents
+                for i in range(self.num_agents):
+                    targets_reached.append(int(obs[target_reached_start_idx + i]))
 
                 # Log step details
+                targets_status = {f"target_{i}_reached": bool(targets_reached[i]) for i in range(self.num_agents)}
+
                 step_detail = {
                     "step": steps,
                     "agent_pos": agent_position,
@@ -601,10 +610,7 @@ class ComprehensiveTrainer:
                     "rewards": rewards,
                     "winning_agent": step_info["winning_agent"],
                     "bids": step_info["bids"],
-                    "targets_status": {
-                        "target_0_reached": bool(targets_reached[0]),
-                        "target_1_reached": bool(targets_reached[1])
-                    }
+                    "targets_status": targets_status
                 }
 
                 episode_log["states"].append(obs.copy())
@@ -612,14 +618,15 @@ class ComprehensiveTrainer:
                 episode_log["rewards"].append(rewards)
                 episode_log["step_details"].append(step_detail)
 
-                total_rewards["agent_0"] += rewards["agent_0"]
-                total_rewards["agent_1"] += rewards["agent_1"]
+                for i in range(self.num_agents):
+                    total_rewards[f"agent_{i}"] += rewards[f"agent_{i}"]
 
                 # Show which agent wins the bidding and current target status
-                target_status = f"Targets: 0={'✓' if targets_reached[0] else '✗'}, 1={'✓' if targets_reached[1] else '✗'}"
+                target_status_str = ", ".join([f"{i}={'✓' if targets_reached[i] else '✗'}" for i in range(self.num_agents)])
+                bids_str = ", ".join([f"{i}={step_info['bids'][f'agent_{i}']}" for i in range(self.num_agents)])
                 print(f"  Step {steps + 1}: Agent {step_info['winning_agent']} wins bid "
-                      f"(Bids: 0={step_info['bids']['agent_0']}, 1={step_info['bids']['agent_1']}) "
-                      f"| {target_status} | Rewards: {rewards}")
+                      f"(Bids: {bids_str}) "
+                      f"| Targets: {target_status_str} | Rewards: {rewards}")
                 
                 obs = next_obs
                 steps += 1
@@ -629,26 +636,43 @@ class ComprehensiveTrainer:
             
             # Episode summary - success is measured by target achievement
             # Extract final target status from observation array
-            final_targets_reached = [int(obs[6]), int(obs[7])]
-            both_targets_reached = final_targets_reached[0] == 1 and final_targets_reached[1] == 1
-            agent_0_success = final_targets_reached[0] == 1
-            agent_1_success = final_targets_reached[1] == 1
-            
+            final_targets_reached = []
+            target_reached_start_idx = 2 + 2 * self.num_agents
+            for i in range(self.num_agents):
+                final_targets_reached.append(int(obs[target_reached_start_idx + i]))
+
+            all_targets_reached = all(t == 1 for t in final_targets_reached)
+            individual_successes = {f"agent_{i}_success": final_targets_reached[i] == 1 for i in range(self.num_agents)}
+
             episode_log["total_rewards"] = total_rewards
-            episode_log["both_targets_reached"] = both_targets_reached
-            episode_log["agent_0_success"] = agent_0_success
-            episode_log["agent_1_success"] = agent_1_success
+            episode_log["all_targets_reached"] = all_targets_reached
+            episode_log.update(individual_successes)
             episode_log["final_targets"] = final_targets_reached.copy()
             episode_log["steps"] = steps
-            episode_log["cooperation_outcome"] = "success" if both_targets_reached else "partial" if (agent_0_success or agent_1_success) else "failure"
-            
+
+            # Determine cooperation outcome
+            num_successes = sum(individual_successes.values())
+            if all_targets_reached:
+                cooperation_outcome = "success"
+            elif num_successes > 0:
+                cooperation_outcome = "partial"
+            else:
+                cooperation_outcome = "failure"
+
+            episode_log["cooperation_outcome"] = cooperation_outcome
+
             competition_results.append(episode_log)
-            
-            outcome_msg = f"BOTH TARGETS REACHED!" if both_targets_reached else \
-                         f"Partial success (Target 0: {'✓' if agent_0_success else '✗'}, Target 1: {'✓' if agent_1_success else '✗'})"
-            
+
+            # Build outcome message
+            if all_targets_reached:
+                outcome_msg = "ALL TARGETS REACHED!"
+            else:
+                target_statuses = [f"Target {i}: {'✓' if final_targets_reached[i] else '✗'}" for i in range(self.num_agents)]
+                outcome_msg = f"Partial success ({', '.join(target_statuses)})"
+
             print(f"  Episode Result: {outcome_msg}")
-            print(f"  Final Scores - Agent 0: {total_rewards['agent_0']:.2f}, Agent 1: {total_rewards['agent_1']:.2f}")
+            rewards_str = ", ".join([f"Agent {i}: {total_rewards[f'agent_{i}']:.2f}" for i in range(self.num_agents)])
+            print(f"  Final Scores - {rewards_str}")
             
             # Save individual episode
             episode_file = self.competition_dir / f"cooperative_episode_{episode}.json"
@@ -675,47 +699,58 @@ class ComprehensiveTrainer:
     
     def analyze_cooperation_results(self, results: List[Dict]) -> Dict:
         """Analyze cooperation results focusing on target achievement."""
-        both_targets_success = sum(1 for r in results if r["both_targets_reached"])
-        agent_0_successes = sum(1 for r in results if r["agent_0_success"])
-        agent_1_successes = sum(1 for r in results if r["agent_1_success"])
-        complete_failures = sum(1 for r in results if not r["agent_0_success"] and not r["agent_1_success"])
-        
-        agent_0_rewards = [r["total_rewards"]["agent_0"] for r in results]
-        agent_1_rewards = [r["total_rewards"]["agent_1"] for r in results]
-        
+        all_targets_success = sum(1 for r in results if r["all_targets_reached"])
+
+        # Count individual successes for each agent
+        individual_successes = {}
+        for i in range(self.num_agents):
+            individual_successes[f"agent_{i}"] = sum(1 for r in results if r[f"agent_{i}_success"])
+
+        # Complete failure = no targets reached
+        complete_failures = sum(1 for r in results if sum(r[f"agent_{i}_success"] for i in range(self.num_agents)) == 0)
+
+        # Collect rewards for each agent
+        agent_rewards = {}
+        for i in range(self.num_agents):
+            agent_rewards[f"agent_{i}"] = [r["total_rewards"][f"agent_{i}"] for r in results]
+
         avg_steps = np.mean([r["steps"] for r in results])
-        
+
         summary = {
             "total_episodes": len(results),
-            "both_targets_success": both_targets_success,
-            "both_targets_success_rate": both_targets_success / len(results),
-            "agent_0_individual_success": agent_0_successes,
-            "agent_0_success_rate": agent_0_successes / len(results),
-            "agent_1_individual_success": agent_1_successes,
-            "agent_1_success_rate": agent_1_successes / len(results),
+            "all_targets_success": all_targets_success,
+            "all_targets_success_rate": all_targets_success / len(results),
             "complete_failures": complete_failures,
             "complete_failure_rate": complete_failures / len(results),
-            "agent_0_avg_reward": np.mean(agent_0_rewards),
-            "agent_1_avg_reward": np.mean(agent_1_rewards),
-            "agent_0_total_reward": sum(agent_0_rewards),
-            "agent_1_total_reward": sum(agent_1_rewards),
             "avg_steps_to_completion": avg_steps,
-            "cooperation_efficiency": both_targets_success / len(results)  # Key metric for cooperation
+            "cooperation_efficiency": all_targets_success / len(results)  # Key metric for cooperation
         }
-        
+
+        # Add individual agent statistics
+        for i in range(self.num_agents):
+            agent_key = f"agent_{i}"
+            summary[f"{agent_key}_individual_success"] = individual_successes[agent_key]
+            summary[f"{agent_key}_success_rate"] = individual_successes[agent_key] / len(results)
+            summary[f"{agent_key}_avg_reward"] = np.mean(agent_rewards[agent_key])
+            summary[f"{agent_key}_total_reward"] = sum(agent_rewards[agent_key])
+
         print(f"\n{'='*60}")
         print("COOPERATION SUMMARY")
         print(f"{'='*60}")
         print(f"Total Episodes: {summary['total_episodes']}")
-        print(f"Both Targets Reached: {summary['both_targets_success']} ({summary['both_targets_success_rate']:.1%})")
-        print(f"Agent 0 Target Success: {summary['agent_0_individual_success']} ({summary['agent_0_success_rate']:.1%})")
-        print(f"Agent 1 Target Success: {summary['agent_1_individual_success']} ({summary['agent_1_success_rate']:.1%})")
+        print(f"All Targets Reached: {summary['all_targets_success']} ({summary['all_targets_success_rate']:.1%})")
+
+        for i in range(self.num_agents):
+            print(f"Agent {i} Target Success: {summary[f'agent_{i}_individual_success']} ({summary[f'agent_{i}_success_rate']:.1%})")
+
         print(f"Complete Failures: {summary['complete_failures']} ({summary['complete_failure_rate']:.1%})")
-        print(f"Agent 0 avg reward: {summary['agent_0_avg_reward']:.2f}")
-        print(f"Agent 1 avg reward: {summary['agent_1_avg_reward']:.2f}")
+
+        for i in range(self.num_agents):
+            print(f"Agent {i} avg reward: {summary[f'agent_{i}_avg_reward']:.2f}")
+
         print(f"Average steps: {summary['avg_steps_to_completion']:.1f}")
         print(f"Cooperation Efficiency: {summary['cooperation_efficiency']:.1%}")
-        
+
         return summary
     
     def create_competition_mp4(self, episode_data: Dict, mp4_path: Path):
@@ -756,55 +791,53 @@ class ComprehensiveTrainer:
                 ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
             
-            # Draw targets
-            target_0_pos = (self.grid_size - 1, self.grid_size - 1)  # Bottom-right
-            target_1_pos = (0, self.grid_size - 1)  # Top-right
-            
-            if targets_reached[0] == 0:
-                ax.add_patch(plt.Rectangle((target_0_pos[1] - 0.4, target_0_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightblue', edgecolor='blue'))
-                ax.text(target_0_pos[1], target_0_pos[0], '0', ha='center', va='center', fontsize=12, fontweight='bold')
-            else:
-                ax.add_patch(plt.Rectangle((target_0_pos[1] - 0.4, target_0_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
-                ax.text(target_0_pos[1], target_0_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
-            
-            if targets_reached[1] == 0:
-                ax.add_patch(plt.Rectangle((target_1_pos[1] - 0.4, target_1_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightcoral', edgecolor='red'))
-                ax.text(target_1_pos[1], target_1_pos[0], '1', ha='center', va='center', fontsize=12, fontweight='bold')
-            else:
-                ax.add_patch(plt.Rectangle((target_1_pos[1] - 0.4, target_1_pos[0] - 0.4), 
-                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
-                ax.text(target_1_pos[1], target_1_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
-            
+            # Draw targets dynamically
+            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
+            edge_colors = ['blue', 'red', 'orange']
+
+            for i in range(self.num_agents):
+                target_pos = self.target_positions[i]
+
+                if targets_reached[i] == 0:
+                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
+                                             0.8, 0.8, facecolor=target_colors[i], edgecolor=edge_colors[i]))
+                    ax.text(target_pos[1], target_pos[0], str(i), ha='center', va='center', fontsize=12, fontweight='bold')
+                else:
+                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
+                                             0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
+                    ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
+
             # Draw agent
             row = agent_pos // self.grid_size
             col = agent_pos % self.grid_size
             ax.add_patch(plt.Circle((col, row), 0.3, facecolor='yellow', edgecolor='orange'))
             ax.text(col, row, 'A', ha='center', va='center', fontsize=10, fontweight='bold')
-            
+
             # Title and info - focus on cooperation
             title = f'Cooperative Episode {episode_data["episode"]} - Step {frame}\n'
-            
+
             if step_detail:
                 # Show current target status
-                targets_status = f"Targets: 0={'✓' if targets_reached[0] else '✗'}, 1={'✓' if targets_reached[1] else '✗'}"
-                title += f'Movement Winner: Agent {step_detail["winning_agent"]} | {targets_status}\n'
-                
-                # Show actions and bids for both agents
+                targets_status = ", ".join([f"{i}={'✓' if targets_reached[i] else '✗'}" for i in range(self.num_agents)])
+                title += f'Movement Winner: Agent {step_detail["winning_agent"]} | Targets: {targets_status}\n'
+
+                # Show actions and bids for all agents
                 actions = step_detail.get("actions", {})
-                if "agent_0" in actions and "agent_1" in actions:
-                    agent_0_dir = self._direction_to_string(actions["agent_0"].get("direction", -1))
-                    agent_0_bid = actions["agent_0"].get("bid", 0)
-                    agent_1_dir = self._direction_to_string(actions["agent_1"].get("direction", -1))
-                    agent_1_bid = actions["agent_1"].get("bid", 0)
-                    
-                    title += f'Agent 0: {agent_0_dir} (bid: {agent_0_bid}) | Agent 1: {agent_1_dir} (bid: {agent_1_bid})\n'
-                else:
-                    title += f'Bids: 0={step_detail["bids"]["agent_0"]}, 1={step_detail["bids"]["agent_1"]} | '
-                
-                title += f'Rewards: 0={rewards["agent_0"]:.2f}, 1={rewards["agent_1"]:.2f}'
+                action_strs = []
+                for i in range(self.num_agents):
+                    agent_key = f"agent_{i}"
+                    if agent_key in actions:
+                        agent_dir = self._direction_to_string(actions[agent_key].get("direction", -1))
+                        agent_bid = actions[agent_key].get("bid", 0)
+                        action_strs.append(f"A{i}: {agent_dir}({agent_bid})")
+
+                if action_strs:
+                    title += f'{" | ".join(action_strs)}\n'
+
+                # Show rewards for all agents
+                if rewards:
+                    rewards_strs = [f"{i}={rewards[f'agent_{i}']:.2f}" for i in range(self.num_agents)]
+                    title += f'Rewards: {", ".join(rewards_strs)}'
             
             ax.set_title(title, fontsize=11)
             
@@ -833,28 +866,36 @@ class ComprehensiveTrainer:
         
         start_time = time.time()
         
-        # Phase 1: Train both agents
+        # Phase 1: Train all agents
         print("\nPHASE 1: TRAINING")
-        agent_0, rewards_0, metrics_0 = self.train_agent(target_agent_id=0)
-        agent_1, rewards_1, metrics_1 = self.train_agent(target_agent_id=1)
+        agents = []
+        all_rewards = []
+        all_metrics = []
+
+        for agent_id in range(self.num_agents):
+            agent, rewards, metrics = self.train_agent(target_agent_id=agent_id)
+            agents.append(agent)
+            all_rewards.append(rewards)
+            all_metrics.append(metrics)
         
         # Phase 2: Save models
         print("\nPHASE 2: SAVING MODELS")
-        self.save_model(agent_0, 0)
-        self.save_model(agent_1, 1)
-        
-        # Phase 3: Create training plots
+        for agent_id, agent in enumerate(agents):
+            self.save_model(agent, agent_id)
+
+        # Phase 3: Create training plots (only plot first 2 agents for compatibility)
         print("\nPHASE 3: CREATING TRAINING PLOTS")
-        self.plot_training_results(rewards_0, rewards_1)
-        
+        if self.num_agents >= 2:
+            self.plot_training_results(all_rewards[0], all_rewards[1])
+
         # Phase 4: Record rollouts
         print("\nPHASE 4: RECORDING TRAINING ROLLOUTS")
-        self.record_rollout(agent_0, 0, num_episodes=3, filename_prefix="training_rollout")
-        self.record_rollout(agent_1, 1, num_episodes=3, filename_prefix="training_rollout")
-        
+        for agent_id, agent in enumerate(agents):
+            self.record_rollout(agent, agent_id, num_episodes=3, filename_prefix="training_rollout")
+
         # Phase 5: Cooperative evaluation
         print("\nPHASE 5: RUNNING COOPERATIVE EVALUATION")
-        competition_results = self.run_competition(agent_0, agent_1, num_episodes=5)
+        competition_results = self.run_competition(agents, num_episodes=5)
         
         # Phase 6: Final summary
         total_time = time.time() - start_time
@@ -865,10 +906,12 @@ class ComprehensiveTrainer:
             "log_directory": str(self.log_dir),
             "training_timesteps": self.training_timesteps,
             "cooperation_episodes": 5,
-            "agent_0_final_performance": metrics_0["final_stats"],
-            "agent_1_final_performance": metrics_1["final_stats"],
             "cooperation_summary": competition_results["summary"]
         }
+
+        # Add final performance for each agent
+        for i in range(self.num_agents):
+            final_summary[f"agent_{i}_final_performance"] = all_metrics[i]["final_stats"]
         
         summary_file = self.log_dir / "experiment_summary.json"
         with open(summary_file, 'w') as f:
