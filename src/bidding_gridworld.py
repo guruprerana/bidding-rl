@@ -27,7 +27,7 @@ class BiddingGridworld(gym.Env):
         bid_upper_bound: int = 10,
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
-        max_steps: int = 100,
+        max_steps: int = 30,
         render_mode: Optional[str] = None
     ):
         """

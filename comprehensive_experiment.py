@@ -59,8 +59,8 @@ class ComprehensiveTrainer:
         self.num_agents = 3
         self.bid_upper_bound = 2
         self.training_timesteps = 20000
-        self.learning_rate = 0.05
-        self.discount_factor = 0.95
+        self.learning_rate = 0.01
+        self.discount_factor = 0.99
         self.epsilon = 0.5
         self.min_epsilon = 0.1
 
