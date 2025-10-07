@@ -38,7 +38,9 @@ class ComprehensiveTrainer:
     def __init__(self, base_log_dir: str = "logs", experiment_name: str = "", use_moving_targets: bool = False):
         """Initialize the trainer with timestamped logging directory."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_name = experiment_name if experiment_name else "6x6grid_3movingtargets_dqn_exp1"
+        if not experiment_name:
+            target_type = "moving" if use_moving_targets else "static"
+            experiment_name = f"6x6grid_3agents_{target_type}_dqn"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         self.use_moving_targets = use_moving_targets
         
@@ -58,7 +60,7 @@ class ComprehensiveTrainer:
         # Training parameters
         self.grid_size = 6
         self.num_agents = 3
-        self.bid_upper_bound = 4  # Increased for richer bidding strategy (0-5 = 6 values)
+        self.bid_upper_bound = 4  # Increased for richer bidding strategy (0-4 = 5 values)
         self.training_timesteps = 1_000_000
         self.learning_rate = 0.001  # Standard DQN learning rate
         self.discount_factor = 0.99
@@ -110,13 +112,13 @@ class ComprehensiveTrainer:
             "bid_upper_bound": self.bid_upper_bound,
             "bid_penalty": 0.1,
             "target_reward": 10.0,
+            "max_steps": self.grid_size * 10,  # Consistent max_steps for all environments
         }
 
         # Add environment class and moving target specific parameters
         if self.use_moving_targets:
             env_kwargs["env_class"] = MovingTargetBiddingGridworld
             env_kwargs["direction_change_prob"] = 0.1
-            env_kwargs["max_steps"] = self.grid_size * 10  # Longer episodes for moving targets
 
         env = ZeroSumBiddingWrapper(**env_kwargs)
         
@@ -245,13 +247,24 @@ class ComprehensiveTrainer:
     
     def plot_training_results(self, rewards_0: List[float], rewards_1: List[float]):
         """Plot training results for both agents."""
+        # Check if we have enough data for meaningful plots
+        min_episodes = 100
+        if len(rewards_0) < min_episodes or len(rewards_1) < min_episodes:
+            print(f"Skipping training plots: insufficient episodes ({len(rewards_0)} episodes, need {min_episodes}+)")
+            print("Note: Training was done via DQN.learn() which doesn't provide per-episode rewards.")
+            print("Eval episodes are too few for training progress visualization.")
+            return
+
         print("Creating training plots...")
-        
+
         def moving_average(data, window=100):
             return [np.mean(data[max(0, i-window):i+1]) for i in range(len(data))]
-        
+
+        # Use last N episodes for distribution and comparison plots
+        last_n = min(500, len(rewards_0))
+
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-        
+
         # Raw rewards
         episodes = range(len(rewards_0))
         ax1.plot(episodes, rewards_0, alpha=0.3, label='Agent 0', color='blue')
@@ -265,11 +278,11 @@ class ComprehensiveTrainer:
         ax1.grid(True, alpha=0.3)
         
         # Reward distributions
-        ax2.hist(rewards_0[-500:], alpha=0.6, bins=20, label='Agent 0', color='blue')
-        ax2.hist(rewards_1[-500:], alpha=0.6, bins=20, label='Agent 1', color='red')
+        ax2.hist(rewards_0[-last_n:], alpha=0.6, bins=20, label='Agent 0', color='blue')
+        ax2.hist(rewards_1[-last_n:], alpha=0.6, bins=20, label='Agent 1', color='red')
         ax2.set_xlabel('Episode Reward')
         ax2.set_ylabel('Frequency')
-        ax2.set_title('Reward Distribution (Last 500 Episodes)')
+        ax2.set_title(f'Reward Distribution (Last {last_n} Episodes)')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
@@ -286,16 +299,16 @@ class ComprehensiveTrainer:
         ax3.set_title('Success Rate Over Training')
         ax3.legend()
         ax3.grid(True, alpha=0.3)
-        
+
         # Comparative performance
-        win_0 = sum(1 for r0, r1 in zip(rewards_0[-500:], rewards_1[-500:]) if r0 > r1)
-        win_1 = sum(1 for r0, r1 in zip(rewards_0[-500:], rewards_1[-500:]) if r1 > r0)
-        ties = 500 - win_0 - win_1
+        win_0 = sum(1 for r0, r1 in zip(rewards_0[-last_n:], rewards_1[-last_n:]) if r0 > r1)
+        win_1 = sum(1 for r0, r1 in zip(rewards_0[-last_n:], rewards_1[-last_n:]) if r1 > r0)
+        ties = last_n - win_0 - win_1
         
-        ax4.bar(['Agent 0 Wins', 'Agent 1 Wins', 'Ties'], [win_0, win_1, ties], 
+        ax4.bar(['Agent 0 Wins', 'Agent 1 Wins', 'Ties'], [win_0, win_1, ties],
                 color=['blue', 'red', 'gray'], alpha=0.7)
         ax4.set_ylabel('Count')
-        ax4.set_title('Head-to-Head Performance (Last 500 Episodes)')
+        ax4.set_title(f'Head-to-Head Performance (Last {last_n} Episodes)')
         ax4.grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -319,13 +332,13 @@ class ComprehensiveTrainer:
             "bid_upper_bound": self.bid_upper_bound,
             "bid_penalty": 0.1,
             "target_reward": 10.0,
+            "max_steps": self.grid_size * 10,  # Consistent max_steps for all environments
         }
 
         # Add environment class and moving target specific parameters
         if self.use_moving_targets:
             env_kwargs["env_class"] = MovingTargetBiddingGridworld
             env_kwargs["direction_change_prob"] = 0.1
-            env_kwargs["max_steps"] = self.grid_size * 10  # Longer episodes for moving targets
 
         env = ZeroSumBiddingWrapper(**env_kwargs)
 
@@ -347,19 +360,27 @@ class ComprehensiveTrainer:
                 # [agent_row, agent_col, target_row, target_col, target_reached] (5 elements)
                 agent_row_norm = obs[0]
                 agent_col_norm = obs[1]
+                target_row_norm = obs[2]
+                target_col_norm = obs[3]
                 target_reached = int(obs[4])
 
                 # Denormalize positions
                 denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
                 row = int(agent_row_norm * denom)
                 col = int(agent_col_norm * denom)
+                target_row = int(target_row_norm * denom)
+                target_col = int(target_col_norm * denom)
 
                 # For visualization, track all targets
                 targets_reached = [0] * self.num_agents
                 targets_reached[target_agent_id] = target_reached
 
+                # Track actual target position (important for moving targets!)
+                target_position = (target_row, target_col)
+
                 states.append({
                     "agent_position": (row, col),
+                    "target_position": target_position,  # Actual position from observation
                     "targets_reached": targets_reached,
                     "step": steps
                 })
@@ -443,33 +464,34 @@ class ComprehensiveTrainer:
             
             state = episode_data["states"][frame]
             agent_pos = state["agent_position"]
+            target_pos = state["target_position"]  # Actual target position from observation
             targets_reached = state["targets_reached"]
-            
+            target_id = episode_data["target_agent_id"]
+
             # Create grid
             ax.set_xlim(-0.5, self.grid_size - 0.5)
             ax.set_ylim(-0.5, self.grid_size - 0.5)
             ax.set_aspect('equal')
-            
+
             # Draw grid lines
             for i in range(self.grid_size + 1):
                 ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
-            # Draw targets dynamically
+            # Draw the tracked target (protagonist's target) with actual position
             target_colors = ['lightblue', 'lightcoral', 'lightyellow']
             edge_colors = ['blue', 'red', 'orange']
 
-            for i in range(self.num_agents):
-                target_pos = self.target_positions[i]
-
-                if targets_reached[i] == 0:
-                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                             0.8, 0.8, facecolor=target_colors[i], edgecolor=edge_colors[i]))
-                    ax.text(target_pos[1], target_pos[0], str(i), ha='center', va='center', fontsize=12, fontweight='bold')
-                else:
-                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                             0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
-                    ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
+            if targets_reached[target_id] == 0:
+                ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
+                                         0.8, 0.8, facecolor=target_colors[target_id % 3],
+                                         edgecolor=edge_colors[target_id % 3]))
+                ax.text(target_pos[1], target_pos[0], str(target_id), ha='center', va='center',
+                       fontsize=12, fontweight='bold')
+            else:
+                ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
+                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
+                ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
 
             # Draw agent
             ax.add_patch(plt.Circle((agent_pos[1], agent_pos[0]), 0.3, facecolor='yellow', edgecolor='orange'))
@@ -479,9 +501,12 @@ class ComprehensiveTrainer:
             target_id = episode_data["target_agent_id"]
             step = state["step"]
             reward = episode_data["rewards"][frame] if frame < len(episode_data["rewards"]) else 0
-            
+
             # Add bid and action information if available
-            title = f'Agent {target_id} - Step {step} - Reward: {reward:.2f}\n'
+            title = f'Agent {target_id}'
+            if self.use_moving_targets:
+                title += ' (Moving Target)'
+            title += f' - Step {step} - Reward: {reward:.2f}\n'
             title += f'Total Reward: {sum(episode_data["rewards"][:frame+1]):.2f}'
             
             if frame < len(episode_data.get("step_details", [])):
@@ -801,10 +826,18 @@ class ComprehensiveTrainer:
             agent_col = int(state[1] * denom)
             agent_pos = agent_row * self.grid_size + agent_col
 
+            # Extract actual target positions from observation (important for moving targets!)
+            target_positions = []
+            for i in range(self.num_agents):
+                target_idx_base = 2 + 2 * i
+                target_row = int(state[target_idx_base] * denom)
+                target_col = int(state[target_idx_base + 1] * denom)
+                target_positions.append((target_row, target_col))
+
             # Extract targets_reached for all agents
             target_reached_start_idx = 2 + 2 * self.num_agents
             targets_reached = [int(state[target_reached_start_idx + i]) for i in range(self.num_agents)]
-            
+
             if frame < len(episode_data["step_details"]):
                 step_detail = episode_data["step_details"][frame]
                 action = episode_data["actions"][frame]
@@ -813,23 +846,23 @@ class ComprehensiveTrainer:
                 step_detail = None
                 action = None
                 rewards = None
-            
+
             # Create grid
             ax.set_xlim(-0.5, self.grid_size - 0.5)
             ax.set_ylim(-0.5, self.grid_size - 0.5)
             ax.set_aspect('equal')
-            
+
             # Draw grid lines
             for i in range(self.grid_size + 1):
                 ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
-            
-            # Draw targets dynamically
+
+            # Draw targets with actual positions from observation
             target_colors = ['lightblue', 'lightcoral', 'lightyellow']
             edge_colors = ['blue', 'red', 'orange']
 
             for i in range(self.num_agents):
-                target_pos = self.target_positions[i]
+                target_pos = target_positions[i]  # Use actual position from observation
 
                 if targets_reached[i] == 0:
                     ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
@@ -847,7 +880,10 @@ class ComprehensiveTrainer:
             ax.text(col, row, 'A', ha='center', va='center', fontsize=10, fontweight='bold')
 
             # Title and info - focus on cooperation
-            title = f'Cooperative Episode {episode_data["episode"]} - Step {frame}\n'
+            title = f'Cooperative Episode {episode_data["episode"]}'
+            if self.use_moving_targets:
+                title += ' (Moving Targets)'
+            title += f' - Step {frame}\n'
 
             if step_detail:
                 # Show current target status
