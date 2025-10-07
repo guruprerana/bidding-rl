@@ -258,15 +258,21 @@ class ZeroSumDQN(DQN):
     def __init__(
         self,
         policy: Union[str, Type[ZeroSumDQNPolicy]],
-        env: Union[GymEnv, str],
-        protagonist_actions: int,
-        adversary_actions: int,
+        env: Union[GymEnv, str] = None,
+        protagonist_actions: int = None,
+        adversary_actions: int = None,
         policy_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
+        # If actions not provided, try to get from kwargs (e.g., when loading)
+        if protagonist_actions is None:
+            protagonist_actions = kwargs.pop('protagonist_actions', 12)  # default 4 directions * 3 bids
+        if adversary_actions is None:
+            adversary_actions = kwargs.pop('adversary_actions', 12)  # default 4 directions * 3 bids
+
         self.protagonist_actions = protagonist_actions
         self.adversary_actions = adversary_actions
-        
+
         # Update policy kwargs to include action space dimensions
         if policy_kwargs is None:
             policy_kwargs = {}

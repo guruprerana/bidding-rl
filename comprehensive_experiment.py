@@ -400,7 +400,7 @@ class ComprehensiveTrainer:
                 json.dump(episode_data, f, indent=2, default=str)
             
             # Create visualization
-            self.create_rollout_mp4(episode_data, rollout_file.with_suffix('.mp4'))
+            self.create_rollout_mp4(episode_data, rollout_file.with_suffix('.gif'))
         
         env.close()
     
@@ -410,8 +410,8 @@ class ComprehensiveTrainer:
         directions = ["Left", "Right", "Up", "Down"]
         return directions[direction] if 0 <= direction <= 3 else "Unknown"
     
-    def create_rollout_mp4(self, episode_data: Dict, mp4_path: Path):
-        """Create animated MP4 of episode rollout."""
+    def create_rollout_mp4(self, episode_data: Dict, gif_path: Path):
+        """Create animated GIF of episode rollout."""
         fig, ax = plt.subplots(figsize=(10, 8))
         
         def animate(frame):
@@ -488,12 +488,12 @@ class ComprehensiveTrainer:
         anim = animation.FuncAnimation(fig, animate, frames=len(episode_data["states"]) + 5, 
                                      interval=500, repeat=True)
         
-        # Save MP4
+        # Save GIF
         try:
-            anim.save(str(mp4_path), writer='ffmpeg', fps=1)
-            print(f"Rollout MP4 saved: {mp4_path}")
+            anim.save(str(gif_path), writer='pillow', fps=1)
+            print(f"Rollout GIF saved: {gif_path}")
         except Exception as e:
-            print(f"Warning: Could not save MP4 {mp4_path}: {e}")
+            print(f"Warning: Could not save GIF {gif_path}: {e}")
         
         plt.close()
     
@@ -680,7 +680,7 @@ class ComprehensiveTrainer:
                 json.dump(episode_log, f, indent=2, default=str)
             
             # Create cooperative rollout MP4
-            self.create_competition_mp4(episode_log, episode_file.with_suffix('.mp4'))
+            self.create_competition_mp4(episode_log, episode_file.with_suffix('.gif'))
         
         env.close()
         
@@ -753,8 +753,8 @@ class ComprehensiveTrainer:
 
         return summary
     
-    def create_competition_mp4(self, episode_data: Dict, mp4_path: Path):
-        """Create animated MP4 of cooperative episode."""
+    def create_competition_mp4(self, episode_data: Dict, gif_path: Path):
+        """Create animated GIF of cooperative episode."""
         fig, ax = plt.subplots(figsize=(10, 8))
 
         def animate(frame):
@@ -765,12 +765,15 @@ class ComprehensiveTrainer:
 
             state = episode_data["states"][frame]
             # state is now a numpy array from BiddingGridworld
-            # [agent_row_norm, agent_col_norm, t0_row, t0_col, t1_row, t1_col, t0_reached, t1_reached]
+            # [agent_row_norm, agent_col_norm, t0_row, t0_col, ..., tN_row, tN_col, t0_reached, ..., tN_reached]
             denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
             agent_row = int(state[0] * denom)
             agent_col = int(state[1] * denom)
             agent_pos = agent_row * self.grid_size + agent_col
-            targets_reached = [int(state[6]), int(state[7])]
+
+            # Extract targets_reached for all agents
+            target_reached_start_idx = 2 + 2 * self.num_agents
+            targets_reached = [int(state[target_reached_start_idx + i]) for i in range(self.num_agents)]
             
             if frame < len(episode_data["step_details"]):
                 step_detail = episode_data["step_details"][frame]
@@ -849,23 +852,77 @@ class ComprehensiveTrainer:
         anim = animation.FuncAnimation(fig, animate, frames=len(episode_data["states"]) + 3, 
                                      interval=800, repeat=True)
         
-        # Save MP4
+        # Save GIF
         try:
-            anim.save(str(mp4_path), writer='ffmpeg', fps=1)
-            print(f"Cooperative MP4 saved: {mp4_path}")
+            anim.save(str(gif_path), writer='pillow', fps=1)
+            print(f"Cooperative GIF saved: {gif_path}")
         except Exception as e:
-            print(f"Warning: Could not save MP4 {mp4_path}: {e}")
+            print(f"Warning: Could not save GIF {gif_path}: {e}")
         
         plt.close()
     
+    def run_evaluation_only(self, model_dir: str):
+        """Load existing models and run evaluation only."""
+        print(f"\n{'='*80}")
+        print("LOADING MODELS AND RUNNING EVALUATION")
+        print(f"{'='*80}")
+
+        start_time = time.time()
+
+        # Update models_dir to point to existing models
+        self.models_dir = Path(model_dir) / "models"
+
+        # Load models
+        print("\nPHASE 1: LOADING MODELS")
+        agents = []
+
+        for agent_id in range(self.num_agents):
+            model_path = self.models_dir / f"agent_{agent_id}_model.zip"
+            print(f"Loading {model_path}...")
+            agent = ZeroSumDQN.load(str(model_path))
+            agents.append(agent)
+
+        # Record rollouts
+        print("\nPHASE 2: RECORDING ROLLOUTS")
+        for agent_id, agent in enumerate(agents):
+            self.record_rollout(agent, agent_id, num_episodes=3, filename_prefix="eval_rollout")
+
+        # Run competition
+        print("\nPHASE 3: RUNNING COMPETITION")
+        competition_results = self.run_competition(agents, num_episodes=5)
+
+        # Final summary
+        total_time = time.time() - start_time
+
+        final_summary = {
+            "evaluation_completed": True,
+            "total_time": total_time,
+            "loaded_from": model_dir,
+            "log_directory": str(self.log_dir),
+            "cooperation_episodes": 5,
+            "cooperation_summary": competition_results["summary"]
+        }
+
+        summary_file = self.log_dir / "evaluation_summary.json"
+        with open(summary_file, 'w') as f:
+            json.dump(final_summary, f, indent=2, default=str)
+
+        print(f"\n{'='*80}")
+        print("EVALUATION COMPLETED!")
+        print(f"{'='*80}")
+        print(f"Total time: {total_time:.2f} seconds")
+        print(f"Results saved in: {self.log_dir}")
+        print(f"Summary saved: {summary_file}")
+        print(f"{'='*80}")
+
     def run_full_experiment(self):
         """Run the complete experiment pipeline."""
         print(f"\n{'='*80}")
         print("STARTING COMPREHENSIVE ZERO-SUM DQN EXPERIMENT")
         print(f"{'='*80}")
-        
+
         start_time = time.time()
-        
+
         # Phase 1: Train all agents
         print("\nPHASE 1: TRAINING")
         agents = []
@@ -877,7 +934,7 @@ class ComprehensiveTrainer:
             agents.append(agent)
             all_rewards.append(rewards)
             all_metrics.append(metrics)
-        
+
         # Phase 2: Save models
         print("\nPHASE 2: SAVING MODELS")
         for agent_id, agent in enumerate(agents):
@@ -896,10 +953,10 @@ class ComprehensiveTrainer:
         # Phase 5: Cooperative evaluation
         print("\nPHASE 5: RUNNING COOPERATIVE EVALUATION")
         competition_results = self.run_competition(agents, num_episodes=5)
-        
+
         # Phase 6: Final summary
         total_time = time.time() - start_time
-        
+
         final_summary = {
             "experiment_completed": True,
             "total_time": total_time,
@@ -912,11 +969,11 @@ class ComprehensiveTrainer:
         # Add final performance for each agent
         for i in range(self.num_agents):
             final_summary[f"agent_{i}_final_performance"] = all_metrics[i]["final_stats"]
-        
+
         summary_file = self.log_dir / "experiment_summary.json"
         with open(summary_file, 'w') as f:
             json.dump(final_summary, f, indent=2, default=str)
-        
+
         print(f"\n{'='*80}")
         print("EXPERIMENT COMPLETED SUCCESSFULLY!")
         print(f"{'='*80}")
@@ -928,8 +985,20 @@ class ComprehensiveTrainer:
 
 def main():
     """Main function to run the comprehensive experiment."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Run Zero-Sum DQN experiment')
+    parser.add_argument('--eval-only', type=str, default=None,
+                       help='Path to existing experiment directory to load models from and run evaluation only')
+
+    args = parser.parse_args()
+
     trainer = ComprehensiveTrainer()
-    trainer.run_full_experiment()
+
+    if args.eval_only:
+        trainer.run_evaluation_only(args.eval_only)
+    else:
+        trainer.run_full_experiment()
 
 
 if __name__ == "__main__":
