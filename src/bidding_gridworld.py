@@ -27,7 +27,7 @@ class BiddingGridworld(gym.Env):
         bid_upper_bound: int = 10,
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
-        max_steps: int = 30,
+        max_steps: int = 100,
         render_mode: Optional[str] = None
     ):
         """
@@ -386,6 +386,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
         direction_change_prob: float = 0.1,
+        max_steps: int = 100,
         render_mode: Optional[str] = None
     ):
         """
@@ -400,6 +401,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             bid_penalty: Penalty multiplier for bids (default: 0.1)
             target_reward: Reward for reaching target (default: 10.0)
             direction_change_prob: Probability of randomly changing direction (default: 0.1)
+            max_steps: Maximum number of steps per episode (default: 100)
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -409,6 +411,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             bid_upper_bound=bid_upper_bound,
             bid_penalty=bid_penalty,
             target_reward=target_reward,
+            max_steps=max_steps,
             render_mode=render_mode
         )
 
@@ -455,13 +458,29 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         info["winning_agent"] = info.get("winning_agent", -1)
         info["bids"] = info.get("bids", {})
 
+        # terminated is always false in this moving targets version
+        terminated = False
+
         return obs, rewards, terminated, truncated, info
 
     def _move_targets(self):
         """Move all targets according to their directions."""
         for i in range(self.num_agents):
-            # Skip moving targets that have been reached
+            # If target was just reached, respawn it at a random position
             if self.targets_reached[i] == 1:
+                # Get all available positions (excluding agent position)
+                available_positions = [
+                    (r, c) for r in range(self.grid_size)
+                    for c in range(self.grid_size)
+                    if not np.array_equal(np.array([r, c]), self.agent_position)
+                ]
+                # Respawn at random position
+                new_pos = random.choice(available_positions)
+                self.target_positions[i] = np.array(new_pos, dtype=np.int32)
+                # Reset the reached flag
+                self.targets_reached[i] = 0
+                # Assign new random direction
+                self.target_directions[i] = np.random.randint(0, 4)
                 continue
 
             # With probability direction_change_prob, randomly change direction

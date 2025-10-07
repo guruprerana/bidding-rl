@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 from typing import Dict, List, Tuple, Optional, Union
-from bidding_gridworld import BiddingGridworld
+from bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
 
 
 class ZeroSumBiddingWrapper(gym.Env):
@@ -28,7 +28,9 @@ class ZeroSumBiddingWrapper(gym.Env):
         bid_upper_bound: int = 10,
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
-        render_mode: Optional[str] = None
+        env_class = None,
+        render_mode: Optional[str] = None,
+        **env_kwargs
     ):
         """
         Initialize the zero-sum wrapper.
@@ -41,7 +43,11 @@ class ZeroSumBiddingWrapper(gym.Env):
             bid_upper_bound: Maximum bid value
             bid_penalty: Penalty multiplier for bids
             target_reward: Reward for reaching target
+            env_class: Environment class to use (BiddingGridworld or MovingTargetBiddingGridworld).
+                      If None, defaults to BiddingGridworld.
             render_mode: Rendering mode
+            **env_kwargs: Additional keyword arguments to pass to the environment
+                         (e.g., direction_change_prob for MovingTargetBiddingGridworld)
         """
         super().__init__()
 
@@ -50,15 +56,20 @@ class ZeroSumBiddingWrapper(gym.Env):
         self.target_agent_id = target_agent_id
         self.num_agents = num_agents
 
-        # Create the underlying BiddingGridworld environment
-        self.env = BiddingGridworld(
+        # Default to BiddingGridworld if no class specified
+        if env_class is None:
+            env_class = BiddingGridworld
+
+        # Create the underlying environment (BiddingGridworld or MovingTargetBiddingGridworld)
+        self.env = env_class(
             grid_size=grid_size,
             num_agents=num_agents,
             target_positions=target_positions,
             bid_upper_bound=bid_upper_bound,
             bid_penalty=bid_penalty,
             target_reward=target_reward,
-            render_mode=render_mode
+            render_mode=render_mode,
+            **env_kwargs
         )
         
         # Store bid bound for action conversion
@@ -297,4 +308,45 @@ if __name__ == "__main__":
     
     env_1.close()
     
-    print("\n✅ ZeroSumBiddingWrapper testing completed!")
+    # Test ZeroSumBiddingWrapper with MovingTargetBiddingGridworld
+    print("\n" + "="*60)
+    print("Testing ZeroSumBiddingWrapper with Moving Targets")
+    print("="*60)
+
+    env_moving = ZeroSumBiddingWrapper(
+        target_agent_id=0,
+        grid_size=5,
+        num_agents=2,
+        bid_upper_bound=3,
+        bid_penalty=0.1,
+        target_reward=10.0,
+        env_class=MovingTargetBiddingGridworld,
+        direction_change_prob=0.2,
+        max_steps=30
+    )
+
+    obs, info = env_moving.reset(seed=42)
+    print("\nInitial observation:", obs)
+    print("Initial info:", info)
+    env_moving.render()
+
+    # Run a few steps to see targets moving
+    for step in range(5):
+        action = env_moving.action_space.sample()
+        print(f"\nStep {step + 1}")
+
+        obs, reward, terminated, truncated, info = env_moving.step(action)
+
+        print(f"Observation: {obs}")
+        print(f"Reward: {reward}")
+
+        env_moving.render()
+
+        if terminated or truncated:
+            print("Episode finished!")
+            break
+
+    env_moving.close()
+
+    print("\n✅ All ZeroSumBiddingWrapper tests completed!")
+

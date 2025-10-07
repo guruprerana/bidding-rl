@@ -27,7 +27,7 @@ import torch
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.bidding_gridworld import BiddingGridworld
+from src.bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
 from src.zero_sum_wrapper import ZeroSumBiddingWrapper
 from src.zero_sum_dqn import ZeroSumDQN, ZeroSumDQNPolicy
 
@@ -35,11 +35,12 @@ from src.zero_sum_dqn import ZeroSumDQN, ZeroSumDQNPolicy
 class ComprehensiveTrainer:
     """Comprehensive trainer for Zero-Sum DQN experiments."""
     
-    def __init__(self, base_log_dir: str = "logs", experiment_name: str = ""):
+    def __init__(self, base_log_dir: str = "logs", experiment_name: str = "", use_moving_targets: bool = False):
         """Initialize the trainer with timestamped logging directory."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_name = experiment_name if experiment_name else "6x6grid_3targets_dqn_exp1"
+        experiment_name = experiment_name if experiment_name else "6x6grid_3movingtargets_dqn_exp1"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
+        self.use_moving_targets = use_moving_targets
         
         # Create subdirectories
         self.training_dir = self.log_dir / "training"
@@ -57,12 +58,12 @@ class ComprehensiveTrainer:
         # Training parameters
         self.grid_size = 6
         self.num_agents = 3
-        self.bid_upper_bound = 2
-        self.training_timesteps = 20000
-        self.learning_rate = 0.01
+        self.bid_upper_bound = 4  # Increased for richer bidding strategy (0-5 = 6 values)
+        self.training_timesteps = 1_000_000
+        self.learning_rate = 0.001  # Standard DQN learning rate
         self.discount_factor = 0.99
         self.epsilon = 0.5
-        self.min_epsilon = 0.1
+        self.min_epsilon = 0.01
 
         # Define target positions: corners and center
         self.target_positions = [
@@ -85,8 +86,10 @@ class ComprehensiveTrainer:
             "learning_rate": self.learning_rate,
             "discount_factor": self.discount_factor,
             "epsilon": self.epsilon,
+            "use_moving_targets": self.use_moving_targets,
             "timestamp": datetime.now().isoformat(),
-            "description": "Zero-Sum DQN training and competition experiment with 3 agents on 6x6 grid"
+            "description": "Zero-Sum DQN training and competition experiment with 3 agents on 6x6 grid" +
+                          (" (moving targets)" if self.use_moving_targets else "")
         }
         
         with open(self.log_dir / "config.json", 'w') as f:
@@ -97,24 +100,32 @@ class ComprehensiveTrainer:
         print(f"\n{'='*60}")
         print(f"Training Agent {target_agent_id} (Target: {target_agent_id})")
         print(f"{'='*60}")
-        
-        # Create environment
-        env = ZeroSumBiddingWrapper(
-            target_agent_id=target_agent_id,
-            num_agents=self.num_agents,
-            grid_size=self.grid_size,
-            target_positions=self.target_positions,
-            bid_upper_bound=self.bid_upper_bound,
-            bid_penalty=0.1,
-            target_reward=10.0
-        )
+
+        # Create environment with appropriate env_class
+        env_kwargs = {
+            "target_agent_id": target_agent_id,
+            "num_agents": self.num_agents,
+            "grid_size": self.grid_size,
+            "target_positions": self.target_positions,
+            "bid_upper_bound": self.bid_upper_bound,
+            "bid_penalty": 0.1,
+            "target_reward": 10.0,
+        }
+
+        # Add environment class and moving target specific parameters
+        if self.use_moving_targets:
+            env_kwargs["env_class"] = MovingTargetBiddingGridworld
+            env_kwargs["direction_change_prob"] = 0.1
+            env_kwargs["max_steps"] = self.grid_size * 10  # Longer episodes for moving targets
+
+        env = ZeroSumBiddingWrapper(**env_kwargs)
         
         # Calculate action space size
         action_space_size = 4 * (self.bid_upper_bound + 1)
         
         # Network architecture parameters
         policy_kwargs = {
-            "net_arch": [64, 64],  # Two hidden layers with 128 units each
+            "net_arch": [128, 128],  # Two hidden layers with 128 units each
             "activation_fn": torch.nn.ReLU,
             "normalize_images": False
         }
@@ -131,7 +142,7 @@ class ComprehensiveTrainer:
             exploration_final_eps=self.min_epsilon,
             learning_starts=1000,
             batch_size=32,
-            buffer_size=50000,
+            buffer_size=100000,  # Larger buffer for better experience replay
             target_update_interval=1000,
             policy_kwargs=policy_kwargs,
             verbose=1
@@ -294,20 +305,29 @@ class ComprehensiveTrainer:
         
         print(f"Training plots saved: {plot_path}")
     
-    def record_rollout(self, agent: ZeroSumDQN, target_agent_id: int, 
+    def record_rollout(self, agent: ZeroSumDQN, target_agent_id: int,
                       num_episodes: int = 5, filename_prefix: str = "rollout"):
         """Record rollout videos/MP4s for a trained agent."""
         print(f"Recording rollouts for Agent {target_agent_id}...")
-        
-        env = ZeroSumBiddingWrapper(
-            target_agent_id=target_agent_id,
-            num_agents=self.num_agents,
-            grid_size=self.grid_size,
-            target_positions=self.target_positions,
-            bid_upper_bound=self.bid_upper_bound,
-            bid_penalty=0.1,
-            target_reward=10.0
-        )
+
+        # Create environment with appropriate env_class
+        env_kwargs = {
+            "target_agent_id": target_agent_id,
+            "num_agents": self.num_agents,
+            "grid_size": self.grid_size,
+            "target_positions": self.target_positions,
+            "bid_upper_bound": self.bid_upper_bound,
+            "bid_penalty": 0.1,
+            "target_reward": 10.0,
+        }
+
+        # Add environment class and moving target specific parameters
+        if self.use_moving_targets:
+            env_kwargs["env_class"] = MovingTargetBiddingGridworld
+            env_kwargs["direction_change_prob"] = 0.1
+            env_kwargs["max_steps"] = self.grid_size * 10  # Longer episodes for moving targets
+
+        env = ZeroSumBiddingWrapper(**env_kwargs)
 
         for episode in range(num_episodes):
             states = []
@@ -323,7 +343,8 @@ class ComprehensiveTrainer:
             
             # Record episode
             while (not terminated) and (not truncated):
-                # obs is now a numpy array: [agent_row, agent_col, target_row, target_col, target_reached]
+                # obs format from both wrappers:
+                # [agent_row, agent_col, target_row, target_col, target_reached] (5 elements)
                 agent_row_norm = obs[0]
                 agent_col_norm = obs[1]
                 target_reached = int(obs[4])
@@ -513,15 +534,24 @@ class ComprehensiveTrainer:
         print(f"\n{'='*60}")
         print(f"COOPERATIVE EVALUATION: All {self.num_agents} Agents Pursuing Their Targets")
         print(f"{'='*60}")
-        
-        env = BiddingGridworld(
-            grid_size=self.grid_size,
-            num_agents=self.num_agents,
-            target_positions=self.target_positions,
-            bid_upper_bound=self.bid_upper_bound,
-            bid_penalty=0.1,
-            target_reward=10.0
-        )
+
+        # Create environment based on moving targets flag
+        env_class = MovingTargetBiddingGridworld if self.use_moving_targets else BiddingGridworld
+        env_kwargs = {
+            "grid_size": self.grid_size,
+            "num_agents": self.num_agents,
+            "target_positions": self.target_positions,
+            "bid_upper_bound": self.bid_upper_bound,
+            "bid_penalty": 0.1,
+            "target_reward": 10.0,
+            "max_steps": self.grid_size * 10  # Reasonable max_steps for competition
+        }
+
+        # Add direction_change_prob for moving targets
+        if self.use_moving_targets:
+            env_kwargs["direction_change_prob"] = 0.1
+
+        env = env_class(**env_kwargs)
         
         competition_results = []
         
@@ -990,10 +1020,17 @@ def main():
     parser = argparse.ArgumentParser(description='Run Zero-Sum DQN experiment')
     parser.add_argument('--eval-only', type=str, default=None,
                        help='Path to existing experiment directory to load models from and run evaluation only')
+    parser.add_argument('--moving-targets', action='store_true',
+                       help='Use moving targets gridworld instead of static targets')
+    parser.add_argument('--experiment-name', type=str, default="",
+                       help='Custom experiment name (default: auto-generated)')
 
     args = parser.parse_args()
 
-    trainer = ComprehensiveTrainer()
+    trainer = ComprehensiveTrainer(
+        experiment_name=args.experiment_name,
+        use_moving_targets=args.moving_targets
+    )
 
     if args.eval_only:
         trainer.run_evaluation_only(args.eval_only)
