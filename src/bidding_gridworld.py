@@ -449,14 +449,20 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         # Execute parent step (agent movement and reward calculation)
         obs, rewards, terminated, truncated, info = super().step(action)
 
+        # Save winning_agent and bids from parent step
+        winning_agent = info.get("winning_agent", -1)
+        bids = info.get("bids", {})
+
         # Move targets after agent has moved
         self._move_targets()
 
-        # Update observation with new target positions
+        # Update observation and info with new target positions
         obs = self._get_observation()
         info = self._get_info()
-        info["winning_agent"] = info.get("winning_agent", -1)
-        info["bids"] = info.get("bids", {})
+
+        # Restore winning_agent and bids from parent step
+        info["winning_agent"] = winning_agent
+        info["bids"] = bids
 
         # terminated is always false in this moving targets version
         terminated = False

@@ -903,10 +903,17 @@ class ComprehensiveTrainer:
                 if action_strs:
                     title += f'{" | ".join(action_strs)}\n'
 
-                # Show rewards for all agents
+                # Show cumulative rewards for all agents up to this frame
                 if rewards:
-                    rewards_strs = [f"{i}={rewards[f'agent_{i}']:.2f}" for i in range(self.num_agents)]
-                    title += f'Rewards: {", ".join(rewards_strs)}'
+                    cumulative_rewards = {}
+                    for i in range(self.num_agents):
+                        agent_key = f"agent_{i}"
+                        cumulative_rewards[agent_key] = sum(
+                            episode_data["rewards"][f].get(agent_key, 0)
+                            for f in range(frame + 1)
+                        )
+                    rewards_strs = [f"{i}={cumulative_rewards[f'agent_{i}']:.2f}" for i in range(self.num_agents)]
+                    title += f'Cumulative Rewards: {", ".join(rewards_strs)}'
             
             ax.set_title(title, fontsize=11)
             
