@@ -157,15 +157,21 @@ class BiddingGridworld(gym.Env):
 
         # Determine winner of the bid (highest bidder)
         max_bid = max(agent_bids.values())
-        winners = [agent_id for agent_id, bid in agent_bids.items() if bid == max_bid]
 
-        # If tie, randomly choose among winners
-        winning_agent = random.choice(winners)
-        winning_direction = agent_actions[winning_agent]["direction"]
-        
-        # Execute the winning action
-        new_position = self._move_agent(self.agent_position, winning_direction)
-        self.agent_position = new_position
+        # Only move if at least one agent bid > 0
+        if max_bid > 0:
+            winners = [agent_id for agent_id, bid in agent_bids.items() if bid == max_bid]
+
+            # If tie, randomly choose among winners
+            winning_agent = random.choice(winners)
+            winning_direction = agent_actions[winning_agent]["direction"]
+
+            # Execute the winning action
+            new_position = self._move_agent(self.agent_position, winning_direction)
+            self.agent_position = new_position
+        else:
+            # All agents bid 0, no movement occurs
+            winning_agent = None
         
         # Check if any targets are reached for the first time this step
         targets_just_reached = {}
