@@ -28,6 +28,7 @@ class BiddingGridworld(gym.Env):
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
         max_steps: int = 100,
+        action_window: int = 1,
         render_mode: Optional[str] = None
     ):
         """
@@ -42,6 +43,7 @@ class BiddingGridworld(gym.Env):
             bid_penalty: Penalty multiplier for bids (default: 0.1)
             target_reward: Reward for reaching target (default: 10.0)
             max_steps: Maximum number of steps per episode (default: 100)
+            action_window: Number of steps a winning agent controls the action (default: 1)
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
@@ -63,6 +65,7 @@ class BiddingGridworld(gym.Env):
         self.bid_penalty = bid_penalty
         self.target_reward = target_reward
         self.max_steps = max_steps
+        self.action_window = action_window
         self.render_mode = render_mode
         
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
@@ -124,6 +127,10 @@ class BiddingGridworld(gym.Env):
 
         # Step counter
         self.step_count = 0
+
+        # Action window tracking
+        self.window_agent = None  # Which agent currently has control
+        self.window_steps_remaining = 0  # How many steps remain in window
         
         observation = self._get_observation()
         info = self._get_info()
@@ -155,23 +162,44 @@ class BiddingGridworld(gym.Env):
             agent_actions[i] = action[agent_key]
             agent_bids[i] = action[agent_key]["bid"]
 
-        # Determine winner of the bid (highest bidder)
-        max_bid = max(agent_bids.values())
-
-        # Only move if at least one agent bid > 0
-        if max_bid > 0:
-            winners = [agent_id for agent_id, bid in agent_bids.items() if bid == max_bid]
-
-            # If tie, randomly choose among winners
-            winning_agent = random.choice(winners)
+        # Check if we're in an action window
+        apply_bid_penalty = False
+        if self.window_steps_remaining > 0:
+            # Use the locked-in agent's action
+            winning_agent = self.window_agent
             winning_direction = agent_actions[winning_agent]["direction"]
 
-            # Execute the winning action
+            # Execute the action
             new_position = self._move_agent(self.agent_position, winning_direction)
             self.agent_position = new_position
+
+            # Decrement window
+            self.window_steps_remaining -= 1
         else:
-            # All agents bid 0, no movement occurs
-            winning_agent = None
+            # Normal bidding
+            max_bid = max(agent_bids.values())
+
+            # Only move if at least one agent bid > 0
+            if max_bid > 0:
+                winners = [agent_id for agent_id, bid in agent_bids.items() if bid == max_bid]
+
+                # If tie, randomly choose among winners
+                winning_agent = random.choice(winners)
+                winning_direction = agent_actions[winning_agent]["direction"]
+
+                # Execute the winning action
+                new_position = self._move_agent(self.agent_position, winning_direction)
+                self.agent_position = new_position
+
+                # Start new action window
+                self.window_agent = winning_agent
+                self.window_steps_remaining = self.action_window - 1  # -1 because current step counts
+
+                # Apply bid penalty on first step of window
+                apply_bid_penalty = True
+            else:
+                # All agents bid 0, no movement occurs
+                winning_agent = None
         
         # Check if any targets are reached for the first time this step
         targets_just_reached = {}
@@ -183,7 +211,7 @@ class BiddingGridworld(gym.Env):
                 targets_just_reached[i] = False
 
         # Calculate rewards for all agents
-        rewards = self._calculate_rewards(agent_bids, winning_agent, targets_just_reached)
+        rewards = self._calculate_rewards(agent_bids, winning_agent, targets_just_reached, apply_bid_penalty)
 
         # Check termination conditions
         all_targets_reached = bool(np.all(self.targets_reached == 1))
@@ -218,21 +246,25 @@ class BiddingGridworld(gym.Env):
         self,
         agent_bids: Dict[int, int],
         winning_agent: int,
-        targets_just_reached: Dict[int, bool]
+        targets_just_reached: Dict[int, bool],
+        apply_bid_penalty: bool
     ) -> Dict[str, float]:
         """Calculate rewards for all agents."""
         rewards = {f"agent_{i}": 0.0 for i in range(self.num_agents)}
 
-        # Bid penalties and rewards
-        # Each agent pays penalty for their own bid and receives reward from all other agents' bids
-        for i in range(self.num_agents):
-            # Pay for own bid
-            rewards[f"agent_{i}"] -= self.bid_penalty * agent_bids[i]
-            # Receive reward from other agents' bids (disabled currently)
-            # for j in range(self.num_agents):
-            #     if i != j:
-            #         rewards[f"agent_{i}"] += self.bid_penalty * agent_bids[j]
+        # Bid penalties and rewards (only apply on the first step of a window)
+        if apply_bid_penalty:
+            # Each agent pays penalty for their own bid and receives reward from all other agents' bids
+            for i in range(self.num_agents):
+                # Pay for own bid
+                rewards[f"agent_{i}"] -= self.bid_penalty * agent_bids[i]
+                # Receive reward from other agents' bids (disabled currently)
+                # for j in range(self.num_agents):
+                #     if i != j:
+                #         rewards[f"agent_{i}"] += self.bid_penalty * agent_bids[j]
 
+        # Target rewards (always apply when reached)
+        for i in range(self.num_agents):
             if targets_just_reached[i]:
                 rewards[f"agent_{i}"] += self.target_reward
 
@@ -393,6 +425,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         target_reward: float = 10.0,
         direction_change_prob: float = 0.1,
         max_steps: int = 100,
+        action_window: int = 1,
         render_mode: Optional[str] = None
     ):
         """
@@ -408,6 +441,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             target_reward: Reward for reaching target (default: 10.0)
             direction_change_prob: Probability of randomly changing direction (default: 0.1)
             max_steps: Maximum number of steps per episode (default: 100)
+            action_window: Number of steps a winning agent controls the action (default: 1)
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -418,6 +452,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             bid_penalty=bid_penalty,
             target_reward=target_reward,
             max_steps=max_steps,
+            action_window=action_window,
             render_mode=render_mode
         )
 

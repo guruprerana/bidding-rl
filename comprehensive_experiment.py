@@ -2,10 +2,10 @@
 Comprehensive training and evaluation script for Zero-Sum DQN on BiddingGridworld.
 
 This script:
-1. Trains both agents using Zero-Sum DQN
-2. Saves learned models and training logs
+1. Trains a single agent using Zero-Sum DQN
+2. Saves learned model and training logs
 3. Records rollout videos/MP4s after training
-4. Loads both policies and makes them compete in the original environment
+4. Deploys multiple instances of the same agent to compete in the original environment
 5. Records and saves competition rollouts
 
 All outputs are organized in timestamped subdirectories within the logs folder.
@@ -40,7 +40,7 @@ class ComprehensiveTrainer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
             target_type = "moving" if use_moving_targets else "static"
-            experiment_name = f"6x6grid_3agents_{target_type}_dqn"
+            experiment_name = f"15x15grid_3agents_{target_type}_dqn"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         self.use_moving_targets = use_moving_targets
         
@@ -58,14 +58,20 @@ class ComprehensiveTrainer:
         print(f"Experiment directory: {self.log_dir}")
         
         # Training parameters
-        self.grid_size = 6
+        self.grid_size = 15
         self.num_agents = 3
         self.bid_upper_bound = 4  # Increased for richer bidding strategy (0-4 = 5 values)
-        self.training_timesteps = 1_000_000
+        self.training_timesteps = 2_000_000
         self.learning_rate = 0.001  # Standard DQN learning rate
         self.discount_factor = 0.99
         self.epsilon = 0.5
         self.min_epsilon = 0.01
+
+        # Environment parameters
+        self.target_reward = 100.0  # Reward for reaching a target
+        self.bid_penalty = 0.1  # Penalty multiplier for bids
+        self.max_steps = 100  # Maximum steps per episode (default: grid_size * 10)
+        self.action_window = 1  # Number of steps a winning agent controls the action
 
         # Define target positions: corners and center
         self.target_positions = [
@@ -88,12 +94,17 @@ class ComprehensiveTrainer:
             "learning_rate": self.learning_rate,
             "discount_factor": self.discount_factor,
             "epsilon": self.epsilon,
+            "target_reward": self.target_reward,
+            "bid_penalty": self.bid_penalty,
+            "max_steps": self.max_steps,
+            "action_window": self.action_window,
             "use_moving_targets": self.use_moving_targets,
             "timestamp": datetime.now().isoformat(),
-            "description": "Zero-Sum DQN training and competition experiment with 3 agents on 6x6 grid" +
-                          (" (moving targets)" if self.use_moving_targets else "")
+            "description": f"Zero-Sum DQN: Single agent trained and deployed as {self.num_agents} instances on 6x6 grid" +
+                          (" (moving targets)" if self.use_moving_targets else ""),
+            "training_approach": "single_agent_multiple_instances"
         }
-        
+
         with open(self.log_dir / "config.json", 'w') as f:
             json.dump(config, f, indent=2)
     
@@ -110,9 +121,10 @@ class ComprehensiveTrainer:
             "grid_size": self.grid_size,
             "target_positions": self.target_positions,
             "bid_upper_bound": self.bid_upper_bound,
-            "bid_penalty": 0.1,
-            "target_reward": 10.0,
-            "max_steps": self.grid_size * 10,  # Consistent max_steps for all environments
+            "bid_penalty": self.bid_penalty,
+            "target_reward": self.target_reward,
+            "max_steps": self.max_steps,
+            "action_window": self.action_window,
         }
 
         # Add environment class and moving target specific parameters
@@ -330,9 +342,10 @@ class ComprehensiveTrainer:
             "grid_size": self.grid_size,
             "target_positions": self.target_positions,
             "bid_upper_bound": self.bid_upper_bound,
-            "bid_penalty": 0.1,
-            "target_reward": 10.0,
-            "max_steps": self.grid_size * 10,  # Consistent max_steps for all environments
+            "bid_penalty": self.bid_penalty,
+            "target_reward": self.target_reward,
+            "max_steps": self.max_steps,
+            "action_window": self.action_window,
         }
 
         # Add environment class and moving target specific parameters
@@ -482,18 +495,39 @@ class ComprehensiveTrainer:
             target_colors = ['lightblue', 'lightcoral', 'lightyellow']
             edge_colors = ['blue', 'red', 'orange']
 
+            # Determine if this agent is currently in control
+            winning_agent = None
+            if frame < len(episode_data.get("step_details", [])):
+                step_detail = episode_data["step_details"][frame]
+                winning_agent = step_detail.get("winning_agent", -1)
+
+            # Use thicker border and glow effect for controlling agent's target
+            is_controlling = (winning_agent == target_id)
+            edge_width = 4 if is_controlling else 2
+            edge_color = 'gold' if is_controlling else edge_colors[target_id % 3]
+
             if targets_reached[target_id] == 0:
                 ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
                                          0.8, 0.8, facecolor=target_colors[target_id % 3],
-                                         edgecolor=edge_colors[target_id % 3]))
+                                         edgecolor=edge_color, linewidth=edge_width))
                 ax.text(target_pos[1], target_pos[0], str(target_id), ha='center', va='center',
                        fontsize=12, fontweight='bold')
+                # Add control indicator
+                if is_controlling:
+                    ax.text(target_pos[1], target_pos[0] - 0.6, '⚡', ha='center', va='center',
+                           fontsize=10, color='gold')
             else:
                 ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
+                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green', linewidth=2))
                 ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
 
-            # Draw agent
+            # Draw agent with colored ring showing which target it's moving towards
+            # Add outer ring in controlling agent's color
+            if winning_agent is not None and winning_agent >= 0:
+                ring_color = edge_colors[winning_agent % 3] if winning_agent != target_id else 'gold'
+                ax.add_patch(plt.Circle((agent_pos[1], agent_pos[0]), 0.35,
+                                       facecolor='none', edgecolor=ring_color, linewidth=3))
+
             ax.add_patch(plt.Circle((agent_pos[1], agent_pos[0]), 0.3, facecolor='yellow', edgecolor='orange'))
             ax.text(agent_pos[1], agent_pos[0], 'A', ha='center', va='center', fontsize=10, fontweight='bold')
 
@@ -522,7 +556,14 @@ class ComprehensiveTrainer:
                     
                     winner = step_detail.get("winning_agent", -1)
                     title += f'\nProtagonist: {prot_dir} (bid: {prot_bid}) | Adversary: {adv_dir} (bid: {adv_bid})'
-                    title += f'\nWinner: {"Protagonist" if winner == target_id else "Adversary" if winner != -1 else "Tie"}'
+                    if winner is None:
+                        title += f'\nWinner: No Movement (all bid 0)'
+                    elif winner == target_id:
+                        title += f'\nWinner: Protagonist ⚡'
+                    elif winner != -1:
+                        title += f'\nWinner: Adversary'
+                    else:
+                        title += f'\nWinner: Tie'
             
             ax.set_title(title, fontsize=12)
             
@@ -567,9 +608,10 @@ class ComprehensiveTrainer:
             "num_agents": self.num_agents,
             "target_positions": self.target_positions,
             "bid_upper_bound": self.bid_upper_bound,
-            "bid_penalty": 0.1,
-            "target_reward": 10.0,
-            "max_steps": self.grid_size * 10  # Reasonable max_steps for competition
+            "bid_penalty": self.bid_penalty,
+            "target_reward": self.target_reward,
+            "max_steps": self.max_steps,
+            "action_window": self.action_window,
         }
 
         # Add direction_change_prob for moving targets
@@ -861,21 +903,43 @@ class ComprehensiveTrainer:
             target_colors = ['lightblue', 'lightcoral', 'lightyellow']
             edge_colors = ['blue', 'red', 'orange']
 
+            # Determine which agent is currently in control
+            winning_agent = None
+            if step_detail:
+                winning_agent = step_detail.get("winning_agent", -1)
+
             for i in range(self.num_agents):
                 target_pos = target_positions[i]  # Use actual position from observation
 
+                # Highlight the controlling agent's target
+                is_controlling = (winning_agent == i)
+                edge_width = 4 if is_controlling else 2
+                edge_color = 'gold' if is_controlling else edge_colors[i]
+
                 if targets_reached[i] == 0:
                     ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                             0.8, 0.8, facecolor=target_colors[i], edgecolor=edge_colors[i]))
+                                             0.8, 0.8, facecolor=target_colors[i],
+                                             edgecolor=edge_color, linewidth=edge_width))
                     ax.text(target_pos[1], target_pos[0], str(i), ha='center', va='center', fontsize=12, fontweight='bold')
+                    # Add control indicator
+                    if is_controlling:
+                        ax.text(target_pos[1], target_pos[0] - 0.6, '⚡', ha='center', va='center',
+                               fontsize=10, color='gold')
                 else:
                     ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                             0.8, 0.8, facecolor='lightgreen', edgecolor='green'))
+                                             0.8, 0.8, facecolor='lightgreen', edgecolor='green', linewidth=2))
                     ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
 
-            # Draw agent
+            # Draw agent with colored ring showing which target it's moving towards
             row = agent_pos // self.grid_size
             col = agent_pos % self.grid_size
+
+            # Add outer ring in controlling agent's color
+            if winning_agent is not None and winning_agent >= 0 and winning_agent < self.num_agents:
+                ring_color = edge_colors[winning_agent]
+                ax.add_patch(plt.Circle((col, row), 0.35,
+                                       facecolor='none', edgecolor=ring_color, linewidth=3))
+
             ax.add_patch(plt.Circle((col, row), 0.3, facecolor='yellow', edgecolor='orange'))
             ax.text(col, row, 'A', ha='center', va='center', fontsize=10, fontweight='bold')
 
@@ -888,7 +952,8 @@ class ComprehensiveTrainer:
             if step_detail:
                 # Show current target status
                 targets_status = ", ".join([f"{i}={'✓' if targets_reached[i] else '✗'}" for i in range(self.num_agents)])
-                title += f'Movement Winner: Agent {step_detail["winning_agent"]} | Targets: {targets_status}\n'
+                winner_text = f'Agent {step_detail["winning_agent"]}' if step_detail["winning_agent"] is not None else 'No Movement'
+                title += f'Movement Winner: {winner_text} | Targets: {targets_status}\n'
 
                 # Show actions and bids for all agents
                 actions = step_detail.get("actions", {})
@@ -935,9 +1000,9 @@ class ComprehensiveTrainer:
         plt.close()
     
     def run_evaluation_only(self, model_dir: str):
-        """Load existing models and run evaluation only."""
+        """Load existing model and run evaluation only."""
         print(f"\n{'='*80}")
-        print("LOADING MODELS AND RUNNING EVALUATION")
+        print("LOADING MODEL AND RUNNING EVALUATION")
         print(f"{'='*80}")
 
         start_time = time.time()
@@ -945,23 +1010,22 @@ class ComprehensiveTrainer:
         # Update models_dir to point to existing models
         self.models_dir = Path(model_dir) / "models"
 
-        # Load models
-        print("\nPHASE 1: LOADING MODELS")
-        agents = []
+        # Load single model
+        print("\nPHASE 1: LOADING MODEL")
+        model_path = self.models_dir / "agent_0_model.zip"
+        print(f"Loading {model_path}...")
+        agent = ZeroSumDQN.load(str(model_path))
 
-        for agent_id in range(self.num_agents):
-            model_path = self.models_dir / f"agent_{agent_id}_model.zip"
-            print(f"Loading {model_path}...")
-            agent = ZeroSumDQN.load(str(model_path))
-            agents.append(agent)
-
-        # Record rollouts
+        # Record rollouts for each target
         print("\nPHASE 2: RECORDING ROLLOUTS")
-        for agent_id, agent in enumerate(agents):
-            self.record_rollout(agent, agent_id, num_episodes=3, filename_prefix="eval_rollout")
+        print(f"Recording rollouts of the agent pursuing each target")
+        for target_id in range(self.num_agents):
+            self.record_rollout(agent, target_id, num_episodes=3, filename_prefix="eval_rollout")
 
-        # Run competition
+        # Run competition (deploy multiple instances of same agent)
         print("\nPHASE 3: RUNNING COMPETITION")
+        print(f"Deploying {self.num_agents} instances of the same trained agent")
+        agents = [agent] * self.num_agents  # Use same agent multiple times
         competition_results = self.run_competition(agents, num_episodes=5)
 
         # Final summary
@@ -973,7 +1037,9 @@ class ComprehensiveTrainer:
             "loaded_from": model_dir,
             "log_directory": str(self.log_dir),
             "cooperation_episodes": 5,
-            "cooperation_summary": competition_results["summary"]
+            "cooperation_summary": competition_results["summary"],
+            "agent_deployment": "single_agent_multiple_instances",
+            "num_instances": self.num_agents
         }
 
         summary_file = self.log_dir / "evaluation_summary.json"
@@ -996,35 +1062,28 @@ class ComprehensiveTrainer:
 
         start_time = time.time()
 
-        # Phase 1: Train all agents
-        print("\nPHASE 1: TRAINING")
-        agents = []
-        all_rewards = []
-        all_metrics = []
+        # Phase 1: Train ONE agent (will be deployed as multiple instances)
+        print("\nPHASE 1: TRAINING SINGLE AGENT")
+        print("Training one agent that will be deployed as multiple instances during competition")
+        agent, rewards, metrics = self.train_agent(target_agent_id=0)
 
-        for agent_id in range(self.num_agents):
-            agent, rewards, metrics = self.train_agent(target_agent_id=agent_id)
-            agents.append(agent)
-            all_rewards.append(rewards)
-            all_metrics.append(metrics)
+        # Phase 2: Save model
+        print("\nPHASE 2: SAVING MODEL")
+        self.save_model(agent, 0)
 
-        # Phase 2: Save models
-        print("\nPHASE 2: SAVING MODELS")
-        for agent_id, agent in enumerate(agents):
-            self.save_model(agent, agent_id)
+        # Phase 3: Skip training plots (only one agent)
+        print("\nPHASE 3: SKIPPING TRAINING PLOTS (single agent)")
 
-        # Phase 3: Create training plots (only plot first 2 agents for compatibility)
-        print("\nPHASE 3: CREATING TRAINING PLOTS")
-        if self.num_agents >= 2:
-            self.plot_training_results(all_rewards[0], all_rewards[1])
-
-        # Phase 4: Record rollouts
+        # Phase 4: Record rollouts for the single agent against different targets
         print("\nPHASE 4: RECORDING TRAINING ROLLOUTS")
-        for agent_id, agent in enumerate(agents):
-            self.record_rollout(agent, agent_id, num_episodes=3, filename_prefix="training_rollout")
+        print("Recording rollouts of the agent pursuing each target")
+        for target_id in range(self.num_agents):
+            self.record_rollout(agent, target_id, num_episodes=3, filename_prefix="training_rollout")
 
-        # Phase 5: Cooperative evaluation
+        # Phase 5: Cooperative evaluation (deploy 3 instances of same agent)
         print("\nPHASE 5: RUNNING COOPERATIVE EVALUATION")
+        print(f"Deploying {self.num_agents} instances of the same trained agent")
+        agents = [agent] * self.num_agents  # Use same agent multiple times
         competition_results = self.run_competition(agents, num_episodes=5)
 
         # Phase 6: Final summary
@@ -1036,12 +1095,11 @@ class ComprehensiveTrainer:
             "log_directory": str(self.log_dir),
             "training_timesteps": self.training_timesteps,
             "cooperation_episodes": 5,
-            "cooperation_summary": competition_results["summary"]
+            "cooperation_summary": competition_results["summary"],
+            "agent_deployment": "single_agent_multiple_instances",
+            "num_instances": self.num_agents,
+            "agent_final_performance": metrics["final_stats"]
         }
-
-        # Add final performance for each agent
-        for i in range(self.num_agents):
-            final_summary[f"agent_{i}_final_performance"] = all_metrics[i]["final_stats"]
 
         summary_file = self.log_dir / "experiment_summary.json"
         with open(summary_file, 'w') as f:
