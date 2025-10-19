@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from pathlib import Path
 import torch
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -47,12 +48,13 @@ class ComprehensiveTrainer:
         # Create subdirectories
         self.training_dir = self.log_dir / "training"
         self.models_dir = self.log_dir / "models"
+        self.checkpoints_dir = self.log_dir / "checkpoints"
         self.rollouts_dir = self.log_dir / "rollouts"
         self.competition_dir = self.log_dir / "competition"
         self.plots_dir = self.log_dir / "plots"
-        
-        for dir_path in [self.training_dir, self.models_dir, self.rollouts_dir, 
-                        self.competition_dir, self.plots_dir]:
+
+        for dir_path in [self.training_dir, self.models_dir, self.checkpoints_dir,
+                        self.rollouts_dir, self.competition_dir, self.plots_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
         
         print(f"Experiment directory: {self.log_dir}")
@@ -169,10 +171,21 @@ class ComprehensiveTrainer:
         training_log = []
         
         print(f"Starting training for {self.training_timesteps} timesteps...")
+        print(f"Checkpoints will be saved every 100,000 steps to: {self.checkpoints_dir}")
         start_time = time.time()
 
-        # Learn using the DQN's learn method
-        agent.learn(total_timesteps=self.training_timesteps)
+        # Create checkpoint callback to save model every 100k steps
+        checkpoint_callback = CheckpointCallback(
+            save_freq=100_000,
+            save_path=str(self.checkpoints_dir),
+            name_prefix=f"agent_{target_agent_id}_checkpoint",
+            save_replay_buffer=False,
+            save_vecnormalize=False,
+            verbose=1
+        )
+
+        # Learn using the DQN's learn method with checkpoint callback
+        agent.learn(total_timesteps=self.training_timesteps, callback=checkpoint_callback)
 
         # Evaluate trained agent to get episode rewards for plotting
         num_eval_episodes = 5
