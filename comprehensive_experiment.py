@@ -40,7 +40,7 @@ class ComprehensiveTrainer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
             target_type = "moving" if use_moving_targets else "static"
-            experiment_name = f"15x15grid_3agents_4actwin_{target_type}_dqn"
+            experiment_name = f"15x15grid_3agents_4actwin_denserewards_{target_type}_dqn"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         self.use_moving_targets = use_moving_targets
         
