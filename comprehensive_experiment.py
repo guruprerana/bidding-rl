@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from pathlib import Path
 import torch
-from stable_baselines3.common.callbacks import CheckpointCallback
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -64,16 +63,18 @@ class ComprehensiveTrainer:
         self.num_agents = 3
         self.bid_upper_bound = 4  # Increased for richer bidding strategy (0-4 = 5 values)
         self.training_timesteps = 2_000_000
+        self.evaluation_interval = 200_000  # Evaluate and record every 200k steps
         self.learning_rate = 0.001  # Standard DQN learning rate
         self.discount_factor = 0.99
         self.epsilon = 0.5
         self.min_epsilon = 0.01
 
         # Environment parameters
-        self.target_reward = 100.0  # Reward for reaching a target
-        self.bid_penalty = 0.1  # Penalty multiplier for bids
+        self.target_reward = 200.0  # Reward for reaching a target (increased for stronger signal)
+        self.bid_penalty = 0.01  # Penalty multiplier for bids (reduced to encourage bidding)
         self.max_steps = 100  # Maximum steps per episode (default: grid_size * 10)
         self.action_window = 4  # Number of steps a winning agent controls the action
+        self.distance_reward_scale = 1.0  # Reward scaling for distance improvements (dense reward)
 
         # Define target positions: corners and center
         self.target_positions = [
@@ -93,6 +94,7 @@ class ComprehensiveTrainer:
             "target_positions": self.target_positions,
             "bid_upper_bound": self.bid_upper_bound,
             "training_timesteps": self.training_timesteps,
+            "evaluation_interval": self.evaluation_interval,
             "learning_rate": self.learning_rate,
             "discount_factor": self.discount_factor,
             "epsilon": self.epsilon,
@@ -100,10 +102,13 @@ class ComprehensiveTrainer:
             "bid_penalty": self.bid_penalty,
             "max_steps": self.max_steps,
             "action_window": self.action_window,
+            "distance_reward_scale": self.distance_reward_scale,
             "use_moving_targets": self.use_moving_targets,
             "timestamp": datetime.now().isoformat(),
-            "description": f"Zero-Sum DQN: Single agent trained and deployed as {self.num_agents} instances on 6x6 grid" +
-                          (" (moving targets)" if self.use_moving_targets else ""),
+            "description": f"Zero-Sum DQN: Single agent trained and deployed as {self.num_agents} instances on 15x15 grid" +
+                          (" (moving targets)" if self.use_moving_targets else "") +
+                          (f" with distance rewards (scale={self.distance_reward_scale})" if self.distance_reward_scale > 0 else "") +
+                          f". Evaluations every {self.evaluation_interval} timesteps",
             "training_approach": "single_agent_multiple_instances"
         }
 
@@ -127,6 +132,7 @@ class ComprehensiveTrainer:
             "target_reward": self.target_reward,
             "max_steps": self.max_steps,
             "action_window": self.action_window,
+            "distance_reward_scale": self.distance_reward_scale,
         }
 
         # Add environment class and moving target specific parameters
@@ -171,21 +177,46 @@ class ComprehensiveTrainer:
         training_log = []
         
         print(f"Starting training for {self.training_timesteps} timesteps...")
-        print(f"Checkpoints will be saved every 100,000 steps to: {self.checkpoints_dir}")
+        print(f"Evaluations and rollouts will be recorded every {self.evaluation_interval} steps")
         start_time = time.time()
 
-        # Create checkpoint callback to save model every 100k steps
-        checkpoint_callback = CheckpointCallback(
-            save_freq=100_000,
-            save_path=str(self.checkpoints_dir),
-            name_prefix=f"agent_{target_agent_id}_checkpoint",
-            save_replay_buffer=False,
-            save_vecnormalize=False,
-            verbose=1
-        )
+        # Train in chunks with periodic evaluations
+        num_chunks = self.training_timesteps // self.evaluation_interval
+        timesteps_trained = 0
 
-        # Learn using the DQN's learn method with checkpoint callback
-        agent.learn(total_timesteps=self.training_timesteps, callback=checkpoint_callback)
+        for chunk in range(num_chunks):
+            print(f"\n{'='*60}")
+            print(f"Training chunk {chunk + 1}/{num_chunks} ({self.evaluation_interval} timesteps)")
+            print(f"Total timesteps so far: {timesteps_trained}")
+            print(f"{'='*60}")
+
+            # Train for one chunk
+            agent.learn(total_timesteps=self.evaluation_interval, reset_num_timesteps=False)
+            timesteps_trained += self.evaluation_interval
+
+            # Save intermediate model
+            print(f"\nSaving model at {timesteps_trained} timesteps...")
+            intermediate_model_path = self.models_dir / f"agent_{target_agent_id}_model_{timesteps_trained}.zip"
+            agent.save(str(intermediate_model_path))
+
+            # Record rollouts for this checkpoint
+            print(f"\nRecording rollouts at {timesteps_trained} timesteps...")
+            for target_id in range(self.num_agents):
+                self.record_rollout(
+                    agent,
+                    target_id,
+                    num_episodes=2,  # Fewer episodes for intermediate evaluations
+                    filename_prefix=f"train_step{timesteps_trained}_rollout"
+                )
+
+            # Run cooperative evaluation
+            print(f"\nRunning cooperative evaluation at {timesteps_trained} timesteps...")
+            agents = [agent] * self.num_agents
+            self.run_competition(
+                agents,
+                num_episodes=3,  # Fewer episodes for intermediate evaluations
+                filename_prefix=f"train_step{timesteps_trained}"
+            )
 
         # Evaluate trained agent to get episode rewards for plotting
         num_eval_episodes = 5
@@ -359,6 +390,7 @@ class ComprehensiveTrainer:
             "target_reward": self.target_reward,
             "max_steps": self.max_steps,
             "action_window": self.action_window,
+            "distance_reward_scale": self.distance_reward_scale,
         }
 
         # Add environment class and moving target specific parameters
@@ -608,7 +640,7 @@ class ComprehensiveTrainer:
         return agent_0, agent_1
     
     def run_competition(self, agents: List[ZeroSumDQN],
-                       num_episodes: int = 10):
+                       num_episodes: int = 10, filename_prefix: str = ""):
         """Run cooperative evaluation where all agents try to reach their respective targets."""
         print(f"\n{'='*60}")
         print(f"COOPERATIVE EVALUATION: All {self.num_agents} Agents Pursuing Their Targets")
@@ -625,6 +657,7 @@ class ComprehensiveTrainer:
             "target_reward": self.target_reward,
             "max_steps": self.max_steps,
             "action_window": self.action_window,
+            "distance_reward_scale": self.distance_reward_scale,
         }
 
         # Add direction_change_prob for moving targets
@@ -785,10 +818,11 @@ class ComprehensiveTrainer:
             print(f"  Final Scores - {rewards_str}")
             
             # Save individual episode
-            episode_file = self.competition_dir / f"cooperative_episode_{episode}.json"
+            prefix = f"{filename_prefix}_" if filename_prefix else ""
+            episode_file = self.competition_dir / f"{prefix}cooperative_episode_{episode}.json"
             with open(episode_file, 'w') as f:
                 json.dump(episode_log, f, indent=2, default=str)
-            
+
             # Create cooperative rollout MP4
             self.create_competition_mp4(episode_log, episode_file.with_suffix('.gif'))
         
@@ -799,11 +833,12 @@ class ComprehensiveTrainer:
             "episodes": competition_results,
             "summary": self.analyze_cooperation_results(competition_results)
         }
-        
-        results_file = self.competition_dir / "cooperation_results.json"
+
+        prefix = f"{filename_prefix}_" if filename_prefix else ""
+        results_file = self.competition_dir / f"{prefix}cooperation_results.json"
         with open(results_file, 'w') as f:
             json.dump(overall_results, f, indent=2, default=str)
-        
+
         print(f"\nCooperation results saved: {results_file}")
         return overall_results
     
@@ -1080,26 +1115,14 @@ class ComprehensiveTrainer:
         print("Training one agent that will be deployed as multiple instances during competition")
         agent, rewards, metrics = self.train_agent(target_agent_id=0)
 
-        # Phase 2: Save model
-        print("\nPHASE 2: SAVING MODEL")
+        # Phase 2: Save final model
+        print("\nPHASE 2: SAVING FINAL MODEL")
         self.save_model(agent, 0)
 
-        # Phase 3: Skip training plots (only one agent)
-        print("\nPHASE 3: SKIPPING TRAINING PLOTS (single agent)")
+        # Note: Rollouts and cooperative evaluations were performed during training
+        # every 200,000 timesteps. Results are saved in the rollouts/ and competition/ directories.
 
-        # Phase 4: Record rollouts for the single agent against different targets
-        print("\nPHASE 4: RECORDING TRAINING ROLLOUTS")
-        print("Recording rollouts of the agent pursuing each target")
-        for target_id in range(self.num_agents):
-            self.record_rollout(agent, target_id, num_episodes=3, filename_prefix="training_rollout")
-
-        # Phase 5: Cooperative evaluation (deploy 3 instances of same agent)
-        print("\nPHASE 5: RUNNING COOPERATIVE EVALUATION")
-        print(f"Deploying {self.num_agents} instances of the same trained agent")
-        agents = [agent] * self.num_agents  # Use same agent multiple times
-        competition_results = self.run_competition(agents, num_episodes=5)
-
-        # Phase 6: Final summary
+        # Phase 3: Final summary
         total_time = time.time() - start_time
 
         final_summary = {
@@ -1107,11 +1130,12 @@ class ComprehensiveTrainer:
             "total_time": total_time,
             "log_directory": str(self.log_dir),
             "training_timesteps": self.training_timesteps,
-            "cooperation_episodes": 5,
-            "cooperation_summary": competition_results["summary"],
+            "evaluation_interval": self.evaluation_interval,
+            "num_evaluations": self.training_timesteps // self.evaluation_interval,
             "agent_deployment": "single_agent_multiple_instances",
             "num_instances": self.num_agents,
-            "agent_final_performance": metrics["final_stats"]
+            "agent_final_performance": metrics["final_stats"],
+            "note": f"Rollouts and cooperative evaluations performed every {self.evaluation_interval} timesteps during training"
         }
 
         summary_file = self.log_dir / "experiment_summary.json"

@@ -29,6 +29,7 @@ class BiddingGridworld(gym.Env):
         target_reward: float = 10.0,
         max_steps: int = 100,
         action_window: int = 1,
+        distance_reward_scale: float = 0.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -44,6 +45,8 @@ class BiddingGridworld(gym.Env):
             target_reward: Reward for reaching target (default: 10.0)
             max_steps: Maximum number of steps per episode (default: 100)
             action_window: Number of steps a winning agent controls the action (default: 1)
+            distance_reward_scale: Reward scaling for distance improvements (default: 0.0, disabled)
+                                  Positive values reward getting closer to target
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
@@ -66,6 +69,7 @@ class BiddingGridworld(gym.Env):
         self.target_reward = target_reward
         self.max_steps = max_steps
         self.action_window = action_window
+        self.distance_reward_scale = distance_reward_scale
         self.render_mode = render_mode
         
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
@@ -124,6 +128,12 @@ class BiddingGridworld(gym.Env):
 
         # Track which targets have been reached
         self.targets_reached = np.zeros(self.num_agents, dtype=np.int32)
+
+        # Track previous distances for distance-based rewards
+        self.previous_distances = np.zeros(self.num_agents, dtype=np.float32)
+        for i in range(self.num_agents):
+            self.previous_distances[i] = abs(self.agent_position[0] - self.target_positions[i][0]) + \
+                                         abs(self.agent_position[1] - self.target_positions[i][1])
 
         # Step counter
         self.step_count = 0
@@ -210,8 +220,24 @@ class BiddingGridworld(gym.Env):
             else:
                 targets_just_reached[i] = False
 
+        # Calculate current distances for distance-based rewards
+        current_distances = np.zeros(self.num_agents, dtype=np.float32)
+        for i in range(self.num_agents):
+            current_distances[i] = abs(self.agent_position[0] - self.target_positions[i][0]) + \
+                                  abs(self.agent_position[1] - self.target_positions[i][1])
+
         # Calculate rewards for all agents
-        rewards = self._calculate_rewards(agent_bids, winning_agent, targets_just_reached, apply_bid_penalty)
+        rewards = self._calculate_rewards(
+            agent_bids,
+            winning_agent,
+            targets_just_reached,
+            apply_bid_penalty,
+            self.previous_distances,
+            current_distances
+        )
+
+        # Update previous distances for next step
+        self.previous_distances = current_distances.copy()
 
         # Check termination conditions
         all_targets_reached = bool(np.all(self.targets_reached == 1))
@@ -247,7 +273,9 @@ class BiddingGridworld(gym.Env):
         agent_bids: Dict[int, int],
         winning_agent: int,
         targets_just_reached: Dict[int, bool],
-        apply_bid_penalty: bool
+        apply_bid_penalty: bool,
+        previous_distances: np.ndarray,
+        current_distances: np.ndarray
     ) -> Dict[str, float]:
         """Calculate rewards for all agents."""
         rewards = {f"agent_{i}": 0.0 for i in range(self.num_agents)}
@@ -262,6 +290,16 @@ class BiddingGridworld(gym.Env):
                 # for j in range(self.num_agents):
                 #     if i != j:
                 #         rewards[f"agent_{i}"] += self.bid_penalty * agent_bids[j]
+
+        # Distance-based rewards (reward for getting closer to target)
+        if self.distance_reward_scale > 0:
+            for i in range(self.num_agents):
+                # Skip if target already reached
+                if self.targets_reached[i] == 0:
+                    # Positive reward for decreasing distance (getting closer)
+                    # Negative reward for increasing distance (getting farther)
+                    distance_improvement = previous_distances[i] - current_distances[i]
+                    rewards[f"agent_{i}"] += self.distance_reward_scale * distance_improvement
 
         # Target rewards (always apply when reached)
         for i in range(self.num_agents):
@@ -426,6 +464,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         direction_change_prob: float = 0.1,
         max_steps: int = 100,
         action_window: int = 1,
+        distance_reward_scale: float = 0.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -442,6 +481,8 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             direction_change_prob: Probability of randomly changing direction (default: 0.1)
             max_steps: Maximum number of steps per episode (default: 100)
             action_window: Number of steps a winning agent controls the action (default: 1)
+            distance_reward_scale: Reward scaling for distance improvements (default: 0.0, disabled)
+                                  Positive values reward getting closer to target
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -453,6 +494,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             target_reward=target_reward,
             max_steps=max_steps,
             action_window=action_window,
+            distance_reward_scale=distance_reward_scale,
             render_mode=render_mode
         )
 
