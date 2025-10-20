@@ -41,7 +41,7 @@ class ComprehensiveTrainer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
             target_type = "moving" if use_moving_targets else "static"
-            experiment_name = f"15x15grid_3agents_{target_type}_dqn"
+            experiment_name = f"15x15grid_3agents_4actwin_{target_type}_dqn"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         self.use_moving_targets = use_moving_targets
         
@@ -73,7 +73,7 @@ class ComprehensiveTrainer:
         self.target_reward = 100.0  # Reward for reaching a target
         self.bid_penalty = 0.1  # Penalty multiplier for bids
         self.max_steps = 100  # Maximum steps per episode (default: grid_size * 10)
-        self.action_window = 1  # Number of steps a winning agent controls the action
+        self.action_window = 4  # Number of steps a winning agent controls the action
 
         # Define target positions: corners and center
         self.target_positions = [
