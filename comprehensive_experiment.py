@@ -475,6 +475,9 @@ class ComprehensiveTrainer:
                 step_details.append({
                     "bids": info.get("bids", {}),
                     "winning_agent": info.get("winning_agent", -1),
+                    "window_agent": info.get("window_agent", None),
+                    "window_steps_remaining": info.get("window_steps_remaining", 0),
+                    "bid_penalty_applied": info.get("bid_penalty_applied", False),
                     "protagonist_action": prot_action,
                     "adversary_action": adv_action
                 })
@@ -587,28 +590,43 @@ class ComprehensiveTrainer:
                 title += ' (Moving Target)'
             title += f' - Step {step} - Reward: {reward:.2f}\n'
             title += f'Total Reward: {sum(episode_data["rewards"][:frame+1]):.2f}'
-            
+
             if frame < len(episode_data.get("step_details", [])):
                 step_detail = episode_data["step_details"][frame]
                 prot_action = step_detail.get("protagonist_action", {})
                 adv_action = step_detail.get("adversary_action", {})
-                
+                window_steps = step_detail.get("window_steps_remaining", 0)
+                window_agent = step_detail.get("window_agent", None)
+                bid_penalty_applied = step_detail.get("bid_penalty_applied", False)
+
                 if prot_action and adv_action:
                     prot_dir = self._direction_to_string(prot_action.get("direction", -1))
                     prot_bid = prot_action.get("bid", 0)
                     adv_dir = self._direction_to_string(adv_action.get("direction", -1))
                     adv_bid = adv_action.get("bid", 0)
-                    
+
                     winner = step_detail.get("winning_agent", -1)
-                    title += f'\nProtagonist: {prot_dir} (bid: {prot_bid}) | Adversary: {adv_dir} (bid: {adv_bid})'
-                    if winner is None:
-                        title += f'\nWinner: No Movement (all bid 0)'
-                    elif winner == target_id:
-                        title += f'\nWinner: Protagonist ⚡'
-                    elif winner != -1:
-                        title += f'\nWinner: Adversary'
+
+                    # Determine if this is a new bid or window continuation
+                    if bid_penalty_applied:
+                        # New bid just won
+                        title += f'\n🎯 NEW BID: Protagonist: {prot_dir} ({prot_bid}) | Adversary: {adv_dir} ({adv_bid})'
+                        if winner is None:
+                            title += f'\n❌ No Movement (all bid 0)'
+                        elif winner == target_id:
+                            title += f'\n✅ Protagonist WINS! ⚡ (Window: {self.action_window} steps)'
+                        else:
+                            title += f'\n✅ Adversary WINS (Window: {self.action_window} steps)'
+                    elif window_agent is not None:
+                        # Continuing an action window
+                        controller = "Protagonist" if window_agent == target_id else "Adversary"
+                        controller_dir = prot_dir if window_agent == target_id else adv_dir
+                        title += f'\n🔒 WINDOW CONTROL: {controller} moving {controller_dir}'
+                        title += f'\n⏱️  Steps remaining in window: {window_steps}'
+                        title += f'\n💭 Bids ignored (window active)'
                     else:
-                        title += f'\nWinner: Tie'
+                        # Shouldn't happen, but fallback
+                        title += f'\nProtagonist: {prot_dir} ({prot_bid}) | Adversary: {adv_dir} ({adv_bid})'
             
             ax.set_title(title, fontsize=12)
             
@@ -752,6 +770,9 @@ class ComprehensiveTrainer:
                     "actions": action,
                     "rewards": rewards,
                     "winning_agent": step_info["winning_agent"],
+                    "window_agent": step_info.get("window_agent", None),
+                    "window_steps_remaining": step_info.get("window_steps_remaining", 0),
+                    "bid_penalty_applied": step_info.get("bid_penalty_applied", False),
                     "bids": step_info["bids"],
                     "targets_status": targets_status
                 }
@@ -998,10 +1019,27 @@ class ComprehensiveTrainer:
             title += f' - Step {frame}\n'
 
             if step_detail:
+                window_steps = step_detail.get("window_steps_remaining", 0)
+                window_agent = step_detail.get("window_agent", None)
+                bid_penalty_applied = step_detail.get("bid_penalty_applied", False)
+
                 # Show current target status
                 targets_status = ", ".join([f"{i}={'✓' if targets_reached[i] else '✗'}" for i in range(self.num_agents)])
-                winner_text = f'Agent {step_detail["winning_agent"]}' if step_detail["winning_agent"] is not None else 'No Movement'
-                title += f'Movement Winner: {winner_text} | Targets: {targets_status}\n'
+
+                # Determine if this is a new bid or window continuation
+                if bid_penalty_applied:
+                    # New bidding round
+                    winner_text = f'Agent {step_detail["winning_agent"]}' if step_detail["winning_agent"] is not None else 'No Movement'
+                    title += f'🎯 NEW BID - Winner: {winner_text} | Targets: {targets_status}\n'
+                    title += f'Window starts: {self.action_window} steps\n'
+                elif window_agent is not None:
+                    # Continuing action window
+                    title += f'🔒 WINDOW CONTROL - Agent {window_agent} | Targets: {targets_status}\n'
+                    title += f'⏱️  Steps remaining: {window_steps}\n'
+                else:
+                    # Fallback
+                    winner_text = f'Agent {step_detail["winning_agent"]}' if step_detail["winning_agent"] is not None else 'No Movement'
+                    title += f'Winner: {winner_text} | Targets: {targets_status}\n'
 
                 # Show actions and bids for all agents
                 actions = step_detail.get("actions", {})
@@ -1011,10 +1049,17 @@ class ComprehensiveTrainer:
                     if agent_key in actions:
                         agent_dir = self._direction_to_string(actions[agent_key].get("direction", -1))
                         agent_bid = actions[agent_key].get("bid", 0)
-                        action_strs.append(f"A{i}: {agent_dir}({agent_bid})")
+                        # Highlight the controlling agent's action during window
+                        if window_agent == i and not bid_penalty_applied:
+                            action_strs.append(f"A{i}: {agent_dir}(bid:{agent_bid})→ACTIVE")
+                        else:
+                            action_strs.append(f"A{i}: {agent_dir}({agent_bid})")
 
                 if action_strs:
-                    title += f'{" | ".join(action_strs)}\n'
+                    if bid_penalty_applied:
+                        title += f'Actions & Bids: {" | ".join(action_strs)}\n'
+                    else:
+                        title += f'Actions (bids ignored): {" | ".join(action_strs)}\n'
 
                 # Show cumulative rewards for all agents up to this frame
                 if rewards:

@@ -250,6 +250,9 @@ class BiddingGridworld(gym.Env):
         info = self._get_info()
         info["winning_agent"] = winning_agent
         info["bids"] = {f"agent_{i}": bid for i, bid in agent_bids.items()}
+        info["window_agent"] = self.window_agent
+        info["window_steps_remaining"] = self.window_steps_remaining
+        info["bid_penalty_applied"] = apply_bid_penalty
 
         return observation, rewards, terminated, truncated, info
     
