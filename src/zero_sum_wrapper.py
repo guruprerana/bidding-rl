@@ -84,9 +84,10 @@ class ZeroSumBiddingWrapper(gym.Env):
         
         # Store for action conversion
         self.actions_per_player = actions_per_player
-        
+
         # Observation space: same as underlying environment but from perspective of both players
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(5,), dtype=np.float32)
+        # [agent_row, agent_col, target_row, target_col, target_reached, target_step_counter]
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(6,), dtype=np.float32)
 
         # Target position will be set during reset
         self.target_position = None
@@ -135,22 +136,30 @@ class ZeroSumBiddingWrapper(gym.Env):
         
         # Convert to zero-sum rewards (return scalar reward for protagonist)
         protagonist_reward = rewards[f"agent_{self.target_agent_id}"]
-        
+
         # Convert observation and info
         zero_sum_obs = self._convert_observation(obs)
         zero_sum_info = self._convert_info(info)
-        
+
         # Add detailed rewards to info for analysis
         zero_sum_info["rewards"] = {
             "protagonist": protagonist_reward,
             "adversary": -protagonist_reward
         }
-        
-        # Termination condition: only when protagonist's target is reached
-        # (we ignore the other target for this zero-sum game)
-        # target_reached = obs["targets_reached"][self.target_agent_id] == 1
-        # terminated = target_reached
-        
+
+        # Termination condition: episode ends when protagonist's target is reached OR expired
+        target_reached = self.env.targets_reached[self.target_agent_id] == 1
+        target_expired = self.env.targets_expired_this_step.get(self.target_agent_id, False)
+        terminated = target_reached or target_expired
+
+        # Add termination reason to info
+        if target_reached:
+            zero_sum_info["termination_reason"] = "target_reached"
+        elif target_expired:
+            zero_sum_info["termination_reason"] = "target_expired"
+        else:
+            zero_sum_info["termination_reason"] = None
+
         return zero_sum_obs, protagonist_reward, terminated, truncated, zero_sum_info
     
     def _discrete_to_dict_action(self, action: int) -> Dict:
@@ -193,9 +202,10 @@ class ZeroSumBiddingWrapper(gym.Env):
         # obs format from BiddingGridworld (variable length):
         # [agent_row_norm, agent_col_norm,
         #  target0_row_norm, target0_col_norm, ..., targetN_row_norm, targetN_col_norm,
-        #  target0_reached, ..., targetN_reached]
+        #  target0_reached, ..., targetN_reached,
+        #  target0_step_counter_norm, ..., targetN_step_counter_norm]
         #
-        # Structure: 2 + 2*num_agents + num_agents elements
+        # Structure: 2 + 2*num_agents + num_agents + num_agents elements
 
         # Extract protagonist's target position
         target_idx_base = 2 + 2 * self.target_agent_id  # Index of target row
@@ -206,14 +216,19 @@ class ZeroSumBiddingWrapper(gym.Env):
         target_reached_idx = 2 + 2 * self.num_agents + self.target_agent_id
         target_reached = obs[target_reached_idx]
 
+        # Extract protagonist's target step counter
+        target_counter_idx = 2 + 3 * self.num_agents + self.target_agent_id
+        target_step_counter = obs[target_counter_idx]
+
         # Return observation focused on protagonist's target
-        # [agent_row, agent_col, target_row, target_col, target_reached]
+        # [agent_row, agent_col, target_row, target_col, target_reached, target_step_counter]
         return np.array([
             obs[0],  # agent_row_norm
             obs[1],  # agent_col_norm
             target_row,
             target_col,
-            target_reached
+            target_reached,
+            target_step_counter
         ], dtype=np.float32)
 
     def _convert_info(self, info: Dict) -> Dict:

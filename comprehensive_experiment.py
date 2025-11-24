@@ -40,7 +40,7 @@ class ComprehensiveTrainer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
             target_type = "moving" if use_moving_targets else "static"
-            experiment_name = f"15x15grid_3agents_6actwin_denserewards_{target_type}_dqn"
+            experiment_name = f"15x15grid_3agents_6actwin_denserewards_expiry40_{target_type}_dqn"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         self.use_moving_targets = use_moving_targets
         
@@ -71,10 +71,12 @@ class ComprehensiveTrainer:
 
         # Environment parameters
         self.target_reward = 50.0  # Reward for reaching a target (increased for stronger signal)
-        self.bid_penalty = 1.0  # Penalty multiplier for bids (reduced to encourage bidding)
-        self.max_steps = 250  # Maximum steps per episode (default: grid_size * 10)
+        self.bid_penalty = 0.1  # Penalty multiplier for bids (reduced to encourage bidding)
+        self.max_steps = 300  # Maximum steps per episode (default: grid_size * 10)
         self.action_window = 6  # Number of steps a winning agent controls the action
         self.distance_reward_scale = 0.1  # Reward scaling for distance improvements (dense reward)
+        self.target_expiry_steps = 40  # Maximum steps before target expires (None = disabled)
+        self.target_expiry_penalty = 50.0  # Penalty for not reaching target before expiry
 
         # Define target positions: corners and center
         self.target_positions = [
@@ -103,6 +105,8 @@ class ComprehensiveTrainer:
             "max_steps": self.max_steps,
             "action_window": self.action_window,
             "distance_reward_scale": self.distance_reward_scale,
+            "target_expiry_steps": self.target_expiry_steps,
+            "target_expiry_penalty": self.target_expiry_penalty,
             "use_moving_targets": self.use_moving_targets,
             "timestamp": datetime.now().isoformat(),
             "description": f"Zero-Sum DQN: Single agent trained and deployed as {self.num_agents} instances on 15x15 grid" +
@@ -133,6 +137,8 @@ class ComprehensiveTrainer:
             "max_steps": self.max_steps,
             "action_window": self.action_window,
             "distance_reward_scale": self.distance_reward_scale,
+            "target_expiry_steps": self.target_expiry_steps,
+            "target_expiry_penalty": self.target_expiry_penalty,
         }
 
         # Add environment class and moving target specific parameters
@@ -391,6 +397,8 @@ class ComprehensiveTrainer:
             "max_steps": self.max_steps,
             "action_window": self.action_window,
             "distance_reward_scale": self.distance_reward_scale,
+            "target_expiry_steps": self.target_expiry_steps,
+            "target_expiry_penalty": self.target_expiry_penalty,
         }
 
         # Add environment class and moving target specific parameters
@@ -414,13 +422,14 @@ class ComprehensiveTrainer:
             
             # Record episode
             while (not terminated) and (not truncated):
-                # obs format from both wrappers:
-                # [agent_row, agent_col, target_row, target_col, target_reached] (5 elements)
+                # obs format from zero-sum wrapper:
+                # [agent_row, agent_col, target_row, target_col, target_reached, target_step_counter] (6 elements)
                 agent_row_norm = obs[0]
                 agent_col_norm = obs[1]
                 target_row_norm = obs[2]
                 target_col_norm = obs[3]
                 target_reached = int(obs[4])
+                # target_step_counter = obs[5]  # Not used in visualization
 
                 # Denormalize positions
                 denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
@@ -676,6 +685,8 @@ class ComprehensiveTrainer:
             "max_steps": self.max_steps,
             "action_window": self.action_window,
             "distance_reward_scale": self.distance_reward_scale,
+            "target_expiry_steps": self.target_expiry_steps,
+            "target_expiry_penalty": self.target_expiry_penalty,
         }
 
         # Add direction_change_prob for moving targets
@@ -704,17 +715,19 @@ class ComprehensiveTrainer:
             truncated = False
 
             while (not terminated) and (not truncated):
-                # obs from BiddingGridworld is (2 + 2*num_agents + num_agents)-element array:
+                # obs from BiddingGridworld is (2 + 2*num_agents + num_agents + num_agents)-element array:
                 # [agent_row_norm, agent_col_norm,
                 #  target0_row_norm, target0_col_norm, ..., targetN_row_norm, targetN_col_norm,
-                #  target0_reached, ..., targetN_reached]
+                #  target0_reached, ..., targetN_reached,
+                #  target0_step_counter_norm, ..., targetN_step_counter_norm]
 
                 # Create wrapped observations for each agent
                 wrapped_observations = []
                 for agent_id in range(self.num_agents):
-                    # Extract agent's target position and reached status
+                    # Extract agent's target position, reached status, and step counter
                     target_idx_base = 2 + 2 * agent_id
                     target_reached_idx = 2 + 2 * self.num_agents + agent_id
+                    target_counter_idx = 2 + 3 * self.num_agents + agent_id
 
                     wrapped_obs = np.array([
                         obs[0],  # agent_row_norm
@@ -722,6 +735,7 @@ class ComprehensiveTrainer:
                         obs[target_idx_base],      # target_row_norm
                         obs[target_idx_base + 1],  # target_col_norm
                         obs[target_reached_idx],   # target_reached
+                        obs[target_counter_idx],   # target_step_counter_norm
                     ], dtype=np.float32)
                     wrapped_observations.append(wrapped_obs)
                 

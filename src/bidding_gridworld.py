@@ -30,6 +30,8 @@ class BiddingGridworld(gym.Env):
         max_steps: int = 100,
         action_window: int = 1,
         distance_reward_scale: float = 0.0,
+        target_expiry_steps: Optional[int] = None,
+        target_expiry_penalty: float = 5.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -47,6 +49,9 @@ class BiddingGridworld(gym.Env):
             action_window: Number of steps a winning agent controls the action (default: 1)
             distance_reward_scale: Reward scaling for distance improvements (default: 0.0, disabled)
                                   Positive values reward getting closer to target
+            target_expiry_steps: Maximum steps allowed before target expiry penalty (default: None, disabled)
+                                If set, agents receive penalty if target not reached within this many steps
+            target_expiry_penalty: Penalty for not reaching target within expiry_steps (default: 5.0)
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
@@ -70,6 +75,8 @@ class BiddingGridworld(gym.Env):
         self.max_steps = max_steps
         self.action_window = action_window
         self.distance_reward_scale = distance_reward_scale
+        self.target_expiry_steps = target_expiry_steps
+        self.target_expiry_penalty = target_expiry_penalty
         self.render_mode = render_mode
         
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
@@ -88,9 +95,10 @@ class BiddingGridworld(gym.Env):
         })
         
         # Observation space: Box vector for NN policies (normalized to [0, 1])
-        # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ..., target0_reached, target1_reached, ...]
-        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags)
-        obs_dim = 2 + 2 * num_agents + num_agents
+        # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
+        #  target0_reached, target1_reached, ..., target0_step_counter_norm, target1_step_counter_norm, ...]
+        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags) + num_agents (step counters)
+        obs_dim = 2 + 2 * num_agents + num_agents + num_agents
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
         
         # Initialize environment state
@@ -128,6 +136,10 @@ class BiddingGridworld(gym.Env):
 
         # Track which targets have been reached
         self.targets_reached = np.zeros(self.num_agents, dtype=np.int32)
+
+        # Track per-target step counters for expiry mechanism
+        self.target_step_counters = np.zeros(self.num_agents, dtype=np.int32)
+        self.targets_expired_this_step = {i: False for i in range(self.num_agents)}
 
         # Track previous distances for distance-based rewards
         self.previous_distances = np.zeros(self.num_agents, dtype=np.float32)
@@ -217,8 +229,34 @@ class BiddingGridworld(gym.Env):
             if np.array_equal(self.agent_position, self.target_positions[i]) and self.targets_reached[i] == 0:
                 self.targets_reached[i] = 1
                 targets_just_reached[i] = True
+                # Reset counter when target is reached
+                self.target_step_counters[i] = 0
             else:
                 targets_just_reached[i] = False
+
+        # Update target step counters and check for expiries
+        targets_expired = {}
+        if self.target_expiry_steps is not None:
+            for i in range(self.num_agents):
+                # Only increment counter if target hasn't been reached yet
+                if self.targets_reached[i] == 0:
+                    self.target_step_counters[i] += 1
+                    # Check if target has expired
+                    if self.target_step_counters[i] >= self.target_expiry_steps:
+                        targets_expired[i] = True
+                        # Reset counter after expiry to allow continuous penalties
+                        self.target_step_counters[i] = 0
+                    else:
+                        targets_expired[i] = False
+                else:
+                    targets_expired[i] = False
+        else:
+            # Expiry mechanism disabled
+            for i in range(self.num_agents):
+                targets_expired[i] = False
+
+        # Store as instance variable for subclasses to access
+        self.targets_expired_this_step = targets_expired
 
         # Calculate current distances for distance-based rewards
         current_distances = np.zeros(self.num_agents, dtype=np.float32)
@@ -231,6 +269,7 @@ class BiddingGridworld(gym.Env):
             agent_bids,
             winning_agent,
             targets_just_reached,
+            targets_expired,
             apply_bid_penalty,
             self.previous_distances,
             current_distances
@@ -276,6 +315,7 @@ class BiddingGridworld(gym.Env):
         agent_bids: Dict[int, int],
         winning_agent: int,
         targets_just_reached: Dict[int, bool],
+        targets_expired: Dict[int, bool],
         apply_bid_penalty: bool,
         previous_distances: np.ndarray,
         current_distances: np.ndarray
@@ -309,6 +349,11 @@ class BiddingGridworld(gym.Env):
             if targets_just_reached[i]:
                 rewards[f"agent_{i}"] += self.target_reward
 
+        # Target expiry penalties (apply when target expires)
+        for i in range(self.num_agents):
+            if targets_expired[i]:
+                rewards[f"agent_{i}"] -= self.target_expiry_penalty
+
         return rewards
     
     def _get_observation(self) -> np.ndarray:
@@ -318,7 +363,7 @@ class BiddingGridworld(gym.Env):
         agent_row_norm = float(self.agent_position[0]) / denom
         agent_col_norm = float(self.agent_position[1]) / denom
 
-        # Build observation: [agent_pos, target_0_pos, ..., target_n_pos, target_0_reached, ..., target_n_reached]
+        # Build observation: [agent_pos, target_0_pos, ..., target_n_pos, target_0_reached, ..., target_n_reached, target_0_counter, ..., target_n_counter]
         obs_list = [agent_row_norm, agent_col_norm]
 
         # Add all target positions
@@ -330,6 +375,14 @@ class BiddingGridworld(gym.Env):
         # Add all target reached flags
         for i in range(self.num_agents):
             obs_list.append(float(self.targets_reached[i]))
+
+        # Add all target step counters (normalized)
+        # Normalize by target_expiry_steps if set, otherwise by max_steps
+        counter_denom = float(self.target_expiry_steps) if self.target_expiry_steps is not None else float(self.max_steps)
+        counter_denom = max(counter_denom, 1.0)  # Avoid division by zero
+        for i in range(self.num_agents):
+            counter_norm = min(float(self.target_step_counters[i]) / counter_denom, 1.0)  # Clamp to [0, 1]
+            obs_list.append(counter_norm)
 
         obs = np.array(obs_list, dtype=np.float32)
         return obs
@@ -468,6 +521,8 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         max_steps: int = 100,
         action_window: int = 1,
         distance_reward_scale: float = 0.0,
+        target_expiry_steps: Optional[int] = None,
+        target_expiry_penalty: float = 5.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -486,6 +541,9 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             action_window: Number of steps a winning agent controls the action (default: 1)
             distance_reward_scale: Reward scaling for distance improvements (default: 0.0, disabled)
                                   Positive values reward getting closer to target
+            target_expiry_steps: Maximum steps allowed before target expiry penalty (default: None, disabled)
+                                If set, agents receive penalty if target not reached within this many steps
+            target_expiry_penalty: Penalty for not reaching target within expiry_steps (default: 5.0)
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -498,6 +556,8 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             max_steps=max_steps,
             action_window=action_window,
             distance_reward_scale=distance_reward_scale,
+            target_expiry_steps=target_expiry_steps,
+            target_expiry_penalty=target_expiry_penalty,
             render_mode=render_mode
         )
 
@@ -558,8 +618,8 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
     def _move_targets(self):
         """Move all targets according to their directions."""
         for i in range(self.num_agents):
-            # If target was just reached, respawn it at a random position
-            if self.targets_reached[i] == 1:
+            # If target was just reached or expired, respawn it at a random position
+            if self.targets_reached[i] == 1 or self.targets_expired_this_step.get(i, False):
                 # Get all available positions (excluding agent position)
                 available_positions = [
                     (r, c) for r in range(self.grid_size)
@@ -573,6 +633,8 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
                 self.targets_reached[i] = 0
                 # Assign new random direction
                 self.target_directions[i] = np.random.randint(0, 4)
+                # Reset the step counter for this target
+                self.target_step_counters[i] = 0
                 continue
 
             # With probability direction_change_prob, randomly change direction
