@@ -43,7 +43,7 @@ class ComprehensiveTrainer:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
             target_type = "moving" if use_moving_targets else "static"
-            experiment_name = f"15x15grid_3agents_6actwin_denserewards_expiry40_{target_type}_dqn"
+            experiment_name = f"15x15grid_3agents_6actwin_denserewards_expiry40_moveint2_{target_type}_dqn"
         self.log_dir = Path(base_log_dir) / f"experiment_{experiment_name}_{timestamp}"
         self.use_moving_targets = use_moving_targets
         
@@ -79,9 +79,9 @@ class ComprehensiveTrainer:
         self.action_window = 6  # Number of steps a winning agent controls the action
         self.distance_reward_scale = 0.1  # Reward scaling for distance improvements (dense reward)
         self.target_expiry_steps = 40  # Maximum steps before target expires (None = disabled)
-        self.target_expiry_penalty = 50.0  # Penalty for not reaching target before expiry
+        self.target_expiry_penalty = 200.0  # Penalty for not reaching target before expiry
         self.direction_change_prob = 0.1  # Probability of targets changing direction (moving targets only)
-        self.target_move_interval = 1  # Number of steps between target movements (moving targets only)
+        self.target_move_interval = 2  # Number of steps between target movements (moving targets only)
 
         # Define target positions: corners and center
         self.target_positions = [
