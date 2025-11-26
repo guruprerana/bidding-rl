@@ -17,7 +17,7 @@ import json
 import time
 import pickle
 from datetime import datetime
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -77,6 +77,8 @@ class ComprehensiveTrainer:
         self.distance_reward_scale = 0.1  # Reward scaling for distance improvements (dense reward)
         self.target_expiry_steps = 40  # Maximum steps before target expires (None = disabled)
         self.target_expiry_penalty = 50.0  # Penalty for not reaching target before expiry
+        self.direction_change_prob = 0.1  # Probability of targets changing direction (moving targets only)
+        self.target_move_interval = 1  # Number of steps between target movements (moving targets only)
 
         # Define target positions: corners and center
         self.target_positions = [
@@ -107,6 +109,8 @@ class ComprehensiveTrainer:
             "distance_reward_scale": self.distance_reward_scale,
             "target_expiry_steps": self.target_expiry_steps,
             "target_expiry_penalty": self.target_expiry_penalty,
+            "direction_change_prob": self.direction_change_prob,
+            "target_move_interval": self.target_move_interval,
             "use_moving_targets": self.use_moving_targets,
             "timestamp": datetime.now().isoformat(),
             "description": f"Zero-Sum DQN: Single agent trained and deployed as {self.num_agents} instances on 15x15 grid" +
@@ -118,18 +122,21 @@ class ComprehensiveTrainer:
 
         with open(self.log_dir / "config.json", 'w') as f:
             json.dump(config, f, indent=2)
-    
-    def train_agent(self, target_agent_id: int) -> Tuple[ZeroSumDQN, List[float], Dict]:
-        """Train a single agent using Zero-Sum DQN."""
-        print(f"\n{'='*60}")
-        print(f"Training Agent {target_agent_id} (Target: {target_agent_id})")
-        print(f"{'='*60}")
 
-        # Create environment with appropriate env_class
+    def _get_env_kwargs(self, target_agent_id: Optional[int] = None, for_zero_sum_wrapper: bool = True) -> Dict:
+        """
+        Get environment kwargs for creating environments.
+
+        Args:
+            target_agent_id: Target agent ID for zero-sum wrapper (None for multi-agent env)
+            for_zero_sum_wrapper: If True, includes wrapper-specific params. If False, returns kwargs for direct env creation.
+
+        Returns:
+            Dictionary of environment kwargs
+        """
         env_kwargs = {
-            "target_agent_id": target_agent_id,
-            "num_agents": self.num_agents,
             "grid_size": self.grid_size,
+            "num_agents": self.num_agents,
             "target_positions": self.target_positions,
             "bid_upper_bound": self.bid_upper_bound,
             "bid_penalty": self.bid_penalty,
@@ -141,11 +148,27 @@ class ComprehensiveTrainer:
             "target_expiry_penalty": self.target_expiry_penalty,
         }
 
+        # Add target_agent_id for zero-sum wrapper
+        if for_zero_sum_wrapper and target_agent_id is not None:
+            env_kwargs["target_agent_id"] = target_agent_id
+
         # Add environment class and moving target specific parameters
         if self.use_moving_targets:
-            env_kwargs["env_class"] = MovingTargetBiddingGridworld
-            env_kwargs["direction_change_prob"] = 0.1
+            if for_zero_sum_wrapper:
+                env_kwargs["env_class"] = MovingTargetBiddingGridworld
+            env_kwargs["direction_change_prob"] = self.direction_change_prob
+            env_kwargs["target_move_interval"] = self.target_move_interval
 
+        return env_kwargs
+
+    def train_agent(self, target_agent_id: int) -> Tuple[ZeroSumDQN, List[float], Dict]:
+        """Train a single agent using Zero-Sum DQN."""
+        print(f"\n{'='*60}")
+        print(f"Training Agent {target_agent_id} (Target: {target_agent_id})")
+        print(f"{'='*60}")
+
+        # Create environment
+        env_kwargs = self._get_env_kwargs(target_agent_id=target_agent_id, for_zero_sum_wrapper=True)
         env = ZeroSumBiddingWrapper(**env_kwargs)
         
         # Calculate action space size
@@ -385,27 +408,8 @@ class ComprehensiveTrainer:
         """Record rollout videos/MP4s for a trained agent."""
         print(f"Recording rollouts for Agent {target_agent_id}...")
 
-        # Create environment with appropriate env_class
-        env_kwargs = {
-            "target_agent_id": target_agent_id,
-            "num_agents": self.num_agents,
-            "grid_size": self.grid_size,
-            "target_positions": self.target_positions,
-            "bid_upper_bound": self.bid_upper_bound,
-            "bid_penalty": self.bid_penalty,
-            "target_reward": self.target_reward,
-            "max_steps": self.max_steps,
-            "action_window": self.action_window,
-            "distance_reward_scale": self.distance_reward_scale,
-            "target_expiry_steps": self.target_expiry_steps,
-            "target_expiry_penalty": self.target_expiry_penalty,
-        }
-
-        # Add environment class and moving target specific parameters
-        if self.use_moving_targets:
-            env_kwargs["env_class"] = MovingTargetBiddingGridworld
-            env_kwargs["direction_change_prob"] = 0.1
-
+        # Create environment
+        env_kwargs = self._get_env_kwargs(target_agent_id=target_agent_id, for_zero_sum_wrapper=True)
         env = ZeroSumBiddingWrapper(**env_kwargs)
 
         for episode in range(num_episodes):
@@ -675,24 +679,7 @@ class ComprehensiveTrainer:
 
         # Create environment based on moving targets flag
         env_class = MovingTargetBiddingGridworld if self.use_moving_targets else BiddingGridworld
-        env_kwargs = {
-            "grid_size": self.grid_size,
-            "num_agents": self.num_agents,
-            "target_positions": self.target_positions,
-            "bid_upper_bound": self.bid_upper_bound,
-            "bid_penalty": self.bid_penalty,
-            "target_reward": self.target_reward,
-            "max_steps": self.max_steps,
-            "action_window": self.action_window,
-            "distance_reward_scale": self.distance_reward_scale,
-            "target_expiry_steps": self.target_expiry_steps,
-            "target_expiry_penalty": self.target_expiry_penalty,
-        }
-
-        # Add direction_change_prob for moving targets
-        if self.use_moving_targets:
-            env_kwargs["direction_change_prob"] = 0.1
-
+        env_kwargs = self._get_env_kwargs(target_agent_id=None, for_zero_sum_wrapper=False)
         env = env_class(**env_kwargs)
         
         competition_results = []

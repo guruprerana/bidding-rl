@@ -518,6 +518,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         bid_penalty: float = 0.1,
         target_reward: float = 10.0,
         direction_change_prob: float = 0.1,
+        target_move_interval: int = 1,
         max_steps: int = 100,
         action_window: int = 1,
         distance_reward_scale: float = 0.0,
@@ -537,6 +538,9 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             bid_penalty: Penalty multiplier for bids (default: 0.1)
             target_reward: Reward for reaching target (default: 10.0)
             direction_change_prob: Probability of randomly changing direction (default: 0.1)
+            target_move_interval: Number of steps between target movements (default: 1)
+                                 Setting to 1 means targets move every step.
+                                 Setting to N means targets move every N steps.
             max_steps: Maximum number of steps per episode (default: 100)
             action_window: Number of steps a winning agent controls the action (default: 1)
             distance_reward_scale: Reward scaling for distance improvements (default: 0.0, disabled)
@@ -562,9 +566,13 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         )
 
         self.direction_change_prob = direction_change_prob
+        self.target_move_interval = target_move_interval
 
         # Initialize target directions (will be set in reset)
         self.target_directions = []
+
+        # Track steps since last target movement for each target
+        self.steps_since_target_move = []
 
     def reset(
         self,
@@ -576,9 +584,12 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
 
         # Initialize random directions for each target
         self.target_directions = []
+        self.steps_since_target_move = []
         for _ in range(self.num_agents):
             # Random initial direction: 0=Left, 1=Right, 2=Up, 3=Down
             self.target_directions.append(np.random.randint(0, 4))
+            # Initialize step counter for each target
+            self.steps_since_target_move.append(0)
 
         return obs, info
 
@@ -635,26 +646,36 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
                 self.target_directions[i] = np.random.randint(0, 4)
                 # Reset the step counter for this target
                 self.target_step_counters[i] = 0
+                # Reset movement interval counter
+                self.steps_since_target_move[i] = 0
                 continue
 
-            # With probability direction_change_prob, randomly change direction
-            if np.random.random() < self.direction_change_prob:
-                self.target_directions[i] = np.random.randint(0, 4)
+            # Increment step counter for this target
+            self.steps_since_target_move[i] += 1
 
-            # Calculate new position
-            current_pos = self.target_positions[i]
-            new_pos = self._move_target_in_direction(current_pos, self.target_directions[i])
+            # Only move target if interval has been reached
+            if self.steps_since_target_move[i] >= self.target_move_interval:
+                # Reset movement counter
+                self.steps_since_target_move[i] = 0
 
-            # Check if hit a wall (new_pos == current_pos means we couldn't move)
-            if np.array_equal(new_pos, current_pos):
-                # Hit a wall, choose a new valid direction
-                valid_directions = self._get_valid_directions(current_pos)
-                if valid_directions:
-                    self.target_directions[i] = np.random.choice(valid_directions)
-                    new_pos = self._move_target_in_direction(current_pos, self.target_directions[i])
+                # With probability direction_change_prob, randomly change direction
+                if np.random.random() < self.direction_change_prob:
+                    self.target_directions[i] = np.random.randint(0, 4)
 
-            # Update target position
-            self.target_positions[i] = new_pos
+                # Calculate new position
+                current_pos = self.target_positions[i]
+                new_pos = self._move_target_in_direction(current_pos, self.target_directions[i])
+
+                # Check if hit a wall (new_pos == current_pos means we couldn't move)
+                if np.array_equal(new_pos, current_pos):
+                    # Hit a wall, choose a new valid direction
+                    valid_directions = self._get_valid_directions(current_pos)
+                    if valid_directions:
+                        self.target_directions[i] = np.random.choice(valid_directions)
+                        new_pos = self._move_target_in_direction(current_pos, self.target_directions[i])
+
+                # Update target position
+                self.target_positions[i] = new_pos
 
     def _move_target_in_direction(self, position: np.ndarray, direction: int) -> np.ndarray:
         """Move target in the specified direction, respecting grid boundaries."""
@@ -700,7 +721,8 @@ if __name__ == "__main__":
         bid_upper_bound=3,
         bid_penalty=0.1,
         target_reward=10.0,
-        direction_change_prob=0.2  # Higher probability for testing
+        direction_change_prob=0.2,  # Higher probability for testing
+        target_move_interval=1  # Move targets every step
     )
 
     obs, info = env.reset(seed=42)
