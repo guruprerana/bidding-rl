@@ -31,6 +31,9 @@ from src.bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
 from src.zero_sum_wrapper import ZeroSumBiddingWrapper
 from src.zero_sum_dqn import ZeroSumDQN, ZeroSumDQNPolicy
 
+# Alias for cleaner code
+ObsParser = ZeroSumBiddingWrapper
+
 
 class ComprehensiveTrainer:
     """Comprehensive trainer for Zero-Sum DQN experiments."""
@@ -428,19 +431,13 @@ class ComprehensiveTrainer:
             while (not terminated) and (not truncated):
                 # obs format from zero-sum wrapper:
                 # [agent_row, agent_col, target_row, target_col, target_reached, target_step_counter] (6 elements)
-                agent_row_norm = obs[0]
-                agent_col_norm = obs[1]
-                target_row_norm = obs[2]
-                target_col_norm = obs[3]
+
+                # Extract positions using utility methods
+                row, col = ObsParser.extract_agent_position(obs, self.grid_size)
+                target_row = ObsParser.denormalize_position(obs[2], self.grid_size)
+                target_col = ObsParser.denormalize_position(obs[3], self.grid_size)
                 target_reached = int(obs[4])
                 # target_step_counter = obs[5]  # Not used in visualization
-
-                # Denormalize positions
-                denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
-                row = int(agent_row_norm * denom)
-                col = int(agent_col_norm * denom)
-                target_row = int(target_row_norm * denom)
-                target_col = int(target_col_norm * denom)
 
                 # For visualization, track all targets
                 targets_reached = [0] * self.num_agents
@@ -465,25 +462,10 @@ class ComprehensiveTrainer:
                 total_reward += episode_reward
                 
                 # Store step details including bids and actions for visualization
-                # Convert discrete action back to readable format using wrapper's conversion
-                if hasattr(env, '_discrete_to_dict_action'):
-                    action_dict = env._discrete_to_dict_action(action)
-                    prot_action = action_dict["protagonist"]
-                    adv_action = action_dict["adversary"] 
-                else:
-                    # Fallback - reconstruct from discrete action
-                    actions_per_player = env.actions_per_player
-                    prot_idx = action // actions_per_player
-                    adv_idx = action % actions_per_player
-                    directions_per_bid = env._bid_upper_bound + 1
-                    prot_action = {
-                        "direction": prot_idx // directions_per_bid,
-                        "bid": prot_idx % directions_per_bid
-                    }
-                    adv_action = {
-                        "direction": adv_idx // directions_per_bid,
-                        "bid": adv_idx % directions_per_bid
-                    }
+                # Convert discrete action back to readable format using utility methods
+                prot_idx, adv_idx = ObsParser.split_discrete_action(action, env.actions_per_player)
+                prot_action = ObsParser.action_idx_to_direction_bid(prot_idx, env._bid_upper_bound)
+                adv_action = ObsParser.action_idx_to_direction_bid(adv_idx, env._bid_upper_bound)
                 
                 step_details.append({
                     "bids": info.get("bids", {}),
@@ -708,40 +690,26 @@ class ComprehensiveTrainer:
                 #  target0_reached, ..., targetN_reached,
                 #  target0_step_counter_norm, ..., targetN_step_counter_norm]
 
-                # Create wrapped observations for each agent
+                # Create wrapped observations for each agent using utility method
                 wrapped_observations = []
                 for agent_id in range(self.num_agents):
-                    # Extract agent's target position, reached status, and step counter
-                    target_idx_base = 2 + 2 * agent_id
-                    target_reached_idx = 2 + 2 * self.num_agents + agent_id
-                    target_counter_idx = 2 + 3 * self.num_agents + agent_id
-
-                    wrapped_obs = np.array([
-                        obs[0],  # agent_row_norm
-                        obs[1],  # agent_col_norm
-                        obs[target_idx_base],      # target_row_norm
-                        obs[target_idx_base + 1],  # target_col_norm
-                        obs[target_reached_idx],   # target_reached
-                        obs[target_counter_idx],   # target_step_counter_norm
-                    ], dtype=np.float32)
+                    wrapped_obs = ObsParser.get_observation_for_agent(obs, agent_id, self.num_agents)
                     wrapped_observations.append(wrapped_obs)
                 
                 # Get actions from all agents pursuing their respective targets
                 agent_actions = {}
-                directions_per_bid = self.bid_upper_bound + 1
 
                 for agent_id in range(self.num_agents):
                     action_idx, _ = agents[agent_id].predict(wrapped_observations[agent_id], deterministic=True)
 
-                    # Convert action index to direction/bid format
-                    prot_idx = action_idx[0] // agents[agent_id].adversary_actions
-                    prot_direction = prot_idx // directions_per_bid
-                    prot_bid = prot_idx % directions_per_bid
+                    # Convert action index to direction/bid format using utility method
+                    action_dict = ObsParser.extract_protagonist_action(
+                        action_idx[0],
+                        agents[agent_id].adversary_actions,
+                        self.bid_upper_bound
+                    )
 
-                    agent_actions[f"agent_{agent_id}"] = {
-                        "direction": prot_direction,
-                        "bid": prot_bid
-                    }
+                    agent_actions[f"agent_{agent_id}"] = action_dict
 
                 # Format actions for original environment
                 action = agent_actions
@@ -749,17 +717,12 @@ class ComprehensiveTrainer:
                 # Execute step
                 next_obs, rewards, terminated, truncated, step_info = env.step(action)
 
-                # Extract position and target status from observation array
-                denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
-                agent_row = int(obs[0] * denom)
-                agent_col = int(obs[1] * denom)
+                # Extract position and target status from observation array using utility methods
+                agent_row, agent_col = ObsParser.extract_agent_position(obs, self.grid_size)
                 agent_position = agent_row * self.grid_size + agent_col
 
                 # Extract all target reached statuses
-                targets_reached = []
-                target_reached_start_idx = 2 + 2 * self.num_agents
-                for i in range(self.num_agents):
-                    targets_reached.append(int(obs[target_reached_start_idx + i]))
+                targets_reached = ObsParser.extract_target_reached_flags(obs, self.num_agents)
 
                 # Log step details
                 targets_status = {f"target_{i}_reached": bool(targets_reached[i]) for i in range(self.num_agents)}
@@ -800,11 +763,8 @@ class ComprehensiveTrainer:
                     break
             
             # Episode summary - success is measured by target achievement
-            # Extract final target status from observation array
-            final_targets_reached = []
-            target_reached_start_idx = 2 + 2 * self.num_agents
-            for i in range(self.num_agents):
-                final_targets_reached.append(int(obs[target_reached_start_idx + i]))
+            # Extract final target status from observation array using utility method
+            final_targets_reached = ObsParser.extract_target_reached_flags(obs, self.num_agents)
 
             all_targets_reached = all(t == 1 for t in final_targets_reached)
             individual_successes = {f"agent_{i}_success": final_targets_reached[i] == 1 for i in range(self.num_agents)}
@@ -933,22 +893,16 @@ class ComprehensiveTrainer:
             state = episode_data["states"][frame]
             # state is now a numpy array from BiddingGridworld
             # [agent_row_norm, agent_col_norm, t0_row, t0_col, ..., tN_row, tN_col, t0_reached, ..., tN_reached]
-            denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
-            agent_row = int(state[0] * denom)
-            agent_col = int(state[1] * denom)
+
+            # Extract agent position using utility method
+            agent_row, agent_col = ObsParser.extract_agent_position(state, self.grid_size)
             agent_pos = agent_row * self.grid_size + agent_col
 
             # Extract actual target positions from observation (important for moving targets!)
-            target_positions = []
-            for i in range(self.num_agents):
-                target_idx_base = 2 + 2 * i
-                target_row = int(state[target_idx_base] * denom)
-                target_col = int(state[target_idx_base + 1] * denom)
-                target_positions.append((target_row, target_col))
+            target_positions = ObsParser.extract_all_target_positions(state, self.num_agents, self.grid_size)
 
             # Extract targets_reached for all agents
-            target_reached_start_idx = 2 + 2 * self.num_agents
-            targets_reached = [int(state[target_reached_start_idx + i]) for i in range(self.num_agents)]
+            targets_reached = ObsParser.extract_target_reached_flags(state, self.num_agents)
 
             if frame < len(episode_data["step_details"]):
                 step_detail = episode_data["step_details"][frame]

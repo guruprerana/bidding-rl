@@ -100,8 +100,10 @@ class ZeroSumBiddingWrapper(gym.Env):
         """Reset the environment."""
         obs, info = self.env.reset(seed=seed, options=options)
 
-        # Get target position for the protagonist
-        self.target_position = self.env.target_positions[self.target_agent_id].copy()
+        # Get target position for the protagonist using utility method
+        self.target_position = ZeroSumBiddingWrapper.extract_target_position(
+            obs, self.target_agent_id, self.num_agents, self.env.grid_size
+        )
 
         zero_sum_obs = self._convert_observation(obs)
         zero_sum_info = self._convert_info(info)
@@ -164,19 +166,13 @@ class ZeroSumBiddingWrapper(gym.Env):
     
     def _discrete_to_dict_action(self, action: int) -> Dict:
         """Convert discrete action index to dict format."""
-        # Extract protagonist and adversary action indices
-        prot_action_idx = action // self.actions_per_player
-        adv_action_idx = action % self.actions_per_player
-        
-        # Convert each action index to direction and bid
-        def idx_to_direction_bid(idx):
-            direction = idx // (self._bid_upper_bound + 1)
-            bid = idx % (self._bid_upper_bound + 1)
-            return {"direction": direction, "bid": bid}
-        
+        # Split discrete action into protagonist and adversary indices
+        prot_action_idx, adv_action_idx = ZeroSumBiddingWrapper.split_discrete_action(action, self.actions_per_player)
+
+        # Convert each action index to direction and bid using static utility method
         return {
-            "protagonist": idx_to_direction_bid(prot_action_idx),
-            "adversary": idx_to_direction_bid(adv_action_idx)
+            "protagonist": ZeroSumBiddingWrapper.action_idx_to_direction_bid(prot_action_idx, self._bid_upper_bound),
+            "adversary": ZeroSumBiddingWrapper.action_idx_to_direction_bid(adv_action_idx, self._bid_upper_bound)
         }
     
     def _convert_action(self, action: Dict) -> Dict:
@@ -199,37 +195,8 @@ class ZeroSumBiddingWrapper(gym.Env):
     
     def _convert_observation(self, obs):
         """Convert BiddingGridworld observation to zero-sum format."""
-        # obs format from BiddingGridworld (variable length):
-        # [agent_row_norm, agent_col_norm,
-        #  target0_row_norm, target0_col_norm, ..., targetN_row_norm, targetN_col_norm,
-        #  target0_reached, ..., targetN_reached,
-        #  target0_step_counter_norm, ..., targetN_step_counter_norm]
-        #
-        # Structure: 2 + 2*num_agents + num_agents + num_agents elements
-
-        # Extract protagonist's target position
-        target_idx_base = 2 + 2 * self.target_agent_id  # Index of target row
-        target_row = obs[target_idx_base]
-        target_col = obs[target_idx_base + 1]
-
-        # Extract protagonist's target reached flag
-        target_reached_idx = 2 + 2 * self.num_agents + self.target_agent_id
-        target_reached = obs[target_reached_idx]
-
-        # Extract protagonist's target step counter
-        target_counter_idx = 2 + 3 * self.num_agents + self.target_agent_id
-        target_step_counter = obs[target_counter_idx]
-
-        # Return observation focused on protagonist's target
-        # [agent_row, agent_col, target_row, target_col, target_reached, target_step_counter]
-        return np.array([
-            obs[0],  # agent_row_norm
-            obs[1],  # agent_col_norm
-            target_row,
-            target_col,
-            target_reached,
-            target_step_counter
-        ], dtype=np.float32)
+        # Use the static utility method to extract observation for this agent
+        return ZeroSumBiddingWrapper.get_observation_for_agent(obs, self.target_agent_id, self.num_agents)
 
     def _convert_info(self, info: Dict) -> Dict:
         """Convert BiddingGridworld info to zero-sum format."""
@@ -266,6 +233,169 @@ class ZeroSumBiddingWrapper(gym.Env):
     def bid_upper_bound(self):
         """Get bid upper bound from underlying environment."""
         return self.env.bid_upper_bound
+
+    @staticmethod
+    def split_discrete_action(discrete_action: int, actions_per_player: int) -> Tuple[int, int]:
+        """
+        Split a discrete zero-sum action into protagonist and adversary action indices.
+
+        Args:
+            discrete_action: Discrete action index from zero-sum game
+            actions_per_player: Number of actions available per player
+
+        Returns:
+            Tuple of (protagonist_action_idx, adversary_action_idx)
+        """
+        prot_action_idx = discrete_action // actions_per_player
+        adv_action_idx = discrete_action % actions_per_player
+        return prot_action_idx, adv_action_idx
+
+    @staticmethod
+    def action_idx_to_direction_bid(action_idx: int, bid_upper_bound: int) -> Dict[str, int]:
+        """
+        Convert action index to direction and bid dictionary.
+
+        Args:
+            action_idx: Action index (0 to num_directions * (bid_upper_bound + 1) - 1)
+            bid_upper_bound: Maximum bid value
+
+        Returns:
+            Dictionary with 'direction' and 'bid' keys
+        """
+        direction = action_idx // (bid_upper_bound + 1)
+        bid = action_idx % (bid_upper_bound + 1)
+        return {"direction": direction, "bid": bid}
+
+    @staticmethod
+    def extract_protagonist_action(discrete_action: int, adversary_actions: int, bid_upper_bound: int) -> Dict[str, int]:
+        """
+        Extract protagonist's action from a discrete zero-sum action.
+
+        Args:
+            discrete_action: Discrete action index from zero-sum DQN
+            adversary_actions: Number of possible adversary actions
+            bid_upper_bound: Maximum bid value
+
+        Returns:
+            Dictionary with 'direction' and 'bid' keys for the protagonist
+        """
+        prot_idx = discrete_action // adversary_actions
+        return ZeroSumBiddingWrapper.action_idx_to_direction_bid(prot_idx, bid_upper_bound)
+
+    @staticmethod
+    def denormalize_position(normalized_value: float, grid_size: int) -> int:
+        """
+        Denormalize a position from [0, 1] range to grid coordinates.
+
+        Args:
+            normalized_value: Normalized position in [0, 1]
+            grid_size: Size of the grid
+
+        Returns:
+            Integer grid coordinate
+        """
+        denom = float(grid_size - 1) if grid_size > 1 else 1.0
+        return int(normalized_value * denom)
+
+    @staticmethod
+    def extract_agent_position(obs: np.ndarray, grid_size: int) -> Tuple[int, int]:
+        """
+        Extract agent position from observation.
+
+        Args:
+            obs: Observation array from BiddingGridworld
+            grid_size: Size of the grid
+
+        Returns:
+            Tuple of (row, col) agent position
+        """
+        row = ZeroSumBiddingWrapper.denormalize_position(obs[0], grid_size)
+        col = ZeroSumBiddingWrapper.denormalize_position(obs[1], grid_size)
+        return (row, col)
+
+    @staticmethod
+    def extract_target_position(obs: np.ndarray, target_id: int, num_agents: int, grid_size: int) -> Tuple[int, int]:
+        """
+        Extract a specific target's position from observation.
+
+        Args:
+            obs: Observation array from BiddingGridworld
+            target_id: ID of the target to extract
+            num_agents: Total number of agents
+            grid_size: Size of the grid
+
+        Returns:
+            Tuple of (row, col) target position
+        """
+        target_idx_base = 2 + 2 * target_id
+        target_row = ZeroSumBiddingWrapper.denormalize_position(obs[target_idx_base], grid_size)
+        target_col = ZeroSumBiddingWrapper.denormalize_position(obs[target_idx_base + 1], grid_size)
+        return (target_row, target_col)
+
+    @staticmethod
+    def extract_all_target_positions(obs: np.ndarray, num_agents: int, grid_size: int) -> List[Tuple[int, int]]:
+        """
+        Extract all targets' positions from observation.
+
+        Args:
+            obs: Observation array from BiddingGridworld
+            num_agents: Total number of agents
+            grid_size: Size of the grid
+
+        Returns:
+            List of (row, col) tuples for each target
+        """
+        target_positions = []
+        for i in range(num_agents):
+            target_positions.append(
+                ZeroSumBiddingWrapper.extract_target_position(obs, i, num_agents, grid_size)
+            )
+        return target_positions
+
+    @staticmethod
+    def extract_target_reached_flags(obs: np.ndarray, num_agents: int) -> List[int]:
+        """
+        Extract target reached flags for all targets.
+
+        Args:
+            obs: Observation array from BiddingGridworld
+            num_agents: Total number of agents
+
+        Returns:
+            List of 0/1 flags indicating whether each target has been reached
+        """
+        target_reached_start_idx = 2 + 2 * num_agents
+        return [int(obs[target_reached_start_idx + i]) for i in range(num_agents)]
+
+    @staticmethod
+    def get_observation_for_agent(obs: np.ndarray, agent_id: int, num_agents: int) -> np.ndarray:
+        """
+        Extract observation for a specific agent from the full multi-agent observation.
+
+        This creates the same format as used by ZeroSumBiddingWrapper:
+        [agent_row, agent_col, target_row, target_col, target_reached, target_step_counter]
+
+        Args:
+            obs: Full observation array from BiddingGridworld
+            agent_id: ID of the agent
+            num_agents: Total number of agents
+
+        Returns:
+            Observation array for the specific agent (6 elements)
+        """
+        # Extract agent's target position, reached status, and step counter
+        target_idx_base = 2 + 2 * agent_id
+        target_reached_idx = 2 + 2 * num_agents + agent_id
+        target_counter_idx = 2 + 3 * num_agents + agent_id
+
+        return np.array([
+            obs[0],  # agent_row_norm
+            obs[1],  # agent_col_norm
+            obs[target_idx_base],      # target_row_norm
+            obs[target_idx_base + 1],  # target_col_norm
+            obs[target_reached_idx],   # target_reached
+            obs[target_counter_idx],   # target_step_counter_norm
+        ], dtype=np.float32)
 
 
 if __name__ == "__main__":
