@@ -3,6 +3,9 @@ import numpy as np
 from gymnasium import spaces
 from typing import Dict, Tuple, List, Any, Optional
 import random
+from pathlib import Path
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 
 class BiddingGridworld(gym.Env):
@@ -443,7 +446,226 @@ class BiddingGridworld(gym.Env):
         # For now, return a placeholder
         rgb_array = np.zeros((self.grid_size * 50, self.grid_size * 50, 3), dtype=np.uint8)
         return rgb_array
-    
+
+    @staticmethod
+    def _direction_to_string(direction: int) -> str:
+        """Convert direction number to readable string."""
+        directions = ["Left", "Right", "Up", "Down"]
+        return directions[direction] if 0 <= direction <= 3 else "Unknown"
+
+    def create_episode_gif(
+        self,
+        episode_data: Dict[str, Any],
+        output_path: Path,
+        target_agent_id: int = 0,
+        fps: int = 2
+    ):
+        """
+        Create an animated GIF of an episode for a single agent's perspective.
+
+        Args:
+            episode_data: Dictionary containing episode information
+            output_path: Path where to save the GIF
+            target_agent_id: ID of the target being pursued
+            fps: Frames per second for the animation
+        """
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        def animate(frame):
+            ax.clear()
+            if frame >= len(episode_data["states"]):
+                return
+
+            state = episode_data["states"][frame]
+            denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+            agent_row = int(state[0] * denom)
+            agent_col = int(state[1] * denom)
+
+            target_idx = 2 + target_agent_id * 2
+            target_row = int(state[target_idx] * denom)
+            target_col = int(state[target_idx + 1] * denom)
+            target_reached_idx = 2 + 2 * self.num_agents + target_agent_id
+            target_reached = int(state[target_reached_idx])
+
+            ax.set_xlim(-0.5, self.grid_size - 0.5)
+            ax.set_ylim(-0.5, self.grid_size - 0.5)
+            ax.set_aspect('equal')
+
+            for i in range(self.grid_size + 1):
+                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
+                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
+
+            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
+            edge_colors = ['blue', 'red', 'orange']
+
+            winning_agent = None
+            if frame < len(episode_data.get("step_details", [])):
+                step_detail = episode_data["step_details"][frame]
+                winning_agent = step_detail.get("winning_agent", -1)
+
+            is_controlling = (winning_agent == target_agent_id)
+            edge_width = 4 if is_controlling else 2
+            edge_color = 'gold' if is_controlling else edge_colors[target_agent_id % 3]
+
+            if target_reached == 0:
+                ax.add_patch(plt.Rectangle(
+                    (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                    facecolor=target_colors[target_agent_id % 3],
+                    edgecolor=edge_color, linewidth=edge_width
+                ))
+                ax.text(target_col, target_row, str(target_agent_id),
+                       ha='center', va='center', fontsize=12, fontweight='bold')
+                if is_controlling:
+                    ax.text(target_col, target_row - 0.6, '⚡',
+                           ha='center', va='center', fontsize=10, color='gold')
+            else:
+                ax.add_patch(plt.Rectangle(
+                    (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                    facecolor='lightgreen', edgecolor='green', linewidth=2
+                ))
+                ax.text(target_col, target_row, '✓',
+                       ha='center', va='center', fontsize=12, fontweight='bold')
+
+            if winning_agent is not None and winning_agent >= 0:
+                ring_color = edge_colors[winning_agent % 3] if winning_agent != target_agent_id else 'gold'
+                ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
+                                       facecolor='none', edgecolor=ring_color, linewidth=3))
+
+            ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
+                                   facecolor='yellow', edgecolor='orange'))
+            ax.text(agent_col, agent_row, 'A',
+                   ha='center', va='center', fontsize=10, fontweight='bold')
+
+            reward = episode_data["rewards"][frame] if frame < len(episode_data["rewards"]) else 0
+            title = f'Agent {target_agent_id} - Step {frame} - Reward: {reward:.2f}\n'
+            title += f'Total Reward: {sum(episode_data["rewards"][:frame+1]):.2f}'
+
+            ax.set_title(title, fontsize=11)
+            ax.set_xticks(range(self.grid_size))
+            ax.set_yticks(range(self.grid_size))
+            ax.invert_yaxis()
+
+        anim = animation.FuncAnimation(fig, animate,
+                                      frames=len(episode_data["states"]) + 5,
+                                      interval=1000//fps, repeat=True)
+        try:
+            anim.save(str(output_path), writer='pillow', fps=fps)
+            print(f"✅ Episode GIF saved: {output_path}")
+        except Exception as e:
+            print(f"⚠️  Could not save GIF {output_path}: {e}")
+        finally:
+            plt.close(fig)
+
+    def create_competition_gif(
+        self,
+        episode_data: Dict[str, Any],
+        output_path: Path,
+        fps: int = 1
+    ):
+        """
+        Create an animated GIF of a multi-agent competition episode.
+
+        Args:
+            episode_data: Dictionary containing episode information
+            output_path: Path where to save the GIF
+            fps: Frames per second for the animation
+        """
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        def animate(frame):
+            ax.clear()
+            if frame >= len(episode_data["states"]):
+                return
+
+            state = episode_data["states"][frame]
+            denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+            agent_row = int(state[0] * denom)
+            agent_col = int(state[1] * denom)
+
+            target_positions = []
+            targets_reached = []
+            for i in range(self.num_agents):
+                target_idx = 2 + i * 2
+                target_positions.append((int(state[target_idx] * denom),
+                                       int(state[target_idx + 1] * denom)))
+                target_reached_idx = 2 + 2 * self.num_agents + i
+                targets_reached.append(int(state[target_reached_idx]))
+
+            step_detail = episode_data["step_details"][frame] if frame < len(episode_data["step_details"]) else None
+            actions = episode_data["actions"][frame] if frame < len(episode_data["actions"]) else None
+            rewards = episode_data["rewards"][frame] if frame < len(episode_data["rewards"]) else None
+
+            ax.set_xlim(-0.5, self.grid_size - 0.5)
+            ax.set_ylim(-0.5, self.grid_size - 0.5)
+            ax.set_aspect('equal')
+
+            for i in range(self.grid_size + 1):
+                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
+                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
+
+            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
+            edge_colors = ['blue', 'red', 'orange']
+            winning_agent = step_detail.get("winning_agent", -1) if step_detail else None
+
+            for i in range(self.num_agents):
+                target_row, target_col = target_positions[i]
+                is_controlling = (winning_agent == i)
+                edge_width = 4 if is_controlling else 2
+                edge_color = 'gold' if is_controlling else edge_colors[i]
+
+                if targets_reached[i] == 0:
+                    ax.add_patch(plt.Rectangle(
+                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                        facecolor=target_colors[i], edgecolor=edge_color, linewidth=edge_width
+                    ))
+                    ax.text(target_col, target_row, str(i),
+                           ha='center', va='center', fontsize=12, fontweight='bold')
+                    if is_controlling:
+                        ax.text(target_col, target_row - 0.6, '⚡',
+                               ha='center', va='center', fontsize=10, color='gold')
+                else:
+                    ax.add_patch(plt.Rectangle(
+                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                        facecolor='lightgreen', edgecolor='green', linewidth=2
+                    ))
+                    ax.text(target_col, target_row, '✓',
+                           ha='center', va='center', fontsize=12, fontweight='bold')
+
+            if winning_agent is not None and 0 <= winning_agent < self.num_agents:
+                ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
+                                       facecolor='none', edgecolor=edge_colors[winning_agent], linewidth=3))
+
+            ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
+                                   facecolor='yellow', edgecolor='orange'))
+            ax.text(agent_col, agent_row, 'A',
+                   ha='center', va='center', fontsize=10, fontweight='bold')
+
+            title = f'Competition Episode - Step {frame}\n'
+            if step_detail:
+                targets_status = ", ".join([f"{i}={'✓' if targets_reached[i] else '✗'}" for i in range(self.num_agents)])
+                title += f'Targets: {targets_status}\n'
+                if rewards:
+                    cumulative = {f"agent_{i}": sum(episode_data["rewards"][f].get(f"agent_{i}", 0)
+                                                    for f in range(frame + 1)) for i in range(self.num_agents)}
+                    rewards_str = ", ".join([f"{i}={cumulative[f'agent_{i}']:.2f}" for i in range(self.num_agents)])
+                    title += f'Rewards: {rewards_str}'
+
+            ax.set_title(title, fontsize=10)
+            ax.set_xticks(range(self.grid_size))
+            ax.set_yticks(range(self.grid_size))
+            ax.invert_yaxis()
+
+        anim = animation.FuncAnimation(fig, animate,
+                                      frames=len(episode_data["states"]) + 3,
+                                      interval=1000//fps, repeat=True)
+        try:
+            anim.save(str(output_path), writer='pillow', fps=fps)
+            print(f"✅ Competition GIF saved: {output_path}")
+        except Exception as e:
+            print(f"⚠️  Could not save GIF {output_path}: {e}")
+        finally:
+            plt.close(fig)
+
     def close(self):
         """Clean up rendering resources."""
         pass

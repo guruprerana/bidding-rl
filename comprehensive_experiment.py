@@ -20,7 +20,6 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from pathlib import Path
 import torch
 
@@ -429,44 +428,23 @@ class ComprehensiveTrainer:
             
             # Record episode
             while (not terminated) and (not truncated):
-                # obs format from zero-sum wrapper:
-                # [agent_row, agent_col, target_row, target_col, target_reached, target_step_counter] (6 elements)
+                # Store raw observation for GIF creation
+                states.append(obs.copy())
 
-                # Extract positions using utility methods
-                row, col = ObsParser.extract_agent_position(obs, self.grid_size)
-                target_row = ObsParser.denormalize_position(obs[2], self.grid_size)
-                target_col = ObsParser.denormalize_position(obs[3], self.grid_size)
-                target_reached = int(obs[4])
-                # target_step_counter = obs[5]  # Not used in visualization
-
-                # For visualization, track all targets
-                targets_reached = [0] * self.num_agents
-                targets_reached[target_agent_id] = target_reached
-
-                # Track actual target position (important for moving targets!)
-                target_position = (target_row, target_col)
-
-                states.append({
-                    "agent_position": (row, col),
-                    "target_position": target_position,  # Actual position from observation
-                    "targets_reached": targets_reached,
-                    "step": steps
-                })
-                
                 action_idx, _ = agent.predict(obs, deterministic=True)
                 action = action_idx[0]  # Extract the discrete action
                 actions.append(action)
-                
+
                 next_obs, episode_reward, terminated, truncated, info = env.step(action)
                 rewards.append(episode_reward)
                 total_reward += episode_reward
-                
+
                 # Store step details including bids and actions for visualization
                 # Convert discrete action back to readable format using utility methods
                 prot_idx, adv_idx = ObsParser.split_discrete_action(action, env.actions_per_player)
                 prot_action = ObsParser.action_idx_to_direction_bid(prot_idx, env._bid_upper_bound)
                 adv_action = ObsParser.action_idx_to_direction_bid(adv_idx, env._bid_upper_bound)
-                
+
                 step_details.append({
                     "bids": info.get("bids", {}),
                     "winning_agent": info.get("winning_agent", -1),
@@ -476,7 +454,7 @@ class ComprehensiveTrainer:
                     "protagonist_action": prot_action,
                     "adversary_action": adv_action
                 })
-                
+
                 obs = next_obs
                 steps += 1
             
@@ -496,151 +474,12 @@ class ComprehensiveTrainer:
             rollout_file = self.rollouts_dir / f"{filename_prefix}_agent_{target_agent_id}_ep_{episode}.json"
             with open(rollout_file, 'w') as f:
                 json.dump(episode_data, f, indent=2, default=str)
-            
-            # Create visualization
-            self.create_rollout_mp4(episode_data, rollout_file.with_suffix('.gif'))
-        
+
+            # Create visualization using environment method
+            env.env.create_episode_gif(episode_data, rollout_file.with_suffix('.gif'),
+                                      target_agent_id=target_agent_id, fps=2)
+
         env.close()
-    
-    def _direction_to_string(self, direction: int) -> str:
-        """Convert direction number to readable string."""
-        # Must match BiddingGridworld: 0=Left, 1=Right, 2=Up, 3=Down
-        directions = ["Left", "Right", "Up", "Down"]
-        return directions[direction] if 0 <= direction <= 3 else "Unknown"
-    
-    def create_rollout_mp4(self, episode_data: Dict, gif_path: Path):
-        """Create animated GIF of episode rollout."""
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        def animate(frame):
-            ax.clear()
-            
-            if frame >= len(episode_data["states"]):
-                return
-            
-            state = episode_data["states"][frame]
-            agent_pos = state["agent_position"]
-            target_pos = state["target_position"]  # Actual target position from observation
-            targets_reached = state["targets_reached"]
-            target_id = episode_data["target_agent_id"]
-
-            # Create grid
-            ax.set_xlim(-0.5, self.grid_size - 0.5)
-            ax.set_ylim(-0.5, self.grid_size - 0.5)
-            ax.set_aspect('equal')
-
-            # Draw grid lines
-            for i in range(self.grid_size + 1):
-                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
-                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
-
-            # Draw the tracked target (protagonist's target) with actual position
-            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
-            edge_colors = ['blue', 'red', 'orange']
-
-            # Determine if this agent is currently in control
-            winning_agent = None
-            if frame < len(episode_data.get("step_details", [])):
-                step_detail = episode_data["step_details"][frame]
-                winning_agent = step_detail.get("winning_agent", -1)
-
-            # Use thicker border and glow effect for controlling agent's target
-            is_controlling = (winning_agent == target_id)
-            edge_width = 4 if is_controlling else 2
-            edge_color = 'gold' if is_controlling else edge_colors[target_id % 3]
-
-            if targets_reached[target_id] == 0:
-                ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                         0.8, 0.8, facecolor=target_colors[target_id % 3],
-                                         edgecolor=edge_color, linewidth=edge_width))
-                ax.text(target_pos[1], target_pos[0], str(target_id), ha='center', va='center',
-                       fontsize=12, fontweight='bold')
-                # Add control indicator
-                if is_controlling:
-                    ax.text(target_pos[1], target_pos[0] - 0.6, '⚡', ha='center', va='center',
-                           fontsize=10, color='gold')
-            else:
-                ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                         0.8, 0.8, facecolor='lightgreen', edgecolor='green', linewidth=2))
-                ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
-
-            # Draw agent with colored ring showing which target it's moving towards
-            # Add outer ring in controlling agent's color
-            if winning_agent is not None and winning_agent >= 0:
-                ring_color = edge_colors[winning_agent % 3] if winning_agent != target_id else 'gold'
-                ax.add_patch(plt.Circle((agent_pos[1], agent_pos[0]), 0.35,
-                                       facecolor='none', edgecolor=ring_color, linewidth=3))
-
-            ax.add_patch(plt.Circle((agent_pos[1], agent_pos[0]), 0.3, facecolor='yellow', edgecolor='orange'))
-            ax.text(agent_pos[1], agent_pos[0], 'A', ha='center', va='center', fontsize=10, fontweight='bold')
-
-            # Title and info
-            target_id = episode_data["target_agent_id"]
-            step = state["step"]
-            reward = episode_data["rewards"][frame] if frame < len(episode_data["rewards"]) else 0
-
-            # Add bid and action information if available
-            title = f'Agent {target_id}'
-            if self.use_moving_targets:
-                title += ' (Moving Target)'
-            title += f' - Step {step} - Reward: {reward:.2f}\n'
-            title += f'Total Reward: {sum(episode_data["rewards"][:frame+1]):.2f}'
-
-            if frame < len(episode_data.get("step_details", [])):
-                step_detail = episode_data["step_details"][frame]
-                prot_action = step_detail.get("protagonist_action", {})
-                adv_action = step_detail.get("adversary_action", {})
-                window_steps = step_detail.get("window_steps_remaining", 0)
-                window_agent = step_detail.get("window_agent", None)
-                bid_penalty_applied = step_detail.get("bid_penalty_applied", False)
-
-                if prot_action and adv_action:
-                    prot_dir = self._direction_to_string(prot_action.get("direction", -1))
-                    prot_bid = prot_action.get("bid", 0)
-                    adv_dir = self._direction_to_string(adv_action.get("direction", -1))
-                    adv_bid = adv_action.get("bid", 0)
-
-                    winner = step_detail.get("winning_agent", -1)
-
-                    # Determine if this is a new bid or window continuation
-                    if bid_penalty_applied:
-                        # New bid just won
-                        title += f'\n🎯 NEW BID: Protagonist: {prot_dir} ({prot_bid}) | Adversary: {adv_dir} ({adv_bid})'
-                        if winner is None:
-                            title += f'\n❌ No Movement (all bid 0)'
-                        elif winner == target_id:
-                            title += f'\n✅ Protagonist WINS! ⚡ (Window: {self.action_window} steps)'
-                        else:
-                            title += f'\n✅ Adversary WINS (Window: {self.action_window} steps)'
-                    elif window_agent is not None:
-                        # Continuing an action window
-                        controller = "Protagonist" if window_agent == target_id else "Adversary"
-                        controller_dir = prot_dir if window_agent == target_id else adv_dir
-                        title += f'\n🔒 WINDOW CONTROL: {controller} moving {controller_dir}'
-                        title += f'\n⏱️  Steps remaining in window: {window_steps}'
-                        title += f'\n💭 Bids ignored (window active)'
-                    else:
-                        # Shouldn't happen, but fallback
-                        title += f'\nProtagonist: {prot_dir} ({prot_bid}) | Adversary: {adv_dir} ({adv_bid})'
-            
-            ax.set_title(title, fontsize=12)
-            
-            ax.set_xticks(range(self.grid_size))
-            ax.set_yticks(range(self.grid_size))
-            ax.invert_yaxis()  # Make (0,0) top-left
-        
-        # Create animation
-        anim = animation.FuncAnimation(fig, animate, frames=len(episode_data["states"]) + 5, 
-                                     interval=500, repeat=True)
-        
-        # Save GIF
-        try:
-            anim.save(str(gif_path), writer='pillow', fps=1)
-            print(f"Rollout GIF saved: {gif_path}")
-        except Exception as e:
-            print(f"Warning: Could not save GIF {gif_path}: {e}")
-        
-        plt.close()
     
     def load_models(self) -> Tuple[ZeroSumDQN, ZeroSumDQN]:
         """Load both trained models."""
@@ -805,8 +644,8 @@ class ComprehensiveTrainer:
             with open(episode_file, 'w') as f:
                 json.dump(episode_log, f, indent=2, default=str)
 
-            # Create cooperative rollout MP4
-            self.create_competition_mp4(episode_log, episode_file.with_suffix('.gif'))
+            # Create cooperative rollout GIF using environment method
+            env.create_competition_gif(episode_log, episode_file.with_suffix('.gif'), fps=1)
         
         env.close()
         
@@ -879,173 +718,6 @@ class ComprehensiveTrainer:
         print(f"Cooperation Efficiency: {summary['cooperation_efficiency']:.1%}")
 
         return summary
-    
-    def create_competition_mp4(self, episode_data: Dict, gif_path: Path):
-        """Create animated GIF of cooperative episode."""
-        fig, ax = plt.subplots(figsize=(10, 8))
-
-        def animate(frame):
-            ax.clear()
-
-            if frame >= len(episode_data["states"]):
-                return
-
-            state = episode_data["states"][frame]
-            # state is now a numpy array from BiddingGridworld
-            # [agent_row_norm, agent_col_norm, t0_row, t0_col, ..., tN_row, tN_col, t0_reached, ..., tN_reached]
-
-            # Extract agent position using utility method
-            agent_row, agent_col = ObsParser.extract_agent_position(state, self.grid_size)
-            agent_pos = agent_row * self.grid_size + agent_col
-
-            # Extract actual target positions from observation (important for moving targets!)
-            target_positions = ObsParser.extract_all_target_positions(state, self.num_agents, self.grid_size)
-
-            # Extract targets_reached for all agents
-            targets_reached = ObsParser.extract_target_reached_flags(state, self.num_agents)
-
-            if frame < len(episode_data["step_details"]):
-                step_detail = episode_data["step_details"][frame]
-                action = episode_data["actions"][frame]
-                rewards = episode_data["rewards"][frame]
-            else:
-                step_detail = None
-                action = None
-                rewards = None
-
-            # Create grid
-            ax.set_xlim(-0.5, self.grid_size - 0.5)
-            ax.set_ylim(-0.5, self.grid_size - 0.5)
-            ax.set_aspect('equal')
-
-            # Draw grid lines
-            for i in range(self.grid_size + 1):
-                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
-                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
-
-            # Draw targets with actual positions from observation
-            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
-            edge_colors = ['blue', 'red', 'orange']
-
-            # Determine which agent is currently in control
-            winning_agent = None
-            if step_detail:
-                winning_agent = step_detail.get("winning_agent", -1)
-
-            for i in range(self.num_agents):
-                target_pos = target_positions[i]  # Use actual position from observation
-
-                # Highlight the controlling agent's target
-                is_controlling = (winning_agent == i)
-                edge_width = 4 if is_controlling else 2
-                edge_color = 'gold' if is_controlling else edge_colors[i]
-
-                if targets_reached[i] == 0:
-                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                             0.8, 0.8, facecolor=target_colors[i],
-                                             edgecolor=edge_color, linewidth=edge_width))
-                    ax.text(target_pos[1], target_pos[0], str(i), ha='center', va='center', fontsize=12, fontweight='bold')
-                    # Add control indicator
-                    if is_controlling:
-                        ax.text(target_pos[1], target_pos[0] - 0.6, '⚡', ha='center', va='center',
-                               fontsize=10, color='gold')
-                else:
-                    ax.add_patch(plt.Rectangle((target_pos[1] - 0.4, target_pos[0] - 0.4),
-                                             0.8, 0.8, facecolor='lightgreen', edgecolor='green', linewidth=2))
-                    ax.text(target_pos[1], target_pos[0], '✓', ha='center', va='center', fontsize=12, fontweight='bold')
-
-            # Draw agent with colored ring showing which target it's moving towards
-            row = agent_pos // self.grid_size
-            col = agent_pos % self.grid_size
-
-            # Add outer ring in controlling agent's color
-            if winning_agent is not None and winning_agent >= 0 and winning_agent < self.num_agents:
-                ring_color = edge_colors[winning_agent]
-                ax.add_patch(plt.Circle((col, row), 0.35,
-                                       facecolor='none', edgecolor=ring_color, linewidth=3))
-
-            ax.add_patch(plt.Circle((col, row), 0.3, facecolor='yellow', edgecolor='orange'))
-            ax.text(col, row, 'A', ha='center', va='center', fontsize=10, fontweight='bold')
-
-            # Title and info - focus on cooperation
-            title = f'Cooperative Episode {episode_data["episode"]}'
-            if self.use_moving_targets:
-                title += ' (Moving Targets)'
-            title += f' - Step {frame}\n'
-
-            if step_detail:
-                window_steps = step_detail.get("window_steps_remaining", 0)
-                window_agent = step_detail.get("window_agent", None)
-                bid_penalty_applied = step_detail.get("bid_penalty_applied", False)
-
-                # Show current target status
-                targets_status = ", ".join([f"{i}={'✓' if targets_reached[i] else '✗'}" for i in range(self.num_agents)])
-
-                # Determine if this is a new bid or window continuation
-                if bid_penalty_applied:
-                    # New bidding round
-                    winner_text = f'Agent {step_detail["winning_agent"]}' if step_detail["winning_agent"] is not None else 'No Movement'
-                    title += f'🎯 NEW BID - Winner: {winner_text} | Targets: {targets_status}\n'
-                    title += f'Window starts: {self.action_window} steps\n'
-                elif window_agent is not None:
-                    # Continuing action window
-                    title += f'🔒 WINDOW CONTROL - Agent {window_agent} | Targets: {targets_status}\n'
-                    title += f'⏱️  Steps remaining: {window_steps}\n'
-                else:
-                    # Fallback
-                    winner_text = f'Agent {step_detail["winning_agent"]}' if step_detail["winning_agent"] is not None else 'No Movement'
-                    title += f'Winner: {winner_text} | Targets: {targets_status}\n'
-
-                # Show actions and bids for all agents
-                actions = step_detail.get("actions", {})
-                action_strs = []
-                for i in range(self.num_agents):
-                    agent_key = f"agent_{i}"
-                    if agent_key in actions:
-                        agent_dir = self._direction_to_string(actions[agent_key].get("direction", -1))
-                        agent_bid = actions[agent_key].get("bid", 0)
-                        # Highlight the controlling agent's action during window
-                        if window_agent == i and not bid_penalty_applied:
-                            action_strs.append(f"A{i}: {agent_dir}(bid:{agent_bid})→ACTIVE")
-                        else:
-                            action_strs.append(f"A{i}: {agent_dir}({agent_bid})")
-
-                if action_strs:
-                    if bid_penalty_applied:
-                        title += f'Actions & Bids: {" | ".join(action_strs)}\n'
-                    else:
-                        title += f'Actions (bids ignored): {" | ".join(action_strs)}\n'
-
-                # Show cumulative rewards for all agents up to this frame
-                if rewards:
-                    cumulative_rewards = {}
-                    for i in range(self.num_agents):
-                        agent_key = f"agent_{i}"
-                        cumulative_rewards[agent_key] = sum(
-                            episode_data["rewards"][f].get(agent_key, 0)
-                            for f in range(frame + 1)
-                        )
-                    rewards_strs = [f"{i}={cumulative_rewards[f'agent_{i}']:.2f}" for i in range(self.num_agents)]
-                    title += f'Cumulative Rewards: {", ".join(rewards_strs)}'
-            
-            ax.set_title(title, fontsize=11)
-            
-            ax.set_xticks(range(self.grid_size))
-            ax.set_yticks(range(self.grid_size))
-            ax.invert_yaxis()  # Make (0,0) top-left
-        
-        # Create animation
-        anim = animation.FuncAnimation(fig, animate, frames=len(episode_data["states"]) + 3, 
-                                     interval=800, repeat=True)
-        
-        # Save GIF
-        try:
-            anim.save(str(gif_path), writer='pillow', fps=1)
-            print(f"Cooperative GIF saved: {gif_path}")
-        except Exception as e:
-            print(f"Warning: Could not save GIF {gif_path}: {e}")
-        
-        plt.close()
     
     def run_evaluation_only(self, model_dir: str):
         """Load existing model and run evaluation only."""
