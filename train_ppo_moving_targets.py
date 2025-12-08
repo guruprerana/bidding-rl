@@ -349,8 +349,21 @@ class PPOMovingTargetsExperiment:
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
                   f"Length={step_count}, Targets={targets_reached}/{trainer.args.num_targets}")
 
-            # Note: GIF creation for single-agent could be added here if needed
-            # For now, we skip GIF creation for simplicity
+            # Create GIF
+            episode_data = {
+                "states": episode_states,
+                "actions": episode_actions,
+                "rewards": episode_rewards,
+            }
+
+            gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
+            eval_env.create_single_agent_gif(episode_data, gif_path, fps=2)
+
+            # Log to wandb
+            if trainer.args.track:
+                wandb.log({
+                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
+                }, step=global_step)
 
         eval_env.close()
 

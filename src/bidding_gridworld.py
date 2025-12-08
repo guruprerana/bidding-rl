@@ -653,6 +653,117 @@ class BiddingGridworld(gym.Env):
         finally:
             plt.close(fig)
 
+    def create_single_agent_gif(
+        self,
+        episode_data: Dict[str, Any],
+        output_path: Path,
+        fps: int = 2
+    ):
+        """
+        Create an animated GIF for single-agent mode showing all targets.
+
+        Args:
+            episode_data: Dictionary containing episode information
+            output_path: Path where to save the GIF
+            fps: Frames per second for the animation
+        """
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        def animate(frame):
+            ax.clear()
+            if frame >= len(episode_data["states"]):
+                return
+
+            state = episode_data["states"][frame]
+            denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+
+            # Agent position
+            agent_row = int(state[0] * denom)
+            agent_col = int(state[1] * denom)
+
+            # Set up plot
+            ax.set_xlim(-0.5, self.grid_size - 0.5)
+            ax.set_ylim(-0.5, self.grid_size - 0.5)
+            ax.set_aspect('equal')
+
+            # Draw grid
+            for i in range(self.grid_size + 1):
+                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
+                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
+
+            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
+            edge_colors = ['blue', 'red', 'orange']
+
+            # Draw all targets
+            for target_id in range(self.num_agents):
+                target_idx = 2 + target_id * 2
+                target_row = int(state[target_idx] * denom)
+                target_col = int(state[target_idx + 1] * denom)
+                target_reached_idx = 2 + 2 * self.num_agents + target_id
+                target_reached = int(state[target_reached_idx])
+
+                if target_reached == 0:
+                    # Unreached target
+                    ax.add_patch(plt.Rectangle(
+                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                        facecolor=target_colors[target_id % 3],
+                        edgecolor=edge_colors[target_id % 3], linewidth=2
+                    ))
+                    ax.text(target_col, target_row, str(target_id),
+                           ha='center', va='center', fontsize=12, fontweight='bold')
+                else:
+                    # Reached target
+                    ax.add_patch(plt.Rectangle(
+                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                        facecolor='lightgreen', edgecolor='green', linewidth=2
+                    ))
+                    ax.text(target_col, target_row, '✓',
+                           ha='center', va='center', fontsize=12, fontweight='bold', color='darkgreen')
+
+            # Draw agent
+            ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
+                                   facecolor='yellow', edgecolor='orange', linewidth=2))
+            ax.text(agent_col, agent_row, 'A',
+                   ha='center', va='center', fontsize=10, fontweight='bold')
+
+            # Get reward for this frame
+            reward = 0
+            if frame < len(episode_data["rewards"]):
+                reward = episode_data["rewards"][frame]
+
+            # Calculate cumulative reward
+            total_reward = sum(episode_data["rewards"][:frame + 1])
+
+            # Count targets reached
+            targets_reached = sum(1 for i in range(self.num_agents)
+                                 if state[2 + 2 * self.num_agents + i] == 1)
+
+            title = f'Single Agent - Step {frame} - Reward: {reward:.2f}\n'
+            title += f'Total Reward: {total_reward:.2f} | Targets: {targets_reached}/{self.num_agents}'
+
+            # Add action information if available
+            if frame < len(episode_data.get("actions", [])):
+                action = episode_data["actions"][frame]
+                direction_names = {0: "Left ←", 1: "Right →", 2: "Up ↑", 3: "Down ↓"}
+                direction = direction_names.get(action, "?")
+                title += f'\nAction: {direction}'
+
+            ax.set_title(title, fontsize=11)
+            ax.set_xticks(range(self.grid_size))
+            ax.set_yticks(range(self.grid_size))
+            ax.invert_yaxis()
+
+        anim = animation.FuncAnimation(fig, animate,
+                                      frames=len(episode_data["states"]) + 5,
+                                      interval=1000//fps, repeat=True)
+        try:
+            anim.save(str(output_path), writer='pillow', fps=fps)
+            print(f"✅ Single-agent GIF saved: {output_path}")
+        except Exception as e:
+            print(f"⚠️  Could not save GIF {output_path}: {e}")
+        finally:
+            plt.close(fig)
+
     def create_competition_gif(
         self,
         episode_data: Dict[str, Any],
