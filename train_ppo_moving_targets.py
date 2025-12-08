@@ -455,11 +455,11 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = ""  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_single_agent"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 1000  # Save checkpoint every N iterations
     EVAL_FREQ = 1000  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 3  # Number of episodes per evaluation
