@@ -17,6 +17,7 @@ from torch.distributions.categorical import Categorical
 import wandb
 
 from bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
+from ppo_utils import layer_init, compute_gae, ppo_update_step, compute_explained_variance
 
 
 @dataclass
@@ -320,13 +321,6 @@ def reorder_observation_for_agent(base_obs: np.ndarray, target_index: int, num_a
     ])
 
     return reordered_obs
-
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    """Initialize layer weights with orthogonal initialization."""
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
 
 
 class SharedAgent(nn.Module):
@@ -653,26 +647,15 @@ class PPOTrainer:
                                 episode_bid_values.append(bid_value)
 
 
-            # Bootstrap value and compute advantages
+            # Bootstrap value and compute advantages using shared utility
             with torch.no_grad():
                 flat_next_obs = next_obs.reshape(-1, self.obs_dim)
                 next_value = self.agent.get_value(flat_next_obs).reshape(self.args.num_envs, self.args.num_agents)
 
-                advantages = torch.zeros_like(rewards).to(self.device)
-                lastgaelam = torch.zeros((self.args.num_envs, self.args.num_agents)).to(self.device)
-
-                for t in reversed(range(self.args.num_steps)):
-                    if t == self.args.num_steps - 1:
-                        nextnonterminal = 1.0 - next_done
-                        nextvalues = next_value
-                    else:
-                        nextnonterminal = 1.0 - dones[t + 1]
-                        nextvalues = values[t + 1]
-
-                    delta = rewards[t] + self.args.gamma * nextvalues * nextnonterminal - values[t]
-                    advantages[t] = lastgaelam = delta + self.args.gamma * self.args.gae_lambda * nextnonterminal * lastgaelam
-
-                returns = advantages + values
+                advantages, returns = compute_gae(
+                    rewards, values, dones, next_value, next_done,
+                    self.args.gamma, self.args.gae_lambda
+                )
 
             # Flatten for training
             # obs shape: (num_steps, num_envs, num_agents, obs_dim) -> (batch_size, obs_dim)
@@ -683,7 +666,7 @@ class PPOTrainer:
             b_returns = returns.reshape(-1)
             b_values = values.reshape(-1)
 
-            # Optimize policy and value network
+            # Optimize policy and value network using shared utility
             b_inds = np.arange(self.args.batch_size)
             clipfracs = []
 
@@ -694,70 +677,52 @@ class PPOTrainer:
                     end = start + self.args.minibatch_size
                     mb_inds = b_inds[start:end]
 
-                    _, newlogprob, entropy, newvalue = self.agent.get_action_and_value(
+                    # Use shared PPO update step
+                    metrics = ppo_update_step(
+                        self.agent,
+                        self.optimizer,
                         b_obs[mb_inds],
-                        b_actions[mb_inds]
+                        b_actions[mb_inds],
+                        b_logprobs[mb_inds],
+                        b_advantages[mb_inds],
+                        b_returns[mb_inds],
+                        b_values[mb_inds],
+                        self.args.clip_coef,
+                        self.args.ent_coef,
+                        self.args.vf_coef,
+                        self.args.max_grad_norm,
+                        self.args.norm_adv,
+                        self.args.clip_vloss
                     )
-                    logratio = newlogprob - b_logprobs[mb_inds]
-                    ratio = logratio.exp()
 
-                    with torch.no_grad():
-                        old_approx_kl = (-logratio).mean()
-                        approx_kl = ((ratio - 1) - logratio).mean()
-                        clipfracs += [((ratio - 1.0).abs() > self.args.clip_coef).float().mean().item()]
+                    clipfracs.append(metrics["clipfrac"])
 
-                    mb_advantages = b_advantages[mb_inds]
-                    if self.args.norm_adv:
-                        mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
-                    # Policy loss
-                    pg_loss1 = -mb_advantages * ratio
-                    pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.args.clip_coef, 1 + self.args.clip_coef)
-                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                    # Value loss
-                    newvalue = newvalue.view(-1)
-                    if self.args.clip_vloss:
-                        v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                        v_clipped = b_values[mb_inds] + torch.clamp(
-                            newvalue - b_values[mb_inds],
-                            -self.args.clip_coef,
-                            self.args.clip_coef,
-                        )
-                        v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                        v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                        v_loss = 0.5 * v_loss_max.mean()
-                    else:
-                        v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-
-                    entropy_loss = entropy.mean()
-                    loss = pg_loss - self.args.ent_coef * entropy_loss + v_loss * self.args.vf_coef
-
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(self.agent.parameters(), self.args.max_grad_norm)
-                    self.optimizer.step()
-
-                if self.args.target_kl is not None and approx_kl > self.args.target_kl:
+                if self.args.target_kl is not None and metrics["approx_kl"] > self.args.target_kl:
                     break
 
-            # Compute explained variance
+            # Store final metrics for logging
+            v_loss = metrics["v_loss"]
+            pg_loss = metrics["pg_loss"]
+            entropy_loss = metrics["entropy_loss"]
+            old_approx_kl = metrics["old_approx_kl"]
+            approx_kl = metrics["approx_kl"]
+
+            # Compute explained variance using shared utility
             y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-            var_y = np.var(y_true)
-            explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+            explained_var = compute_explained_variance(y_pred, y_true)
 
             # Log training metrics
             sps = int(global_step / (time.time() - start_time))
-            print(f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - Value Loss: {v_loss.item():.4f} - Policy Loss: {pg_loss.item():.4f}")
+            print(f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - Value Loss: {v_loss:.4f} - Policy Loss: {pg_loss:.4f}")
 
             if self.args.track:
                 log_dict = {
                     "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "losses/value_loss": v_loss.item(),
-                    "losses/policy_loss": pg_loss.item(),
-                    "losses/entropy": entropy_loss.item(),
-                    "losses/old_approx_kl": old_approx_kl.item(),
-                    "losses/approx_kl": approx_kl.item(),
+                    "losses/value_loss": v_loss,
+                    "losses/policy_loss": pg_loss,
+                    "losses/entropy": entropy_loss,
+                    "losses/old_approx_kl": old_approx_kl,
+                    "losses/approx_kl": approx_kl,
                     "losses/clipfrac": np.mean(clipfracs),
                     "losses/explained_variance": explained_var,
                     "charts/SPS": sps,

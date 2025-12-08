@@ -35,6 +35,7 @@ class BiddingGridworld(gym.Env):
         distance_reward_scale: float = 0.0,
         target_expiry_steps: Optional[int] = None,
         target_expiry_penalty: float = 5.0,
+        single_agent_mode: bool = False,
         render_mode: Optional[str] = None
     ):
         """
@@ -55,11 +56,19 @@ class BiddingGridworld(gym.Env):
             target_expiry_steps: Maximum steps allowed before target expiry penalty (default: None, disabled)
                                 If set, agents receive penalty if target not reached within this many steps
             target_expiry_penalty: Penalty for not reaching target within expiry_steps (default: 5.0)
+            single_agent_mode: If True, use single-agent mode with no bidding (default: False)
+                              In this mode, a single agent controls movement and pursues all targets
+                              (num_agents still determines the number of targets to reach)
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
 
-        assert num_agents >= 2, "Must have at least 2 agents"
+        self.single_agent_mode = single_agent_mode
+
+        if not single_agent_mode:
+            assert num_agents >= 2, "Must have at least 2 agents in multi-agent mode"
+        else:
+            assert num_agents >= 1, "Must have at least 1 target in single-agent mode"
 
         if target_positions is not None:
             assert len(target_positions) == num_agents, \
@@ -81,21 +90,26 @@ class BiddingGridworld(gym.Env):
         self.target_expiry_steps = target_expiry_steps
         self.target_expiry_penalty = target_expiry_penalty
         self.render_mode = render_mode
-        
+
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
         self.action_meanings = {0: "Left", 1: "Right", 2: "Up", 3: "Down"}
-        
-        # Action space for each agent: (direction, bid)
-        # Each agent submits an action that consists of:
-        # - direction: discrete action (0-3 for L,R,U,D)
-        # - bid: integer value (0 to bid_upper_bound)
-        self.action_space = spaces.Dict({
-            f"agent_{i}": spaces.Dict({
-                "direction": spaces.Discrete(4),
-                "bid": spaces.Discrete(bid_upper_bound + 1)
+
+        # Action space
+        if single_agent_mode:
+            # Single agent: just choose a direction (no bidding)
+            self.action_space = spaces.Discrete(4)
+        else:
+            # Multi-agent: each agent submits (direction, bid)
+            # Each agent submits an action that consists of:
+            # - direction: discrete action (0-3 for L,R,U,D)
+            # - bid: integer value (0 to bid_upper_bound)
+            self.action_space = spaces.Dict({
+                f"agent_{i}": spaces.Dict({
+                    "direction": spaces.Discrete(4),
+                    "bid": spaces.Discrete(bid_upper_bound + 1)
+                })
+                for i in range(num_agents)
             })
-            for i in range(num_agents)
-        })
         
         # Observation space: Box vector for NN policies (normalized to [0, 1])
         # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
@@ -162,69 +176,82 @@ class BiddingGridworld(gym.Env):
         
         return observation, info
     
-    def step(self, action: Dict) -> Tuple[np.ndarray, Dict, bool, bool, Dict]:
+    def step(self, action) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """
         Execute one step in the environment.
-        
+
         Args:
-            action: Dictionary containing actions for both agents
-                   Each action has 'direction' and 'bid' components
-        
+            action: In single-agent mode: integer direction (0-3)
+                   In multi-agent mode: dictionary containing actions for all agents,
+                   each with 'direction' and 'bid' components
+
         Returns:
             observation: Current state observation
-            rewards: Rewards for both agents
+            reward: In single-agent mode: scalar reward
+                   In multi-agent mode: dictionary of rewards for all agents
             terminated: Whether episode is done
             truncated: Whether episode was truncated
             info: Additional information
         """
         self.step_count += 1
 
-        # Extract actions and bids for all agents
-        agent_actions = {}
-        agent_bids = {}
-        for i in range(self.num_agents):
-            agent_key = f"agent_{i}"
-            agent_actions[i] = action[agent_key]
-            agent_bids[i] = action[agent_key]["bid"]
-
-        # Check if we're in an action window
-        apply_bid_penalty = False
-        if self.window_steps_remaining > 0:
-            # Use the locked-in agent's action
-            winning_agent = self.window_agent
-            winning_direction = agent_actions[winning_agent]["direction"]
+        if self.single_agent_mode:
+            # Single agent mode: action is just a direction
+            winning_direction = action
+            winning_agent = 0  # For tracking purposes
+            apply_bid_penalty = False
 
             # Execute the action
             new_position = self._move_agent(self.agent_position, winning_direction)
             self.agent_position = new_position
-
-            # Decrement window
-            self.window_steps_remaining -= 1
         else:
-            # Normal bidding
-            max_bid = max(agent_bids.values())
+            # Multi-agent mode: handle bidding
+            # Extract actions and bids for all agents
+            agent_actions = {}
+            agent_bids = {}
+            for i in range(self.num_agents):
+                agent_key = f"agent_{i}"
+                agent_actions[i] = action[agent_key]
+                agent_bids[i] = action[agent_key]["bid"]
 
-            # Only move if at least one agent bid > 0
-            if max_bid > 0:
-                winners = [agent_id for agent_id, bid in agent_bids.items() if bid == max_bid]
-
-                # If tie, randomly choose among winners
-                winning_agent = random.choice(winners)
+            # Check if we're in an action window
+            apply_bid_penalty = False
+            if self.window_steps_remaining > 0:
+                # Use the locked-in agent's action
+                winning_agent = self.window_agent
                 winning_direction = agent_actions[winning_agent]["direction"]
 
-                # Execute the winning action
+                # Execute the action
                 new_position = self._move_agent(self.agent_position, winning_direction)
                 self.agent_position = new_position
 
-                # Start new action window
-                self.window_agent = winning_agent
-                self.window_steps_remaining = self.action_window - 1  # -1 because current step counts
-
-                # Apply bid penalty on first step of window
-                apply_bid_penalty = True
+                # Decrement window
+                self.window_steps_remaining -= 1
             else:
-                # All agents bid 0, no movement occurs
-                winning_agent = None
+                # Normal bidding
+                max_bid = max(agent_bids.values())
+
+                # Only move if at least one agent bid > 0
+                if max_bid > 0:
+                    winners = [agent_id for agent_id, bid in agent_bids.items() if bid == max_bid]
+
+                    # If tie, randomly choose among winners
+                    winning_agent = random.choice(winners)
+                    winning_direction = agent_actions[winning_agent]["direction"]
+
+                    # Execute the winning action
+                    new_position = self._move_agent(self.agent_position, winning_direction)
+                    self.agent_position = new_position
+
+                    # Start new action window
+                    self.window_agent = winning_agent
+                    self.window_steps_remaining = self.action_window - 1  # -1 because current step counts
+
+                    # Apply bid penalty on first step of window
+                    apply_bid_penalty = True
+                else:
+                    # All agents bid 0, no movement occurs
+                    winning_agent = None
         
         # Check if any targets are reached for the first time this step
         targets_just_reached = {}
@@ -267,16 +294,26 @@ class BiddingGridworld(gym.Env):
             current_distances[i] = abs(self.agent_position[0] - self.target_positions[i][0]) + \
                                   abs(self.agent_position[1] - self.target_positions[i][1])
 
-        # Calculate rewards for all agents
-        rewards = self._calculate_rewards(
-            agent_bids,
-            winning_agent,
-            targets_just_reached,
-            targets_expired,
-            apply_bid_penalty,
-            self.previous_distances,
-            current_distances
-        )
+        # Calculate rewards
+        if self.single_agent_mode:
+            # Single agent mode: calculate scalar reward
+            reward = self._calculate_single_agent_reward(
+                targets_just_reached,
+                targets_expired,
+                self.previous_distances,
+                current_distances
+            )
+        else:
+            # Multi-agent mode: calculate rewards for all agents
+            reward = self._calculate_rewards(
+                agent_bids,
+                winning_agent,
+                targets_just_reached,
+                targets_expired,
+                apply_bid_penalty,
+                self.previous_distances,
+                current_distances
+            )
 
         # Update previous distances for next step
         self.previous_distances = current_distances.copy()
@@ -287,16 +324,17 @@ class BiddingGridworld(gym.Env):
 
         terminated = all_targets_reached
         truncated = max_steps_reached and not all_targets_reached
-        
+
         observation = self._get_observation()
         info = self._get_info()
         info["winning_agent"] = winning_agent
-        info["bids"] = {f"agent_{i}": bid for i, bid in agent_bids.items()}
-        info["window_agent"] = self.window_agent
-        info["window_steps_remaining"] = self.window_steps_remaining
-        info["bid_penalty_applied"] = apply_bid_penalty
+        if not self.single_agent_mode:
+            info["bids"] = {f"agent_{i}": bid for i, bid in agent_bids.items()}
+            info["window_agent"] = self.window_agent
+            info["window_steps_remaining"] = self.window_steps_remaining
+            info["bid_penalty_applied"] = apply_bid_penalty
 
-        return observation, rewards, terminated, truncated, info
+        return observation, reward, terminated, truncated, info
     
     def _move_agent(self, position: np.ndarray, direction: int) -> np.ndarray:
         """Move agent in the specified direction, respecting grid boundaries."""
@@ -358,7 +396,38 @@ class BiddingGridworld(gym.Env):
                 rewards[f"agent_{i}"] -= self.target_expiry_penalty
 
         return rewards
-    
+
+    def _calculate_single_agent_reward(
+        self,
+        targets_just_reached: Dict[int, bool],
+        targets_expired: Dict[int, bool],
+        previous_distances: np.ndarray,
+        current_distances: np.ndarray
+    ) -> float:
+        """Calculate scalar reward for single agent mode."""
+        reward = 0.0
+
+        # Distance-based rewards (sum across all targets)
+        if self.distance_reward_scale > 0:
+            for i in range(self.num_agents):
+                # Skip if target already reached
+                if self.targets_reached[i] == 0:
+                    # Positive reward for decreasing distance (getting closer)
+                    distance_improvement = previous_distances[i] - current_distances[i]
+                    reward += self.distance_reward_scale * distance_improvement
+
+        # Target rewards (sum for all targets reached this step)
+        for i in range(self.num_agents):
+            if targets_just_reached[i]:
+                reward += self.target_reward
+
+        # Target expiry penalties (sum for all targets that expired)
+        for i in range(self.num_agents):
+            if targets_expired[i]:
+                reward -= self.target_expiry_penalty
+
+        return reward
+
     def _get_observation(self) -> np.ndarray:
         """Get current observation as a normalized vector in [0, 1]."""
         # Normalize positions to [0,1]; guard division for grid_size==1
@@ -783,6 +852,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         distance_reward_scale: float = 0.0,
         target_expiry_steps: Optional[int] = None,
         target_expiry_penalty: float = 5.0,
+        single_agent_mode: bool = False,
         render_mode: Optional[str] = None
     ):
         """
@@ -807,6 +877,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             target_expiry_steps: Maximum steps allowed before target expiry penalty (default: None, disabled)
                                 If set, agents receive penalty if target not reached within this many steps
             target_expiry_penalty: Penalty for not reaching target within expiry_steps (default: 5.0)
+            single_agent_mode: If True, use single-agent mode with no bidding (default: False)
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -821,6 +892,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             distance_reward_scale=distance_reward_scale,
             target_expiry_steps=target_expiry_steps,
             target_expiry_penalty=target_expiry_penalty,
+            single_agent_mode=single_agent_mode,
             render_mode=render_mode
         )
 
@@ -1007,3 +1079,43 @@ if __name__ == "__main__":
 
     env.close()
     print("\n✅ MovingTargetBiddingGridworld testing completed!")
+
+    # Test single-agent mode
+    print("\n" + "="*60)
+    print("Testing Single-Agent Mode")
+    print("="*60)
+
+    env_single = BiddingGridworld(
+        grid_size=5,
+        num_agents=3,  # 3 targets to reach
+        target_reward=10.0,
+        max_steps=50,
+        single_agent_mode=True,
+        distance_reward_scale=0.1
+    )
+
+    obs, info = env_single.reset(seed=123)
+    print("\nInitial state (Single Agent with 3 targets):")
+    env_single.render()
+
+    # Run a few steps with random actions
+    total_reward = 0
+    for step in range(15):
+        action = np.random.randint(0, 4)  # Just a direction
+        print(f"\nStep {step + 1}")
+        print(f"Action: {env_single.action_meanings[action]}")
+
+        obs, reward, terminated, truncated, info = env_single.step(action)
+
+        total_reward += reward
+        print(f"Step Reward: {reward:.2f}")
+        print(f"Total Reward: {total_reward:.2f}")
+
+        env_single.render()
+
+        if terminated or truncated:
+            print("Episode finished!")
+            break
+
+    env_single.close()
+    print("\n✅ Single-agent mode testing completed!")
