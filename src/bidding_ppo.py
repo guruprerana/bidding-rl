@@ -112,28 +112,31 @@ class BiddingEnvWrapper(gym.Wrapper):
     Wrapper to convert the multi-agent BiddingGridworld to a format compatible with vectorized training.
 
     Key features:
-    - Augments observations with target index (one-hot encoding) for each agent
+    - Reorders target observations so each agent's target appears first
     - Flattens multi-agent actions/rewards into single vectors for parallel processing
-    - Each agent gets the same base observation but with different target indices
+    - Each agent gets the same base observation but with reordered target information
+
+    Observation structure from BiddingGridworld:
+    [agent_pos (2), target_positions (2*num_agents), target_reached (num_agents), target_counters (num_agents)]
+
+    For agent pursuing target_idx, we reorder to:
+    [agent_pos (2), target_idx_pos (2), other_targets (2*(num_agents-1)),
+     target_idx_reached (1), other_reached (num_agents-1), target_idx_counter (1), other_counters (num_agents-1)]
     """
 
     def __init__(self, env, num_agents):
         super().__init__(env)
         self.num_agents = num_agents
 
-        # Original observation dimension from BiddingGridworld
+        # Original observation dimension from BiddingGridworld (no change in size)
         base_obs_dim = env.observation_space.shape[0]
 
-        # Add num_agents dimensions for one-hot target index encoding
-        # New observation: [base_obs..., target_0_indicator, target_1_indicator, ...]
-        augmented_obs_dim = base_obs_dim + num_agents
-
-        # Update observation space to include target index
-        # Shape is (num_agents, augmented_obs_dim) since we return stacked observations
+        # Observation space remains the same size, just reordered
+        # Shape is (num_agents, base_obs_dim) since we return stacked observations
         self.observation_space = gym.spaces.Box(
             low=0.0,
             high=1.0,
-            shape=(num_agents, augmented_obs_dim),
+            shape=(num_agents, base_obs_dim),
             dtype=np.float32
         )
 
@@ -143,34 +146,28 @@ class BiddingEnvWrapper(gym.Wrapper):
             [4, env.bid_upper_bound + 1] * num_agents
         )
 
-    def _augment_observation(self, base_obs, target_index):
+    def _reorder_observation(self, base_obs, target_index):
         """
-        Augment base observation with one-hot encoded target index.
+        Reorder base observation so the agent's target appears first.
 
         Args:
             base_obs: Base observation from environment (numpy array)
             target_index: Which target this agent is pursuing (0 to num_agents-1)
 
         Returns:
-            Augmented observation with target index appended
+            Reordered observation with this agent's target information first
         """
-        # Create one-hot encoding for target index
-        target_one_hot = np.zeros(self.num_agents, dtype=np.float32)
-        target_one_hot[target_index] = 1.0
-
-        # Concatenate base observation with target index
-        augmented_obs = np.concatenate([base_obs, target_one_hot])
-        return augmented_obs
+        return reorder_observation_for_agent(base_obs, target_index, self.num_agents)
 
     def reset(self, **kwargs):
-        """Reset environment and return augmented observations for all agents."""
+        """Reset environment and return reordered observations for all agents."""
         base_obs, info = self.env.reset(**kwargs)
 
-        # Create augmented observation for each agent (each pursuing different target)
+        # Create reordered observation for each agent (each pursuing different target)
         obs_list = []
         for agent_idx in range(self.num_agents):
-            augmented_obs = self._augment_observation(base_obs, agent_idx)
-            obs_list.append(augmented_obs)
+            reordered_obs = self._reorder_observation(base_obs, agent_idx)
+            obs_list.append(reordered_obs)
 
         # Stack all agent observations into single array for vectorized processing
         # Shape: (num_agents, obs_dim)
@@ -186,7 +183,7 @@ class BiddingEnvWrapper(gym.Wrapper):
             action: Flattened action array [dir_agent0, bid_agent0, dir_agent1, bid_agent1, ...]
 
         Returns:
-            observations: Augmented observations for all agents
+            observations: Reordered observations for all agents
             rewards: Rewards for all agents
             terminated: Episode termination flag
             truncated: Episode truncation flag
@@ -207,11 +204,11 @@ class BiddingEnvWrapper(gym.Wrapper):
         # Execute step in underlying environment
         base_obs, rewards_dict, terminated, truncated, info = self.env.step(env_action)
 
-        # Create augmented observations for all agents
+        # Create reordered observations for all agents
         obs_list = []
         for agent_idx in range(self.num_agents):
-            augmented_obs = self._augment_observation(base_obs, agent_idx)
-            obs_list.append(augmented_obs)
+            reordered_obs = self._reorder_observation(base_obs, agent_idx)
+            obs_list.append(reordered_obs)
 
         stacked_obs = np.stack(obs_list, axis=0)
 
@@ -264,6 +261,67 @@ def make_env(args, idx, run_name):
     return thunk
 
 
+def reorder_observation_for_agent(base_obs: np.ndarray, target_index: int, num_agents: int) -> np.ndarray:
+    """
+    Reorder base observation so the specified agent's target appears first.
+
+    This is a utility function that can be used anywhere we need to prepare
+    observations for individual agents (training, evaluation, deployment, etc.).
+
+    Args:
+        base_obs: Base observation from BiddingGridworld environment
+                 Structure: [agent_pos(2), all_targets(2*N), all_reached(N), all_counters(N)]
+        target_index: Which target this agent is pursuing (0 to num_agents-1)
+        num_agents: Total number of agents/targets
+
+    Returns:
+        Reordered observation with the agent's target information first
+        Structure: [agent_pos(2), target_idx(2), others(2*(N-1)),
+                   target_idx_reached(1), others_reached(N-1),
+                   target_idx_counter(1), others_counters(N-1)]
+    """
+    # Parse observation sections
+    agent_pos = base_obs[0:2]  # First 2 values: agent position
+
+    # Target positions: next 2*num_agents values
+    target_pos_start = 2
+    target_pos_end = 2 + 2 * num_agents
+    all_target_positions = base_obs[target_pos_start:target_pos_end].reshape(num_agents, 2)
+
+    # Target reached flags: next num_agents values
+    reached_start = target_pos_end
+    reached_end = reached_start + num_agents
+    all_target_reached = base_obs[reached_start:reached_end]
+
+    # Target step counters: last num_agents values
+    counter_start = reached_end
+    counter_end = counter_start + num_agents
+    all_target_counters = base_obs[counter_start:counter_end]
+
+    # Reorder each section so target_index comes first
+    # Create index permutation: [target_index, other indices...]
+    indices = [target_index] + [i for i in range(num_agents) if i != target_index]
+
+    # Reorder target positions
+    reordered_positions = all_target_positions[indices].flatten()
+
+    # Reorder target reached flags
+    reordered_reached = all_target_reached[indices]
+
+    # Reorder target counters
+    reordered_counters = all_target_counters[indices]
+
+    # Reconstruct observation
+    reordered_obs = np.concatenate([
+        agent_pos,
+        reordered_positions,
+        reordered_reached,
+        reordered_counters
+    ])
+
+    return reordered_obs
+
+
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     """Initialize layer weights with orthogonal initialization."""
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -276,8 +334,8 @@ class SharedAgent(nn.Module):
     Shared actor-critic network used by all agents.
 
     All agents use the same network parameters but receive different observations
-    (same base state + different target index). Each agent runs inference separately
-    through this shared network.
+    (targets reordered so each agent's target appears first). Each agent runs
+    inference separately through this shared network.
     """
 
     def __init__(self, obs_dim, num_actions_per_agent):
@@ -285,7 +343,7 @@ class SharedAgent(nn.Module):
         Initialize shared actor-critic network.
 
         Args:
-            obs_dim: Dimension of augmented observation (includes target index)
+            obs_dim: Dimension of observation (targets reordered per agent)
             num_actions_per_agent: Number of action components per agent (2: direction + bid)
         """
         super().__init__()
@@ -336,7 +394,7 @@ class SharedAgent(nn.Module):
         Get action and value for given observation.
 
         This is the core inference function. Each agent calls this separately
-        with their augmented observation (base obs + their target index).
+        with their reordered observation (their target appears first in the obs).
 
         Args:
             x: Observation tensor (can be batched)

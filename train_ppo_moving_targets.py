@@ -29,7 +29,7 @@ import wandb
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from bidding_ppo import PPOTrainer, Args
+from bidding_ppo import PPOTrainer, Args, reorder_observation_for_agent
 from bidding_gridworld import MovingTargetBiddingGridworld
 
 
@@ -139,13 +139,13 @@ class PPOMovingTargetsExperiment:
             # Reset environment
             base_obs, _ = eval_env.reset()
 
-            # Prepare observations for all agents (add target index one-hot)
+            # Prepare observations for all agents (reorder targets)
             obs_list = []
             for agent_idx in range(trainer.args.num_agents):
-                target_one_hot = np.zeros(trainer.args.num_agents, dtype=np.float32)
-                target_one_hot[agent_idx] = 1.0
-                augmented_obs = np.concatenate([base_obs, target_one_hot])
-                obs_list.append(augmented_obs)
+                reordered_obs = reorder_observation_for_agent(
+                    base_obs, agent_idx, trainer.args.num_agents
+                )
+                obs_list.append(reordered_obs)
 
             obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
 
@@ -196,10 +196,10 @@ class PPOMovingTargetsExperiment:
                 # Prepare next observation
                 obs_list = []
                 for agent_idx in range(trainer.args.num_agents):
-                    target_one_hot = np.zeros(trainer.args.num_agents, dtype=np.float32)
-                    target_one_hot[agent_idx] = 1.0
-                    augmented_obs = np.concatenate([base_obs, target_one_hot])
-                    obs_list.append(augmented_obs)
+                    reordered_obs = reorder_observation_for_agent(
+                        base_obs, agent_idx, trainer.args.num_agents
+                    )
+                    obs_list.append(reordered_obs)
 
                 obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
                 step_count += 1
@@ -311,7 +311,7 @@ def main():
     # ========================================================================
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_exp1"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_exp2"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 1000  # Save checkpoint every N iterations
     EVAL_FREQ = 1000  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 3  # Number of episodes per evaluation
@@ -326,7 +326,7 @@ def main():
     ACTION_WINDOW = 6
     DISTANCE_REWARD_SCALE = 0.1
     TARGET_EXPIRY_STEPS = 40
-    TARGET_EXPIRY_PENALTY = 15.0
+    TARGET_EXPIRY_PENALTY = 50.0
     DIRECTION_CHANGE_PROB = 0.1
     TARGET_MOVE_INTERVAL = 2
 

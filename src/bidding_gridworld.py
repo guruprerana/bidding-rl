@@ -536,9 +536,37 @@ class BiddingGridworld(gym.Env):
             ax.text(agent_col, agent_row, 'A',
                    ha='center', va='center', fontsize=10, fontweight='bold')
 
-            reward = episode_data["rewards"][frame] if frame < len(episode_data["rewards"]) else 0
+            # Extract reward for this agent
+            reward = 0
+            if frame < len(episode_data["rewards"]):
+                rewards_at_frame = episode_data["rewards"][frame]
+                if isinstance(rewards_at_frame, dict):
+                    reward = rewards_at_frame.get(f"agent_{target_agent_id}", 0)
+                else:
+                    reward = rewards_at_frame
+
+            # Calculate cumulative reward
+            total_reward = 0
+            for f in range(frame + 1):
+                if f < len(episode_data["rewards"]):
+                    r = episode_data["rewards"][f]
+                    if isinstance(r, dict):
+                        total_reward += r.get(f"agent_{target_agent_id}", 0)
+                    else:
+                        total_reward += r
+
             title = f'Agent {target_agent_id} - Step {frame} - Reward: {reward:.2f}\n'
-            title += f'Total Reward: {sum(episode_data["rewards"][:frame+1]):.2f}'
+            title += f'Total Reward: {total_reward:.2f}'
+
+            # Add bid and action information if available
+            if frame < len(episode_data.get("actions", [])):
+                action = episode_data["actions"][frame]
+                if isinstance(action, dict) and f"agent_{target_agent_id}" in action:
+                    direction_names = {0: "Left ←", 1: "Right →", 2: "Up ↑", 3: "Down ↓"}
+                    agent_action = action[f"agent_{target_agent_id}"]
+                    direction = direction_names.get(agent_action["direction"], "?")
+                    bid = agent_action["bid"]
+                    title += f'\nBid: {bid} | Action: {direction}'
 
             ax.set_title(title, fontsize=11)
             ax.set_xticks(range(self.grid_size))
@@ -648,7 +676,16 @@ class BiddingGridworld(gym.Env):
                     cumulative = {f"agent_{i}": sum(episode_data["rewards"][f].get(f"agent_{i}", 0)
                                                     for f in range(frame + 1)) for i in range(self.num_agents)}
                     rewards_str = ", ".join([f"{i}={cumulative[f'agent_{i}']:.2f}" for i in range(self.num_agents)])
-                    title += f'Rewards: {rewards_str}'
+                    title += f'Rewards: {rewards_str}\n'
+
+                # Add bids and actions
+                if actions:
+                    direction_names = {0: "←", 1: "→", 2: "↑", 3: "↓"}
+                    bids_str = ", ".join([f"{i}={actions[f'agent_{i}']['bid']}" for i in range(self.num_agents)])
+                    title += f'Bids: {bids_str}\n'
+                    actions_str = ", ".join([f"{i}={direction_names.get(actions[f'agent_{i}']['direction'], '?')}"
+                                            for i in range(self.num_agents)])
+                    title += f'Actions: {actions_str}'
 
             ax.set_title(title, fontsize=10)
             ax.set_xticks(range(self.grid_size))
