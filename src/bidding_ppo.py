@@ -118,11 +118,11 @@ class BiddingEnvWrapper(gym.Wrapper):
     - Each agent gets the same base observation but with reordered target information
 
     Observation structure from BiddingGridworld:
-    [agent_pos (2), target_positions (2*num_agents), target_reached (num_agents), target_counters (num_agents)]
+    [agent_pos (2), target_positions (2*num_agents), target_reached (num_agents), target_counters (num_agents), window_steps_remaining (1)]
 
     For agent pursuing target_idx, we reorder to:
     [agent_pos (2), target_idx_pos (2), other_targets (2*(num_agents-1)),
-     target_idx_reached (1), other_reached (num_agents-1), target_idx_counter (1), other_counters (num_agents-1)]
+     target_idx_reached (1), other_reached (num_agents-1), target_idx_counter (1), other_counters (num_agents-1), window_steps_remaining (1)]
     """
 
     def __init__(self, env, num_agents):
@@ -271,7 +271,7 @@ def reorder_observation_for_agent(base_obs: np.ndarray, target_index: int, num_a
 
     Args:
         base_obs: Base observation from BiddingGridworld environment
-                 Structure: [agent_pos(2), all_targets(2*N), all_reached(N), all_counters(N)]
+                 Structure: [agent_pos(2), all_targets(2*N), all_reached(N), all_counters(N), window_steps_remaining(1)]
         target_index: Which target this agent is pursuing (0 to num_agents-1)
         num_agents: Total number of agents/targets
 
@@ -279,7 +279,8 @@ def reorder_observation_for_agent(base_obs: np.ndarray, target_index: int, num_a
         Reordered observation with the agent's target information first
         Structure: [agent_pos(2), target_idx(2), others(2*(N-1)),
                    target_idx_reached(1), others_reached(N-1),
-                   target_idx_counter(1), others_counters(N-1)]
+                   target_idx_counter(1), others_counters(N-1),
+                   window_steps_remaining(1)]
     """
     # Parse observation sections
     agent_pos = base_obs[0:2]  # First 2 values: agent position
@@ -294,10 +295,13 @@ def reorder_observation_for_agent(base_obs: np.ndarray, target_index: int, num_a
     reached_end = reached_start + num_agents
     all_target_reached = base_obs[reached_start:reached_end]
 
-    # Target step counters: last num_agents values
+    # Target step counters: next num_agents values
     counter_start = reached_end
     counter_end = counter_start + num_agents
     all_target_counters = base_obs[counter_start:counter_end]
+
+    # Window steps remaining: last value
+    window_steps_remaining = base_obs[-1]
 
     # Reorder each section so target_index comes first
     # Create index permutation: [target_index, other indices...]
@@ -317,7 +321,8 @@ def reorder_observation_for_agent(base_obs: np.ndarray, target_index: int, num_a
         agent_pos,
         reordered_positions,
         reordered_reached,
-        reordered_counters
+        reordered_counters,
+        [window_steps_remaining]  # Add window steps remaining at the end
     ])
 
     return reordered_obs

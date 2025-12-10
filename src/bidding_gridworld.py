@@ -113,9 +113,9 @@ class BiddingGridworld(gym.Env):
         
         # Observation space: Box vector for NN policies (normalized to [0, 1])
         # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
-        #  target0_reached, target1_reached, ..., target0_step_counter_norm, target1_step_counter_norm, ...]
-        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags) + num_agents (step counters)
-        obs_dim = 2 + 2 * num_agents + num_agents + num_agents
+        #  target0_reached, target1_reached, ..., target0_step_counter_norm, target1_step_counter_norm, ..., window_steps_remaining_norm]
+        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags) + num_agents (step counters) + 1 (window steps remaining)
+        obs_dim = 2 + 2 * num_agents + num_agents + num_agents + 1
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
         
         # Initialize environment state
@@ -435,7 +435,7 @@ class BiddingGridworld(gym.Env):
         agent_row_norm = float(self.agent_position[0]) / denom
         agent_col_norm = float(self.agent_position[1]) / denom
 
-        # Build observation: [agent_pos, target_0_pos, ..., target_n_pos, target_0_reached, ..., target_n_reached, target_0_counter, ..., target_n_counter]
+        # Build observation: [agent_pos, target_0_pos, ..., target_n_pos, target_0_reached, ..., target_n_reached, target_0_counter, ..., target_n_counter, window_steps_remaining]
         obs_list = [agent_row_norm, agent_col_norm]
 
         # Add all target positions
@@ -455,6 +455,11 @@ class BiddingGridworld(gym.Env):
         for i in range(self.num_agents):
             counter_norm = min(float(self.target_step_counters[i]) / counter_denom, 1.0)  # Clamp to [0, 1]
             obs_list.append(counter_norm)
+
+        # Add window steps remaining (normalized by action_window)
+        window_denom = max(float(self.action_window), 1.0)  # Avoid division by zero
+        window_steps_norm = float(self.window_steps_remaining) / window_denom
+        obs_list.append(window_steps_norm)
 
         obs = np.array(obs_list, dtype=np.float32)
         return obs

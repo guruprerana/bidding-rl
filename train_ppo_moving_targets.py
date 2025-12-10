@@ -28,6 +28,7 @@ from datetime import datetime
 import numpy as np
 import torch
 import wandb
+import shutil
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -82,6 +83,40 @@ class PPOMovingTargetsExperiment:
 
         print(f"📁 Experiment directory: {self.log_dir}")
 
+    def log_codebase_to_wandb(self, run):
+        """Log src folder and training script to wandb as an artifact."""
+        if not run:
+            return
+
+        print("📦 Logging codebase to wandb...")
+
+        # Get project root (parent of logs directory)
+        project_root = self.log_dir.parent.parent
+
+        # Create wandb artifact
+        artifact = wandb.Artifact(
+            name=f"codebase-{run.id}",
+            type="code",
+            description="Codebase snapshot (src folder + training script)"
+        )
+
+        # Add src directory
+        src_dir = project_root / "src"
+        if src_dir.exists():
+            artifact.add_dir(str(src_dir), name="src")
+            num_files = len(list(src_dir.rglob("*.py")))
+            print(f"  Added src/ ({num_files} Python files)")
+
+        # Add training script
+        train_script = project_root / "train_ppo_moving_targets.py"
+        if train_script.exists():
+            artifact.add_file(str(train_script), name="train_ppo_moving_targets.py")
+            print(f"  Added train_ppo_moving_targets.py")
+
+        # Log artifact
+        run.log_artifact(artifact)
+        print(f"✅ Codebase logged to wandb artifact")
+
     def save_config(self, args):
         """Save training configuration."""
         config = vars(args)
@@ -121,14 +156,14 @@ class PPOMovingTargetsExperiment:
         print(f"EVALUATION - Iteration {iteration}")
         print(f"{'='*60}")
 
-        # Create evaluation environment
+        # Create evaluation environment with longer max_steps
         eval_env = MovingTargetBiddingGridworld(
             grid_size=trainer.args.grid_size,
             num_agents=trainer.args.num_agents,
             bid_upper_bound=trainer.args.bid_upper_bound,
             bid_penalty=trainer.args.bid_penalty,
             target_reward=trainer.args.target_reward,
-            max_steps=trainer.args.max_steps,
+            max_steps=300,  # Use 300 for evaluation
             action_window=trainer.args.action_window,
             distance_reward_scale=trainer.args.distance_reward_scale,
             target_expiry_steps=trainer.args.target_expiry_steps,
@@ -272,13 +307,13 @@ class PPOMovingTargetsExperiment:
         print(f"EVALUATION - Iteration {iteration}")
         print(f"{'='*60}")
 
-        # Create evaluation environment
+        # Create evaluation environment with longer max_steps
         if trainer.args.moving_targets:
             eval_env = MovingTargetBiddingGridworld(
                 grid_size=trainer.args.grid_size,
                 num_agents=trainer.args.num_targets,
                 target_reward=trainer.args.target_reward,
-                max_steps=trainer.args.max_steps,
+                max_steps=300,  # Use 300 for evaluation
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
@@ -291,7 +326,7 @@ class PPOMovingTargetsExperiment:
                 grid_size=trainer.args.grid_size,
                 num_agents=trainer.args.num_targets,
                 target_reward=trainer.args.target_reward,
-                max_steps=trainer.args.max_steps,
+                max_steps=300,  # Use 300 for evaluation
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
@@ -450,6 +485,9 @@ class PPOMovingTargetsExperiment:
 
         trainer.setup()
 
+        # Log codebase to wandb
+        self.log_codebase_to_wandb(wandb.run)
+
         print(f"Checkpoint frequency: every {self.checkpoint_freq} iterations")
         print(f"Evaluation frequency: every {self.eval_freq} iterations\n")
 
@@ -468,11 +506,11 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_single_agent"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_exp3"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 1000  # Save checkpoint every N iterations
     EVAL_FREQ = 1000  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 3  # Number of episodes per evaluation
@@ -481,14 +519,14 @@ def main():
     GRID_SIZE = 15
     NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 10.0
-    MAX_STEPS = 300
+    MAX_STEPS = 150  # For training (evaluation uses 300)
     DISTANCE_REWARD_SCALE = 0.1
     TARGET_EXPIRY_STEPS = 40
-    TARGET_EXPIRY_PENALTY = 50.0
+    TARGET_EXPIRY_PENALTY = 100.0
 
     # Multi-agent specific parameters (ignored in single-agent mode)
-    BID_UPPER_BOUND = 3
-    BID_PENALTY = 0.01
+    BID_UPPER_BOUND = 6
+    BID_PENALTY = 0.1
     ACTION_WINDOW = 6
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
