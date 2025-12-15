@@ -48,6 +48,7 @@ class PPOMovingTargetsExperiment:
         checkpoint_freq: int = 50,
         eval_freq: int = 25,
         num_eval_episodes: int = 3,
+        num_gif_episodes: int = 3,
         single_agent_mode: bool = False,
     ):
         """
@@ -59,6 +60,7 @@ class PPOMovingTargetsExperiment:
             checkpoint_freq: Save checkpoint every N iterations
             eval_freq: Evaluate every N iterations
             num_eval_episodes: Number of episodes per evaluation
+            num_gif_episodes: Number of episodes to save as GIFs
             single_agent_mode: If True, use single-agent PPO; if False, use multi-agent PPO
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -70,6 +72,7 @@ class PPOMovingTargetsExperiment:
         self.checkpoint_freq = checkpoint_freq
         self.eval_freq = eval_freq
         self.num_eval_episodes = num_eval_episodes
+        self.num_gif_episodes = num_gif_episodes
         self.single_agent_mode = single_agent_mode
 
         # Create directory structure
@@ -154,6 +157,7 @@ class PPOMovingTargetsExperiment:
         """Evaluate the current policy with rollouts and create visualizations."""
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
+        print(f"Running {self.num_eval_episodes} episodes (saving GIFs for first {self.num_gif_episodes})")
         print(f"{'='*60}")
 
         # Create evaluation environment with longer max_steps
@@ -163,7 +167,7 @@ class PPOMovingTargetsExperiment:
             bid_upper_bound=trainer.args.bid_upper_bound,
             bid_penalty=trainer.args.bid_penalty,
             target_reward=trainer.args.target_reward,
-            max_steps=300,  # Use 300 for evaluation
+            max_steps=600,  # Use 600 for evaluation
             action_window=trainer.args.action_window,
             distance_reward_scale=trainer.args.distance_reward_scale,
             target_expiry_steps=trainer.args.target_expiry_steps,
@@ -176,6 +180,8 @@ class PPOMovingTargetsExperiment:
             "episode_returns": [],
             "episode_lengths": [],
             "targets_reached_per_episode": [],
+            "expired_targets_per_episode": [],
+            "min_targets_reached_per_episode": [],
         }
 
         for episode_idx in range(self.num_eval_episodes):
@@ -202,6 +208,10 @@ class PPOMovingTargetsExperiment:
             terminated = False
             truncated = False
 
+            # Track expired targets and targets reached per agent
+            episode_expired_count = 0
+            targets_reached_count = np.zeros(trainer.args.num_agents, dtype=np.int32)
+
             while not (terminated or truncated):
                 # Store state
                 episode_states.append(base_obs.copy())
@@ -227,6 +237,20 @@ class PPOMovingTargetsExperiment:
                 episode_return += sum(rewards_dict.values())
                 episode_rewards.append(rewards_dict)
 
+                # Track expired targets this step
+                for agent_idx in range(trainer.args.num_agents):
+                    reward = rewards_dict[f"agent_{agent_idx}"]
+                    # If we see a large negative reward matching the expiry penalty, count it
+                    if trainer.args.target_expiry_penalty > 0:
+                        if reward <= -trainer.args.target_expiry_penalty:
+                            episode_expired_count += 1
+
+                # Track targets reached
+                for agent_idx in range(trainer.args.num_agents):
+                    reward = rewards_dict[f"agent_{agent_idx}"]
+                    if reward >= trainer.args.target_reward:
+                        targets_reached_count[agent_idx] += 1
+
                 # Store step details
                 episode_step_details.append({
                     "winning_agent": info.get("winning_agent", -1),
@@ -247,33 +271,37 @@ class PPOMovingTargetsExperiment:
                 obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
                 step_count += 1
 
-            # Count targets reached (from final observation)
-            targets_reached = sum(1 for i in range(trainer.args.num_agents)
-                                 if base_obs[2 + 2 * trainer.args.num_agents + i] == 1)
+            # Count total targets reached (at least once during episode)
+            targets_reached = sum(1 for count in targets_reached_count if count > 0)
+            min_targets_reached = int(np.min(targets_reached_count))
 
             eval_stats["episode_returns"].append(episode_return)
             eval_stats["episode_lengths"].append(step_count)
             eval_stats["targets_reached_per_episode"].append(targets_reached)
+            eval_stats["expired_targets_per_episode"].append(episode_expired_count)
+            eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
 
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
-                  f"Length={step_count}, Targets={targets_reached}/{trainer.args.num_agents}")
+                  f"Length={step_count}, Targets={targets_reached}/{trainer.args.num_agents}, "
+                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
 
-            # Create GIF
-            episode_data = {
-                "states": episode_states,
-                "actions": episode_actions,
-                "rewards": episode_rewards,
-                "step_details": episode_step_details,
-            }
+            # Create GIF only for first num_gif_episodes
+            if episode_idx < self.num_gif_episodes:
+                episode_data = {
+                    "states": episode_states,
+                    "actions": episode_actions,
+                    "rewards": episode_rewards,
+                    "step_details": episode_step_details,
+                }
 
-            gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
-            eval_env.create_competition_gif(episode_data, gif_path, fps=2)
+                gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
+                eval_env.create_competition_gif(episode_data, gif_path, fps=2)
 
-            # Log to wandb
-            if trainer.args.track:
-                wandb.log({
-                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
-                }, step=global_step)
+                # Log to wandb
+                if trainer.args.track:
+                    wandb.log({
+                        f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
+                    }, step=global_step)
 
         eval_env.close()
 
@@ -281,6 +309,8 @@ class PPOMovingTargetsExperiment:
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
+        avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
                           if t == trainer.args.num_agents) / self.num_eval_episodes
 
@@ -288,6 +318,8 @@ class PPOMovingTargetsExperiment:
         print(f"  Average Return: {avg_return:.2f}")
         print(f"  Average Length: {avg_length:.1f}")
         print(f"  Average Targets: {avg_targets:.2f}/{trainer.args.num_agents}")
+        print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
+        print(f"  Average Min Reached (across {trainer.args.num_agents} agents): {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Success Rate: {success_rate*100:.1f}%\n")
 
         # Log to wandb
@@ -296,6 +328,8 @@ class PPOMovingTargetsExperiment:
                 "eval/avg_return": avg_return,
                 "eval/avg_length": avg_length,
                 "eval/avg_targets_reached": avg_targets,
+                "eval/avg_expired_targets": avg_expired,
+                "eval/avg_min_targets_reached": avg_min_reached,
                 "eval/success_rate": success_rate,
             }, step=global_step)
 
@@ -305,6 +339,7 @@ class PPOMovingTargetsExperiment:
         """Evaluate the single-agent policy with rollouts and create visualizations."""
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
+        print(f"Running {self.num_eval_episodes} episodes (saving GIFs for first {self.num_gif_episodes})")
         print(f"{'='*60}")
 
         # Create evaluation environment with longer max_steps
@@ -313,7 +348,7 @@ class PPOMovingTargetsExperiment:
                 grid_size=trainer.args.grid_size,
                 num_agents=trainer.args.num_targets,
                 target_reward=trainer.args.target_reward,
-                max_steps=300,  # Use 300 for evaluation
+                max_steps=600,  # Use 600 for evaluation
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
@@ -326,7 +361,7 @@ class PPOMovingTargetsExperiment:
                 grid_size=trainer.args.grid_size,
                 num_agents=trainer.args.num_targets,
                 target_reward=trainer.args.target_reward,
-                max_steps=300,  # Use 300 for evaluation
+                max_steps=600,  # Use 600 for evaluation
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
@@ -337,12 +372,14 @@ class PPOMovingTargetsExperiment:
             "episode_returns": [],
             "episode_lengths": [],
             "targets_reached_per_episode": [],
+            "expired_targets_per_episode": [],
+            "min_targets_reached_per_episode": [],
         }
 
         for episode_idx in range(self.num_eval_episodes):
             # Reset environment
-            obs, _ = eval_env.reset()
-            obs = torch.tensor(obs, dtype=torch.float32).to(trainer.device)
+            obs_raw, _ = eval_env.reset()
+            obs = torch.tensor(obs_raw, dtype=torch.float32).to(trainer.device)
 
             # Episode tracking
             episode_states = []
@@ -352,6 +389,11 @@ class PPOMovingTargetsExperiment:
             step_count = 0
             terminated = False
             truncated = False
+
+            # Track expired targets and targets reached per target
+            episode_expired_count = 0
+            targets_reached_count = np.zeros(trainer.args.num_targets, dtype=np.int32)
+            prev_targets_reached = np.zeros(trainer.args.num_targets, dtype=np.int32)
 
             while not (terminated or truncated):
                 # Store state
@@ -365,40 +407,62 @@ class PPOMovingTargetsExperiment:
                 episode_actions.append(int(action))
 
                 # Step environment
-                obs, reward, terminated, truncated, info = eval_env.step(int(action))
+                obs_raw, reward, terminated, truncated, info = eval_env.step(int(action))
 
                 episode_return += reward
                 episode_rewards.append(reward)
 
-                obs = torch.tensor(obs, dtype=torch.float32).to(trainer.device)
+                # Track expired targets (if expiry is enabled)
+                if trainer.args.target_expiry_penalty > 0:
+                    if reward <= -trainer.args.target_expiry_penalty:
+                        episode_expired_count += 1
+
+                # Get current targets_reached from observation
+                # Observation structure: [agent_pos (2), target_positions (2*num_targets),
+                #                         target_reached (num_targets), target_counters (num_targets), ...]
+                obs_start_idx = 2 + 2 * trainer.args.num_targets
+                current_targets_reached = obs_raw[obs_start_idx:obs_start_idx + trainer.args.num_targets]
+
+                # Check which targets were just reached (changed from 0 to 1)
+                for target_idx in range(trainer.args.num_targets):
+                    if current_targets_reached[target_idx] == 1 and prev_targets_reached[target_idx] == 0:
+                        targets_reached_count[target_idx] += 1
+
+                prev_targets_reached = current_targets_reached.copy()
+
+                obs = torch.tensor(obs_raw, dtype=torch.float32).to(trainer.device)
                 step_count += 1
 
-            # Count targets reached (from final observation)
-            targets_reached = sum(1 for i in range(trainer.args.num_targets)
-                                 if obs[2 + 2 * trainer.args.num_targets + i].item() == 1)
+            # Count total targets reached (at least once during episode)
+            targets_reached = sum(1 for count in targets_reached_count if count > 0)
+            min_targets_reached = int(np.min(targets_reached_count))
 
             eval_stats["episode_returns"].append(episode_return)
             eval_stats["episode_lengths"].append(step_count)
             eval_stats["targets_reached_per_episode"].append(targets_reached)
+            eval_stats["expired_targets_per_episode"].append(episode_expired_count)
+            eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
 
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
-                  f"Length={step_count}, Targets={targets_reached}/{trainer.args.num_targets}")
+                  f"Length={step_count}, Targets={targets_reached}/{trainer.args.num_targets}, "
+                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
 
-            # Create GIF
-            episode_data = {
-                "states": episode_states,
-                "actions": episode_actions,
-                "rewards": episode_rewards,
-            }
+            # Create GIF only for first num_gif_episodes
+            if episode_idx < self.num_gif_episodes:
+                episode_data = {
+                    "states": episode_states,
+                    "actions": episode_actions,
+                    "rewards": episode_rewards,
+                }
 
-            gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
-            eval_env.create_single_agent_gif(episode_data, gif_path, fps=2)
+                gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
+                eval_env.create_single_agent_gif(episode_data, gif_path, fps=2)
 
-            # Log to wandb
-            if trainer.args.track:
-                wandb.log({
-                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
-                }, step=global_step)
+                # Log to wandb
+                if trainer.args.track:
+                    wandb.log({
+                        f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
+                    }, step=global_step)
 
         eval_env.close()
 
@@ -406,6 +470,8 @@ class PPOMovingTargetsExperiment:
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
+        avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
                           if t == trainer.args.num_targets) / self.num_eval_episodes
 
@@ -413,6 +479,8 @@ class PPOMovingTargetsExperiment:
         print(f"  Average Return: {avg_return:.2f}")
         print(f"  Average Length: {avg_length:.1f}")
         print(f"  Average Targets: {avg_targets:.2f}/{trainer.args.num_targets}")
+        print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
+        print(f"  Average Min Reached (across {trainer.args.num_targets} targets): {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Success Rate: {success_rate*100:.1f}%\n")
 
         # Log to wandb
@@ -421,6 +489,8 @@ class PPOMovingTargetsExperiment:
                 "eval/avg_return": avg_return,
                 "eval/avg_length": avg_length,
                 "eval/avg_targets_reached": avg_targets,
+                "eval/avg_expired_targets": avg_expired,
+                "eval/avg_min_targets_reached": avg_min_reached,
                 "eval/success_rate": success_rate,
             }, step=global_step)
 
@@ -489,7 +559,8 @@ class PPOMovingTargetsExperiment:
         self.log_codebase_to_wandb(wandb.run)
 
         print(f"Checkpoint frequency: every {self.checkpoint_freq} iterations")
-        print(f"Evaluation frequency: every {self.eval_freq} iterations\n")
+        print(f"Evaluation frequency: every {self.eval_freq} iterations")
+        print(f"Evaluation episodes: {self.num_eval_episodes} (saving GIFs for first {self.num_gif_episodes})\n")
 
         trainer.train()
         trainer.save_model()
@@ -510,23 +581,24 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_exp3"  # Leave empty for default name with timestamp
-    CHECKPOINT_FREQ = 1000  # Save checkpoint every N iterations
-    EVAL_FREQ = 1000  # Evaluate every N iterations
-    NUM_EVAL_EPISODES = 3  # Number of episodes per evaluation
+    EXPERIMENT_NAME = "ppo_moving_targets_exp7"  # Leave empty for default name with timestamp
+    CHECKPOINT_FREQ = 5000  # Save checkpoint every N iterations
+    EVAL_FREQ = 5000  # Evaluate every N iterations
+    NUM_EVAL_EPISODES = 100  # Number of episodes per evaluation
+    NUM_GIF_EPISODES = 3  # Number of episodes to save as GIFs
 
     # Environment parameters
     GRID_SIZE = 15
     NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 10.0
-    MAX_STEPS = 150  # For training (evaluation uses 300)
-    DISTANCE_REWARD_SCALE = 0.1
+    MAX_STEPS = 300  # For training (evaluation uses 300)
+    DISTANCE_REWARD_SCALE = 0.2
     TARGET_EXPIRY_STEPS = 40
     TARGET_EXPIRY_PENALTY = 100.0
 
     # Multi-agent specific parameters (ignored in single-agent mode)
     BID_UPPER_BOUND = 6
-    BID_PENALTY = 0.1
+    BID_PENALTY = 0.05
     ACTION_WINDOW = 6
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
@@ -612,6 +684,7 @@ def main():
         checkpoint_freq=CHECKPOINT_FREQ,
         eval_freq=EVAL_FREQ,
         num_eval_episodes=NUM_EVAL_EPISODES,
+        num_gif_episodes=NUM_GIF_EPISODES,
         single_agent_mode=SINGLE_AGENT_MODE,
     )
 
