@@ -35,7 +35,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from bidding_ppo import PPOTrainer, Args, reorder_observation_for_agent
 from single_agent_ppo import SingleAgentPPOTrainer, SingleAgentArgs
-from bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
+from bidding_gridworld import (
+    BiddingGridworld,
+    MovingTargetBiddingGridworld,
+    evaluate_multi_agent_policy,
+    evaluate_single_agent_policy
+)
 
 
 class PPOMovingTargetsExperiment:
@@ -158,7 +163,7 @@ class PPOMovingTargetsExperiment:
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
         print(f"Running {self.num_eval_episodes} episodes (saving GIFs for first {self.num_gif_episodes})")
-        print(f"{'='*60}")
+        print(f"{'='*60}\n")
 
         # Create evaluation environment with longer max_steps
         eval_env = MovingTargetBiddingGridworld(
@@ -178,18 +183,9 @@ class PPOMovingTargetsExperiment:
             window_penalty=trainer.args.window_penalty,
         )
 
-        eval_stats = {
-            "episode_returns": [],
-            "episode_lengths": [],
-            "targets_reached_per_episode": [],
-            "expired_targets_per_episode": [],
-            "min_targets_reached_per_episode": [],
-        }
-
-        for episode_idx in range(self.num_eval_episodes):
-            # Reset environment
-            base_obs, _ = eval_env.reset()
-
+        # Create policy wrapper function
+        def policy_fn(base_obs):
+            """Convert base observation to agent-specific observations and get actions."""
             # Prepare observations for all agents (reorder targets)
             obs_list = []
             for agent_idx in range(trainer.args.num_agents):
@@ -200,117 +196,35 @@ class PPOMovingTargetsExperiment:
 
             obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
 
-            # Episode tracking
-            episode_states = []
-            episode_actions = []
-            episode_rewards = []
-            episode_step_details = []
-            episode_return = 0
-            step_count = 0
-            terminated = False
-            truncated = False
+            # Get actions (deterministic for evaluation)
+            with torch.no_grad():
+                action, _, _, _ = trainer.agent.get_action_and_value(obs)
+                return action.cpu().numpy()
 
-            # Track expired targets and targets reached per agent
-            episode_expired_count = 0
-            targets_reached_count = np.zeros(trainer.args.num_agents, dtype=np.int32)
+        # Run evaluation using refactored function
+        eval_stats = evaluate_multi_agent_policy(
+            env=eval_env,
+            policy_fn=policy_fn,
+            num_episodes=self.num_eval_episodes,
+            target_expiry_penalty=trainer.args.target_expiry_penalty,
+            verbose=True
+        )
 
-            while not (terminated or truncated):
-                # Store state
-                episode_states.append(base_obs.copy())
+        # Create GIFs for first num_gif_episodes
+        for episode_idx in range(min(self.num_gif_episodes, self.num_eval_episodes)):
+            episode_data = eval_stats["episode_data_list"][episode_idx]
+            gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
+            eval_env.create_competition_gif(episode_data, gif_path, fps=2)
 
-                # Get actions (deterministic for evaluation)
-                with torch.no_grad():
-                    action, _, _, _ = trainer.agent.get_action_and_value(obs)
-                    action = action.cpu().numpy()
-
-                # Convert to environment action format
-                env_action = {}
-                for agent_idx in range(trainer.args.num_agents):
-                    agent_action = {
-                        "direction": int(action[agent_idx, 0]),
-                        "bid": int(action[agent_idx, 1]),
-                    }
-                    if trainer.args.window_bidding:
-                        agent_action["window"] = int(action[agent_idx, 2])
-                    env_action[f"agent_{agent_idx}"] = agent_action
-
-                episode_actions.append(env_action)
-
-                # Step environment
-                base_obs, rewards_dict, terminated, truncated, info = eval_env.step(env_action)
-
-                episode_return += sum(rewards_dict.values())
-                episode_rewards.append(rewards_dict)
-
-                # Track expired targets this step
-                for agent_idx in range(trainer.args.num_agents):
-                    reward = rewards_dict[f"agent_{agent_idx}"]
-                    # If we see a large negative reward matching the expiry penalty, count it
-                    if trainer.args.target_expiry_penalty > 0:
-                        if reward <= -trainer.args.target_expiry_penalty:
-                            episode_expired_count += 1
-
-                # Track targets reached
-                for agent_idx in range(trainer.args.num_agents):
-                    reward = rewards_dict[f"agent_{agent_idx}"]
-                    if reward >= trainer.args.target_reward:
-                        targets_reached_count[agent_idx] += 1
-
-                # Store step details
-                episode_step_details.append({
-                    "winning_agent": info.get("winning_agent", -1),
-                    "bids": info.get("bids", {}),
-                    "window_agent": info.get("window_agent", None),
-                    "window_steps_remaining": info.get("window_steps_remaining", 0),
-                    "bid_penalty_applied": info.get("bid_penalty_applied", False),
-                })
-
-                # Prepare next observation
-                obs_list = []
-                for agent_idx in range(trainer.args.num_agents):
-                    reordered_obs = reorder_observation_for_agent(
-                        base_obs, agent_idx, trainer.args.num_agents
-                    )
-                    obs_list.append(reordered_obs)
-
-                obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
-                step_count += 1
-
-            # Count total targets reached (at least once during episode)
-            targets_reached = sum(1 for count in targets_reached_count if count > 0)
-            min_targets_reached = int(np.min(targets_reached_count))
-
-            eval_stats["episode_returns"].append(episode_return)
-            eval_stats["episode_lengths"].append(step_count)
-            eval_stats["targets_reached_per_episode"].append(targets_reached)
-            eval_stats["expired_targets_per_episode"].append(episode_expired_count)
-            eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
-
-            print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
-                  f"Length={step_count}, Targets={targets_reached}/{trainer.args.num_agents}, "
-                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
-
-            # Create GIF only for first num_gif_episodes
-            if episode_idx < self.num_gif_episodes:
-                episode_data = {
-                    "states": episode_states,
-                    "actions": episode_actions,
-                    "rewards": episode_rewards,
-                    "step_details": episode_step_details,
-                }
-
-                gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
-                eval_env.create_competition_gif(episode_data, gif_path, fps=2)
-
-                # Log to wandb
-                if trainer.args.track:
-                    wandb.log({
-                        f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
-                    }, step=global_step)
+            # Log to wandb
+            if trainer.args.track:
+                wandb.log({
+                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
+                }, step=global_step)
 
         eval_env.close()
 
-        # Compute statistics
+        # Compute aggregate statistics
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
@@ -318,14 +232,6 @@ class PPOMovingTargetsExperiment:
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
                           if t == trainer.args.num_agents) / self.num_eval_episodes
-
-        print(f"\nEvaluation Summary:")
-        print(f"  Average Return: {avg_return:.2f}")
-        print(f"  Average Length: {avg_length:.1f}")
-        print(f"  Average Targets: {avg_targets:.2f}/{trainer.args.num_agents}")
-        print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
-        print(f"  Average Min Reached (across {trainer.args.num_agents} agents): {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
-        print(f"  Success Rate: {success_rate*100:.1f}%\n")
 
         # Log to wandb
         if trainer.args.track:
@@ -377,7 +283,7 @@ class PPOMovingTargetsExperiment:
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
         print(f"Running {self.num_eval_episodes} episodes (saving GIFs for first {self.num_gif_episodes})")
-        print(f"{'='*60}")
+        print(f"{'='*60}\n")
 
         # Create evaluation environment with longer max_steps
         if trainer.args.moving_targets:
@@ -405,105 +311,39 @@ class PPOMovingTargetsExperiment:
                 single_agent_mode=True
             )
 
-        eval_stats = {
-            "episode_returns": [],
-            "episode_lengths": [],
-            "targets_reached_per_episode": [],
-            "expired_targets_per_episode": [],
-            "min_targets_reached_per_episode": [],
-        }
+        # Create policy wrapper function
+        def policy_fn(obs):
+            """Convert observation to tensor and get action."""
+            obs_tensor = torch.tensor(obs, dtype=torch.float32).to(trainer.device)
+            # Get action (deterministic for evaluation)
+            with torch.no_grad():
+                action, _, _, _ = trainer.agent.get_action_and_value(obs_tensor.unsqueeze(0))
+                return action.squeeze(0).cpu().numpy()
 
-        for episode_idx in range(self.num_eval_episodes):
-            # Reset environment
-            obs_raw, _ = eval_env.reset()
-            obs = torch.tensor(obs_raw, dtype=torch.float32).to(trainer.device)
+        # Run evaluation using refactored function
+        eval_stats = evaluate_single_agent_policy(
+            env=eval_env,
+            policy_fn=policy_fn,
+            num_episodes=self.num_eval_episodes,
+            target_expiry_penalty=trainer.args.target_expiry_penalty,
+            verbose=True
+        )
 
-            # Episode tracking
-            episode_states = []
-            episode_actions = []
-            episode_rewards = []
-            episode_return = 0
-            step_count = 0
-            terminated = False
-            truncated = False
+        # Create GIFs for first num_gif_episodes
+        for episode_idx in range(min(self.num_gif_episodes, self.num_eval_episodes)):
+            episode_data = eval_stats["episode_data_list"][episode_idx]
+            gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
+            eval_env.create_single_agent_gif(episode_data, gif_path, fps=2)
 
-            # Track expired targets and targets reached per target
-            episode_expired_count = 0
-            targets_reached_count = np.zeros(trainer.args.num_targets, dtype=np.int32)
-            prev_targets_reached = np.zeros(trainer.args.num_targets, dtype=np.int32)
-
-            while not (terminated or truncated):
-                # Store state
-                episode_states.append(obs.cpu().numpy().copy())
-
-                # Get action (deterministic for evaluation)
-                with torch.no_grad():
-                    action, _, _, _ = trainer.agent.get_action_and_value(obs.unsqueeze(0))
-                    action = action.squeeze(0).cpu().numpy()
-
-                episode_actions.append(int(action))
-
-                # Step environment
-                obs_raw, reward, terminated, truncated, info = eval_env.step(int(action))
-
-                episode_return += reward
-                episode_rewards.append(reward)
-
-                # Track expired targets (if expiry is enabled)
-                if trainer.args.target_expiry_penalty > 0:
-                    if reward <= -trainer.args.target_expiry_penalty:
-                        episode_expired_count += 1
-
-                # Get current targets_reached from observation
-                # Observation structure: [agent_pos (2), target_positions (2*num_targets),
-                #                         target_reached (num_targets), target_counters (num_targets), ...]
-                obs_start_idx = 2 + 2 * trainer.args.num_targets
-                current_targets_reached = obs_raw[obs_start_idx:obs_start_idx + trainer.args.num_targets]
-
-                # Check which targets were just reached (changed from 0 to 1)
-                for target_idx in range(trainer.args.num_targets):
-                    if current_targets_reached[target_idx] == 1 and prev_targets_reached[target_idx] == 0:
-                        targets_reached_count[target_idx] += 1
-
-                prev_targets_reached = current_targets_reached.copy()
-
-                obs = torch.tensor(obs_raw, dtype=torch.float32).to(trainer.device)
-                step_count += 1
-
-            # Count total targets reached (at least once during episode)
-            targets_reached = sum(1 for count in targets_reached_count if count > 0)
-            min_targets_reached = int(np.min(targets_reached_count))
-
-            eval_stats["episode_returns"].append(episode_return)
-            eval_stats["episode_lengths"].append(step_count)
-            eval_stats["targets_reached_per_episode"].append(targets_reached)
-            eval_stats["expired_targets_per_episode"].append(episode_expired_count)
-            eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
-
-            print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
-                  f"Length={step_count}, Targets={targets_reached}/{trainer.args.num_targets}, "
-                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
-
-            # Create GIF only for first num_gif_episodes
-            if episode_idx < self.num_gif_episodes:
-                episode_data = {
-                    "states": episode_states,
-                    "actions": episode_actions,
-                    "rewards": episode_rewards,
-                }
-
-                gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
-                eval_env.create_single_agent_gif(episode_data, gif_path, fps=2)
-
-                # Log to wandb
-                if trainer.args.track:
-                    wandb.log({
-                        f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
-                    }, step=global_step)
+            # Log to wandb
+            if trainer.args.track:
+                wandb.log({
+                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
+                }, step=global_step)
 
         eval_env.close()
 
-        # Compute statistics
+        # Compute aggregate statistics
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
@@ -511,14 +351,6 @@ class PPOMovingTargetsExperiment:
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
                           if t == trainer.args.num_targets) / self.num_eval_episodes
-
-        print(f"\nEvaluation Summary:")
-        print(f"  Average Return: {avg_return:.2f}")
-        print(f"  Average Length: {avg_length:.1f}")
-        print(f"  Average Targets: {avg_targets:.2f}/{trainer.args.num_targets}")
-        print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
-        print(f"  Average Min Reached (across {trainer.args.num_targets} targets): {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
-        print(f"  Success Rate: {success_rate*100:.1f}%\n")
 
         # Log to wandb
         if trainer.args.track:
@@ -646,11 +478,11 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_exp8"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_single_agent_exp5"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 5000  # Save checkpoint every N iterations
     EVAL_FREQ = 5000  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 100  # Number of episodes per evaluation
@@ -659,11 +491,11 @@ def main():
     # Environment parameters
     GRID_SIZE = 15
     NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
-    TARGET_REWARD = 20.0
+    TARGET_REWARD = 1.0
     MAX_STEPS = 300  # For training (evaluation uses 600)
-    DISTANCE_REWARD_SCALE = 0.4
+    DISTANCE_REWARD_SCALE = 0.01
     TARGET_EXPIRY_STEPS = 40
-    TARGET_EXPIRY_PENALTY = 200.0
+    TARGET_EXPIRY_PENALTY = 100.0
 
     # Multi-agent specific parameters (ignored in single-agent mode)
     BID_UPPER_BOUND = 5
