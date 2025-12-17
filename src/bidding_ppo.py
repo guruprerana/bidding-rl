@@ -64,6 +64,10 @@ class Args:
     """probability of target direction change (for moving targets)"""
     target_move_interval: int = 1
     """steps between target movements (for moving targets)"""
+    window_bidding: bool = False
+    """whether agents can choose their control window length"""
+    window_penalty: float = 0.0
+    """penalty multiplier for chosen window length (only applies when window_bidding=True)"""
 
     # Algorithm specific arguments
     total_timesteps: int = 500000
@@ -125,9 +129,10 @@ class BiddingEnvWrapper(gym.Wrapper):
      target_idx_reached (1), other_reached (num_agents-1), target_idx_counter (1), other_counters (num_agents-1), window_steps_remaining (1)]
     """
 
-    def __init__(self, env, num_agents):
+    def __init__(self, env, num_agents, window_bidding=False):
         super().__init__(env)
         self.num_agents = num_agents
+        self.window_bidding = window_bidding
 
         # Original observation dimension from BiddingGridworld (no change in size)
         base_obs_dim = env.observation_space.shape[0]
@@ -141,11 +146,18 @@ class BiddingEnvWrapper(gym.Wrapper):
             dtype=np.float32
         )
 
-        # Action space: each agent outputs (direction, bid)
-        # We'll use a MultiDiscrete space: [dir_agent0, bid_agent0, dir_agent1, bid_agent1, ...]
-        self.action_space = gym.spaces.MultiDiscrete(
-            [4, env.bid_upper_bound + 1] * num_agents
-        )
+        # Action space: each agent outputs (direction, bid) or (direction, bid, window)
+        # We'll use a MultiDiscrete space
+        if window_bidding:
+            # [dir_agent0, bid_agent0, window_agent0, dir_agent1, bid_agent1, window_agent1, ...]
+            self.action_space = gym.spaces.MultiDiscrete(
+                [4, env.bid_upper_bound + 1, env.action_window] * num_agents
+            )
+        else:
+            # [dir_agent0, bid_agent0, dir_agent1, bid_agent1, ...]
+            self.action_space = gym.spaces.MultiDiscrete(
+                [4, env.bid_upper_bound + 1] * num_agents
+            )
 
     def _reorder_observation(self, base_obs, target_index):
         """
@@ -181,7 +193,9 @@ class BiddingEnvWrapper(gym.Wrapper):
         Execute step with actions from all agents.
 
         Args:
-            action: Flattened action array [dir_agent0, bid_agent0, dir_agent1, bid_agent1, ...]
+            action: Flattened action array
+                   Without window_bidding: [dir_agent0, bid_agent0, dir_agent1, bid_agent1, ...]
+                   With window_bidding: [dir_agent0, bid_agent0, window_agent0, dir_agent1, bid_agent1, window_agent1, ...]
 
         Returns:
             observations: Reordered observations for all agents
@@ -192,15 +206,25 @@ class BiddingEnvWrapper(gym.Wrapper):
         """
         # Convert flattened action array to BiddingGridworld format
         env_action = {}
+        actions_per_agent = 3 if self.window_bidding else 2
+
         for agent_idx in range(self.num_agents):
             # Extract direction and bid for this agent
-            direction = int(action[agent_idx * 2])
-            bid = int(action[agent_idx * 2 + 1])
+            base_idx = agent_idx * actions_per_agent
+            direction = int(action[base_idx])
+            bid = int(action[base_idx + 1])
 
-            env_action[f"agent_{agent_idx}"] = {
+            agent_action = {
                 "direction": direction,
                 "bid": bid
             }
+
+            if self.window_bidding:
+                # Add 1 because the action space is 0 to action_window-1
+                window = int(action[base_idx + 2])
+                agent_action["window"] = window
+
+            env_action[f"agent_{agent_idx}"] = agent_action
 
         # Execute step in underlying environment
         base_obs, rewards_dict, terminated, truncated, info = self.env.step(env_action)
@@ -238,7 +262,9 @@ def make_env(args, idx, run_name):
                 target_expiry_steps=args.target_expiry_steps,
                 target_expiry_penalty=args.target_expiry_penalty,
                 direction_change_prob=args.direction_change_prob,
-                target_move_interval=args.target_move_interval
+                target_move_interval=args.target_move_interval,
+                window_bidding=args.window_bidding,
+                window_penalty=args.window_penalty
             )
         else:
             env = BiddingGridworld(
@@ -251,11 +277,13 @@ def make_env(args, idx, run_name):
                 action_window=args.action_window,
                 distance_reward_scale=args.distance_reward_scale,
                 target_expiry_steps=args.target_expiry_steps,
-                target_expiry_penalty=args.target_expiry_penalty
+                target_expiry_penalty=args.target_expiry_penalty,
+                window_bidding=args.window_bidding,
+                window_penalty=args.window_penalty
             )
 
         # Wrap with our custom wrapper
-        env = BiddingEnvWrapper(env, args.num_agents)
+        env = BiddingEnvWrapper(env, args.num_agents, window_bidding=args.window_bidding)
 
         return env
 
@@ -337,15 +365,17 @@ class SharedAgent(nn.Module):
     inference separately through this shared network.
     """
 
-    def __init__(self, obs_dim, num_actions_per_agent):
+    def __init__(self, obs_dim, num_actions_per_agent, window_bidding=False):
         """
         Initialize shared actor-critic network.
 
         Args:
             obs_dim: Dimension of observation (targets reordered per agent)
-            num_actions_per_agent: Number of action components per agent (2: direction + bid)
+            num_actions_per_agent: Number of action components per agent (2 or 3: direction + bid [+ window])
+            window_bidding: Whether window bidding is enabled
         """
         super().__init__()
+        self.window_bidding = window_bidding
 
         # Shared critic network: outputs single value estimate
         self.critic = nn.Sequential(
@@ -358,7 +388,8 @@ class SharedAgent(nn.Module):
 
         # Shared actor network: outputs action logits
         # For bidding gridworld: outputs logits for direction (4 actions) and bid (bid_upper_bound+1 actions)
-        # We'll use two separate heads for direction and bid
+        # If window_bidding: also outputs window (action_window actions)
+        # We'll use separate heads for each action component
         self.actor_shared = nn.Sequential(
             layer_init(nn.Linear(obs_dim, 64)),
             nn.Tanh(),
@@ -366,15 +397,23 @@ class SharedAgent(nn.Module):
             nn.Tanh(),
         )
 
-        # Separate heads for direction and bid actions
+        # Separate heads for action components
         self.direction_head = layer_init(nn.Linear(64, 4), std=0.01)  # 4 directions
         self.bid_head = None  # Will be set based on bid_upper_bound
+        self.window_head = None  # Will be set based on action_window if window_bidding is True
 
     def set_bid_head(self, bid_upper_bound):
         """Set the bid head based on bid upper bound."""
         self.bid_head = layer_init(nn.Linear(64, bid_upper_bound + 1), std=0.01)
         # Move to same device as the rest of the model
         self.bid_head = self.bid_head.to(next(self.parameters()).device)
+
+    def set_window_head(self, action_window):
+        """Set the window head based on action window (only for window_bidding mode)."""
+        if self.window_bidding:
+            self.window_head = layer_init(nn.Linear(64, action_window), std=0.01)
+            # Move to same device as the rest of the model
+            self.window_head = self.window_head.to(next(self.parameters()).device)
 
     def get_value(self, x):
         """
@@ -398,10 +437,10 @@ class SharedAgent(nn.Module):
         Args:
             x: Observation tensor (can be batched)
             action: If provided, compute log prob for this action. Otherwise sample new action.
-                   Action should be tensor of shape (..., 2) where last dim is [direction, bid]
+                   Action should be tensor of shape (..., 2) or (..., 3) where last dim is [direction, bid] or [direction, bid, window]
 
         Returns:
-            action: Sampled or provided action [direction, bid]
+            action: Sampled or provided action [direction, bid] or [direction, bid, window]
             log_prob: Log probability of the action
             entropy: Entropy of the action distribution
             value: Value estimate
@@ -417,16 +456,27 @@ class SharedAgent(nn.Module):
         direction_dist = Categorical(logits=direction_logits)
         bid_dist = Categorical(logits=bid_logits)
 
+        # Handle window if window_bidding is enabled
+        if self.window_bidding:
+            window_logits = self.window_head(shared_features)
+            window_dist = Categorical(logits=window_logits)
+
         # Sample or use provided action
         if action is None:
             # Sample new actions
             direction = direction_dist.sample()
             bid = bid_dist.sample()
-            action = torch.stack([direction, bid], dim=-1)
+            if self.window_bidding:
+                window = window_dist.sample()
+                action = torch.stack([direction, bid, window], dim=-1)
+            else:
+                action = torch.stack([direction, bid], dim=-1)
         else:
             # Use provided action
             direction = action[..., 0]
             bid = action[..., 1]
+            if self.window_bidding:
+                window = action[..., 2]
 
         # Compute log probabilities (sum of independent log probs)
         direction_log_prob = direction_dist.log_prob(direction)
@@ -435,6 +485,11 @@ class SharedAgent(nn.Module):
 
         # Compute entropy (sum of independent entropies)
         entropy = direction_dist.entropy() + bid_dist.entropy()
+
+        if self.window_bidding:
+            window_log_prob = window_dist.log_prob(window)
+            total_log_prob = total_log_prob + window_log_prob
+            entropy = entropy + window_dist.entropy()
 
         # Get value estimate
         value = self.critic(x)
@@ -558,14 +613,25 @@ class PPOTrainer:
         # Create shared agent
         # Observation space is (num_agents, obs_dim), so we need shape[1] for per-agent obs dim
         self.obs_dim = self.envs.single_observation_space.shape[1]
-        self.agent = SharedAgent(self.obs_dim, num_actions_per_agent=2).to(self.device)
+        num_actions_per_agent = 3 if self.args.window_bidding else 2
+        self.agent = SharedAgent(
+            self.obs_dim,
+            num_actions_per_agent=num_actions_per_agent,
+            window_bidding=self.args.window_bidding
+        ).to(self.device)
         self.agent.set_bid_head(self.args.bid_upper_bound)
+        if self.args.window_bidding:
+            self.agent.set_window_head(self.args.action_window)
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
 
         print(f"🚀 PPO Trainer initialized")
         print(f"   Device: {self.device}")
         print(f"   Observation dim: {self.obs_dim}")
+        print(f"   Window bidding: {self.args.window_bidding}")
+        if self.args.window_bidding:
+            print(f"   Window penalty: {self.args.window_penalty}")
+        print(f"   Actions per agent: {num_actions_per_agent}")
         print(f"   Batch size: {self.args.batch_size}")
         print(f"   Num iterations: {self.args.num_iterations}")
         print(f"   Run name: {self.run_name}")
@@ -577,8 +643,9 @@ class PPOTrainer:
 
         # Storage setup
         # Observation space is (num_agents, obs_dim), so we need (num_steps, num_envs, num_agents, obs_dim)
+        num_action_components = 3 if self.args.window_bidding else 2
         obs = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents, self.obs_dim)).to(self.device)
-        actions = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents, 2)).to(self.device)
+        actions = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents, num_action_components)).to(self.device)
         logprobs = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents)).to(self.device)
         rewards = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents)).to(self.device)
         dones = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents)).to(self.device)
@@ -616,7 +683,7 @@ class PPOTrainer:
                 with torch.no_grad():
                     flat_obs = next_obs.reshape(-1, self.obs_dim)
                     action, logprob, _, value = self.agent.get_action_and_value(flat_obs)
-                    action = action.reshape(self.args.num_envs, self.args.num_agents, 2)
+                    action = action.reshape(self.args.num_envs, self.args.num_agents, num_action_components)
                     logprob = logprob.reshape(self.args.num_envs, self.args.num_agents)
                     value = value.reshape(self.args.num_envs, self.args.num_agents)
                     values[step] = value
@@ -666,7 +733,7 @@ class PPOTrainer:
             # obs shape: (num_steps, num_envs, num_agents, obs_dim) -> (batch_size, obs_dim)
             b_obs = obs.reshape(-1, self.obs_dim)
             b_logprobs = logprobs.reshape(-1)
-            b_actions = actions.reshape(-1, 2)
+            b_actions = actions.reshape(-1, num_action_components)
             b_advantages = advantages.reshape(-1)
             b_returns = returns.reshape(-1)
             b_values = values.reshape(-1)

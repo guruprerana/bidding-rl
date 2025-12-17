@@ -36,6 +36,8 @@ class BiddingGridworld(gym.Env):
         target_expiry_steps: Optional[int] = None,
         target_expiry_penalty: float = 5.0,
         single_agent_mode: bool = False,
+        window_bidding: bool = False,
+        window_penalty: float = 0.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -51,6 +53,8 @@ class BiddingGridworld(gym.Env):
             target_reward: Reward for reaching target (default: 10.0)
             max_steps: Maximum number of steps per episode (default: 100)
             action_window: Number of steps a winning agent controls the action (default: 1)
+                          When window_bidding is False, this is the fixed window length.
+                          When window_bidding is True, this is the maximum window agents can bid for.
             distance_reward_scale: Reward scaling for distance improvements (default: 0.0, disabled)
                                   Positive values reward getting closer to target
             target_expiry_steps: Maximum steps allowed before target expiry penalty (default: None, disabled)
@@ -59,6 +63,12 @@ class BiddingGridworld(gym.Env):
             single_agent_mode: If True, use single-agent mode with no bidding (default: False)
                               In this mode, a single agent controls movement and pursues all targets
                               (num_agents still determines the number of targets to reach)
+            window_bidding: If True, agents can choose their control window length (1 to action_window) (default: False)
+                           When enabled, each agent's action includes a 'window' component specifying
+                           how many steps they want to control if they win the bid.
+            window_penalty: Penalty multiplier for chosen window length (default: 0.0)
+                           When window_bidding is enabled, agents pay window_penalty * chosen_window
+                           Applied only on the first step of the window (similar to bid_penalty)
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
@@ -89,6 +99,8 @@ class BiddingGridworld(gym.Env):
         self.distance_reward_scale = distance_reward_scale
         self.target_expiry_steps = target_expiry_steps
         self.target_expiry_penalty = target_expiry_penalty
+        self.window_bidding = window_bidding
+        self.window_penalty = window_penalty
         self.render_mode = render_mode
 
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
@@ -99,17 +111,28 @@ class BiddingGridworld(gym.Env):
             # Single agent: just choose a direction (no bidding)
             self.action_space = spaces.Discrete(4)
         else:
-            # Multi-agent: each agent submits (direction, bid)
+            # Multi-agent: each agent submits (direction, bid) or (direction, bid, window)
             # Each agent submits an action that consists of:
             # - direction: discrete action (0-3 for L,R,U,D)
             # - bid: integer value (0 to bid_upper_bound)
-            self.action_space = spaces.Dict({
-                f"agent_{i}": spaces.Dict({
-                    "direction": spaces.Discrete(4),
-                    "bid": spaces.Discrete(bid_upper_bound + 1)
+            # - window: (optional, if window_bidding=True) discrete value (0 to action_window-1, representing 1 to action_window)
+            if window_bidding:
+                self.action_space = spaces.Dict({
+                    f"agent_{i}": spaces.Dict({
+                        "direction": spaces.Discrete(4),
+                        "bid": spaces.Discrete(bid_upper_bound + 1),
+                        "window": spaces.Discrete(action_window)  # 0 to action_window-1 (add 1 to get actual window)
+                    })
+                    for i in range(num_agents)
                 })
-                for i in range(num_agents)
-            })
+            else:
+                self.action_space = spaces.Dict({
+                    f"agent_{i}": spaces.Dict({
+                        "direction": spaces.Discrete(4),
+                        "bid": spaces.Discrete(bid_upper_bound + 1)
+                    })
+                    for i in range(num_agents)
+                })
         
         # Observation space: Box vector for NN policies (normalized to [0, 1])
         # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
@@ -170,6 +193,7 @@ class BiddingGridworld(gym.Env):
         # Action window tracking
         self.window_agent = None  # Which agent currently has control
         self.window_steps_remaining = 0  # How many steps remain in window
+        self.current_window_length = 0  # Length of current window (for penalty calculation)
         
         observation = self._get_observation()
         info = self._get_info()
@@ -245,7 +269,17 @@ class BiddingGridworld(gym.Env):
 
                     # Start new action window
                     self.window_agent = winning_agent
-                    self.window_steps_remaining = self.action_window - 1  # -1 because current step counts
+
+                    # Determine window length
+                    if self.window_bidding:
+                        # Use the winning agent's chosen window (add 1 since action space is 0 to action_window-1)
+                        chosen_window = agent_actions[winning_agent]["window"] + 1
+                        self.window_steps_remaining = chosen_window - 1  # -1 because current step counts
+                        self.current_window_length = chosen_window  # Store for penalty calculation
+                    else:
+                        # Use the fixed action_window
+                        self.window_steps_remaining = self.action_window - 1  # -1 because current step counts
+                        self.current_window_length = self.action_window
 
                     # Apply bid penalty on first step of window
                     apply_bid_penalty = True
@@ -312,7 +346,8 @@ class BiddingGridworld(gym.Env):
                 targets_expired,
                 apply_bid_penalty,
                 self.previous_distances,
-                current_distances
+                current_distances,
+                self.current_window_length
             )
 
         # Update previous distances for next step
@@ -359,21 +394,22 @@ class BiddingGridworld(gym.Env):
         targets_expired: Dict[int, bool],
         apply_bid_penalty: bool,
         previous_distances: np.ndarray,
-        current_distances: np.ndarray
+        current_distances: np.ndarray,
+        current_window_length: int
     ) -> Dict[str, float]:
         """Calculate rewards for all agents."""
         rewards = {f"agent_{i}": 0.0 for i in range(self.num_agents)}
 
-        # Bid penalties and rewards (only apply on the first step of a window)
+        # Bid penalties and window penalties (only apply on the first step of a window)
         if apply_bid_penalty:
-            # Each agent pays penalty for their own bid and receives reward from all other agents' bids
+            # Each agent pays penalty for their own bid
             for i in range(self.num_agents):
                 # Pay for own bid
                 rewards[f"agent_{i}"] -= self.bid_penalty * agent_bids[i]
-                # Receive reward from other agents' bids (disabled currently)
-                # for j in range(self.num_agents):
-                #     if i != j:
-                #         rewards[f"agent_{i}"] += self.bid_penalty * agent_bids[j]
+
+            # Winning agent also pays penalty for chosen window length (if window_bidding enabled)
+            if self.window_bidding and winning_agent is not None and winning_agent >= 0:
+                rewards[f"agent_{winning_agent}"] -= self.window_penalty * current_window_length
 
         # Distance-based rewards (reward for getting closer to target)
         if self.distance_reward_scale > 0:
@@ -893,14 +929,17 @@ class BiddingGridworld(gym.Env):
         pass
 
 
-def create_random_action(num_agents: int = 2, bid_upper_bound: int = 10) -> Dict:
+def create_random_action(num_agents: int = 2, bid_upper_bound: int = 10, window_bidding: bool = False, action_window: int = 1) -> Dict:
     """Helper function to create a random action for testing."""
     action = {}
     for i in range(num_agents):
-        action[f"agent_{i}"] = {
+        agent_action = {
             "direction": np.random.randint(0, 4),
             "bid": np.random.randint(0, bid_upper_bound + 1)
         }
+        if window_bidding:
+            agent_action["window"] = np.random.randint(1, action_window + 1)
+        action[f"agent_{i}"] = agent_action
     return action
 
 
@@ -969,6 +1008,8 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         target_expiry_steps: Optional[int] = None,
         target_expiry_penalty: float = 5.0,
         single_agent_mode: bool = False,
+        window_bidding: bool = False,
+        window_penalty: float = 0.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -988,12 +1029,16 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
                                  Setting to N means targets move every N steps.
             max_steps: Maximum number of steps per episode (default: 100)
             action_window: Number of steps a winning agent controls the action (default: 1)
+                          When window_bidding is False, this is the fixed window length.
+                          When window_bidding is True, this is the maximum window agents can bid for.
             distance_reward_scale: Reward scaling for distance improvements (default: 0.0, disabled)
                                   Positive values reward getting closer to target
             target_expiry_steps: Maximum steps allowed before target expiry penalty (default: None, disabled)
                                 If set, agents receive penalty if target not reached within this many steps
             target_expiry_penalty: Penalty for not reaching target within expiry_steps (default: 5.0)
             single_agent_mode: If True, use single-agent mode with no bidding (default: False)
+            window_bidding: If True, agents can choose their control window length (1 to action_window) (default: False)
+            window_penalty: Penalty multiplier for chosen window length (default: 0.0)
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -1009,6 +1054,8 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             target_expiry_steps=target_expiry_steps,
             target_expiry_penalty=target_expiry_penalty,
             single_agent_mode=single_agent_mode,
+            window_bidding=window_bidding,
+            window_penalty=window_penalty,
             render_mode=render_mode
         )
 

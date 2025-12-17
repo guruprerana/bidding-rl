@@ -174,6 +174,8 @@ class PPOMovingTargetsExperiment:
             target_expiry_penalty=trainer.args.target_expiry_penalty,
             direction_change_prob=trainer.args.direction_change_prob,
             target_move_interval=trainer.args.target_move_interval,
+            window_bidding=trainer.args.window_bidding,
+            window_penalty=trainer.args.window_penalty,
         )
 
         eval_stats = {
@@ -224,10 +226,13 @@ class PPOMovingTargetsExperiment:
                 # Convert to environment action format
                 env_action = {}
                 for agent_idx in range(trainer.args.num_agents):
-                    env_action[f"agent_{agent_idx}"] = {
+                    agent_action = {
                         "direction": int(action[agent_idx, 0]),
                         "bid": int(action[agent_idx, 1]),
                     }
+                    if trainer.args.window_bidding:
+                        agent_action["window"] = int(action[agent_idx, 2])
+                    env_action[f"agent_{agent_idx}"] = agent_action
 
                 episode_actions.append(env_action)
 
@@ -332,6 +337,38 @@ class PPOMovingTargetsExperiment:
                 "eval/avg_min_targets_reached": avg_min_reached,
                 "eval/success_rate": success_rate,
             }, step=global_step)
+
+        # Save eval stats to local JSON file
+        eval_summary = {
+            "iteration": iteration,
+            "global_step": global_step,
+            "num_episodes": self.num_eval_episodes,
+            "num_agents": trainer.args.num_agents,
+            "timestamp": datetime.now().isoformat(),
+            "statistics": {
+                "avg_return": float(avg_return),
+                "avg_length": float(avg_length),
+                "avg_targets_reached": float(avg_targets),
+                "avg_expired_targets": float(avg_expired),
+                "avg_min_targets_reached": float(avg_min_reached),
+                "success_rate": float(success_rate),
+                "std_return": float(np.std(eval_stats["episode_returns"])),
+                "std_length": float(np.std(eval_stats["episode_lengths"])),
+                "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
+            },
+            "per_episode_data": {
+                "returns": [float(r) for r in eval_stats["episode_returns"]],
+                "lengths": [int(l) for l in eval_stats["episode_lengths"]],
+                "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
+                "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
+                "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
+            }
+        }
+
+        stats_file = self.rollouts_dir / f"iter_{iteration}_eval_stats.json"
+        with open(stats_file, 'w') as f:
+            json.dump(eval_summary, f, indent=2)
+        print(f"📊 Eval stats saved to {stats_file}")
 
         return eval_stats
 
@@ -494,6 +531,38 @@ class PPOMovingTargetsExperiment:
                 "eval/success_rate": success_rate,
             }, step=global_step)
 
+        # Save eval stats to local JSON file
+        eval_summary = {
+            "iteration": iteration,
+            "global_step": global_step,
+            "num_episodes": self.num_eval_episodes,
+            "num_targets": trainer.args.num_targets,
+            "timestamp": datetime.now().isoformat(),
+            "statistics": {
+                "avg_return": float(avg_return),
+                "avg_length": float(avg_length),
+                "avg_targets_reached": float(avg_targets),
+                "avg_expired_targets": float(avg_expired),
+                "avg_min_targets_reached": float(avg_min_reached),
+                "success_rate": float(success_rate),
+                "std_return": float(np.std(eval_stats["episode_returns"])),
+                "std_length": float(np.std(eval_stats["episode_lengths"])),
+                "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
+            },
+            "per_episode_data": {
+                "returns": [float(r) for r in eval_stats["episode_returns"]],
+                "lengths": [int(l) for l in eval_stats["episode_lengths"]],
+                "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
+                "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
+                "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
+            }
+        }
+
+        stats_file = self.rollouts_dir / f"iter_{iteration}_eval_stats.json"
+        with open(stats_file, 'w') as f:
+            json.dump(eval_summary, f, indent=2)
+        print(f"📊 Eval stats saved to {stats_file}")
+
         return eval_stats
 
     def run(self, args):
@@ -581,7 +650,7 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_exp7"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_exp8"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 5000  # Save checkpoint every N iterations
     EVAL_FREQ = 5000  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 100  # Number of episodes per evaluation
@@ -590,16 +659,18 @@ def main():
     # Environment parameters
     GRID_SIZE = 15
     NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
-    TARGET_REWARD = 10.0
-    MAX_STEPS = 300  # For training (evaluation uses 300)
-    DISTANCE_REWARD_SCALE = 0.2
+    TARGET_REWARD = 20.0
+    MAX_STEPS = 300  # For training (evaluation uses 600)
+    DISTANCE_REWARD_SCALE = 0.4
     TARGET_EXPIRY_STEPS = 40
-    TARGET_EXPIRY_PENALTY = 100.0
+    TARGET_EXPIRY_PENALTY = 200.0
 
     # Multi-agent specific parameters (ignored in single-agent mode)
-    BID_UPPER_BOUND = 6
+    BID_UPPER_BOUND = 5
     BID_PENALTY = 0.05
-    ACTION_WINDOW = 6
+    ACTION_WINDOW = 8
+    WINDOW_BIDDING = True  # Set to True to let agents choose their window length
+    WINDOW_PENALTY = 0.05  # Penalty per window step (only applies when WINDOW_BIDDING = True)
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
     DIRECTION_CHANGE_PROB = 0.1
@@ -670,6 +741,8 @@ def main():
             moving_targets=MOVING_TARGETS,
             direction_change_prob=DIRECTION_CHANGE_PROB,
             target_move_interval=TARGET_MOVE_INTERVAL,
+            window_bidding=WINDOW_BIDDING,
+            window_penalty=WINDOW_PENALTY,
 
             # Training config
             total_timesteps=TOTAL_TIMESTEPS,
