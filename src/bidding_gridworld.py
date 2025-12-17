@@ -363,6 +363,7 @@ class BiddingGridworld(gym.Env):
         observation = self._get_observation()
         info = self._get_info()
         info["winning_agent"] = winning_agent
+        info["targets_just_reached"] = targets_just_reached  # Add which targets were just reached
         if not self.single_agent_mode:
             info["bids"] = {f"agent_{i}": bid for i, bid in agent_bids.items()}
             info["window_agent"] = self.window_agent
@@ -929,6 +930,305 @@ class BiddingGridworld(gym.Env):
         pass
 
 
+# ============================================================================
+# Evaluation Utilities
+# ============================================================================
+
+def evaluate_multi_agent_policy(
+    env: 'BiddingGridworld',
+    policy_fn,
+    num_episodes: int,
+    target_expiry_penalty: float = 0.0,
+    verbose: bool = True
+) -> Dict[str, List]:
+    """
+    Evaluate a multi-agent policy on the environment.
+
+    Args:
+        env: BiddingGridworld environment (multi-agent mode)
+        policy_fn: Callable that takes observations (shape: [num_agents, obs_dim]) and returns
+                  actions (shape: [num_agents, action_dim]). Should be deterministic for evaluation.
+        num_episodes: Number of episodes to evaluate
+        target_expiry_penalty: Target expiry penalty value (for counting expired targets)
+        verbose: Whether to print progress
+
+    Returns:
+        Dictionary containing evaluation statistics:
+        - episode_returns: List of total returns per episode
+        - episode_lengths: List of episode lengths
+        - targets_reached_per_episode: List of unique targets reached per episode
+        - expired_targets_per_episode: List of expired targets per episode
+        - min_targets_reached_per_episode: List of minimum reaches across agents
+        - targets_reached_count_per_episode: List of per-agent reach counts
+        - episode_data_list: List of episode data dicts (states, actions, rewards, step_details)
+    """
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Evaluating multi-agent policy")
+        print(f"Running {num_episodes} episodes")
+        print(f"{'='*60}\n")
+
+    eval_stats = {
+        "episode_returns": [],
+        "episode_lengths": [],
+        "targets_reached_per_episode": [],
+        "expired_targets_per_episode": [],
+        "min_targets_reached_per_episode": [],
+        "targets_reached_count_per_episode": [],
+        "episode_data_list": [],
+    }
+
+    for episode_idx in range(num_episodes):
+        # Reset environment
+        base_obs, _ = env.reset()
+
+        # Episode tracking
+        episode_states = []
+        episode_actions = []
+        episode_rewards = []
+        episode_step_details = []
+        episode_return = 0
+        step_count = 0
+        terminated = False
+        truncated = False
+
+        # Track expired targets and targets reached per agent
+        episode_expired_count = 0
+        targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)
+
+        while not (terminated or truncated):
+            # Store state
+            episode_states.append(base_obs.copy())
+
+            # Get actions from policy
+            actions = policy_fn(base_obs)  # Should return [num_agents, action_dim]
+
+            # Convert to environment action format
+            env_action = {}
+            for agent_idx in range(env.num_agents):
+                agent_action = {
+                    "direction": int(actions[agent_idx, 0]),
+                    "bid": int(actions[agent_idx, 1]),
+                }
+                if env.window_bidding:
+                    agent_action["window"] = int(actions[agent_idx, 2])
+                env_action[f"agent_{agent_idx}"] = agent_action
+
+            episode_actions.append(env_action)
+
+            # Step environment
+            base_obs, rewards_dict, terminated, truncated, info = env.step(env_action)
+
+            episode_return += sum(rewards_dict.values())
+            episode_rewards.append(rewards_dict)
+
+            # Track expired targets this step
+            for agent_idx in range(env.num_agents):
+                reward = rewards_dict[f"agent_{agent_idx}"]
+                # If we see a large negative reward matching the expiry penalty, count it
+                if target_expiry_penalty > 0:
+                    if reward <= -target_expiry_penalty:
+                        episode_expired_count += 1
+
+            # Track targets reached using info dict
+            targets_just_reached = info.get("targets_just_reached", {})
+            for agent_idx in range(env.num_agents):
+                if targets_just_reached.get(agent_idx, False):
+                    targets_reached_count[agent_idx] += 1
+
+            # Store step details
+            episode_step_details.append({
+                "winning_agent": info.get("winning_agent", -1),
+                "bids": info.get("bids", {}),
+                "window_agent": info.get("window_agent", None),
+                "window_steps_remaining": info.get("window_steps_remaining", 0),
+                "bid_penalty_applied": info.get("bid_penalty_applied", False),
+            })
+
+            step_count += 1
+
+        # Count total targets reached (at least once during episode)
+        targets_reached = sum(1 for count in targets_reached_count if count > 0)
+        min_targets_reached = int(np.min(targets_reached_count))
+
+        eval_stats["episode_returns"].append(episode_return)
+        eval_stats["episode_lengths"].append(step_count)
+        eval_stats["targets_reached_per_episode"].append(targets_reached)
+        eval_stats["expired_targets_per_episode"].append(episode_expired_count)
+        eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
+        eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
+
+        # Store episode data for visualization
+        episode_data = {
+            "states": episode_states,
+            "actions": episode_actions,
+            "rewards": episode_rewards,
+            "step_details": episode_step_details,
+        }
+        eval_stats["episode_data_list"].append(episode_data)
+
+        if verbose:
+            print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
+                  f"Length={step_count}, Targets={targets_reached}/{env.num_agents}, "
+                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
+
+    if verbose:
+        avg_return = np.mean(eval_stats["episode_returns"])
+        avg_length = np.mean(eval_stats["episode_lengths"])
+        avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
+        avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
+        success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
+                          if t == env.num_agents) / num_episodes
+
+        print(f"\nEvaluation Summary:")
+        print(f"  Average Return: {avg_return:.2f}")
+        print(f"  Average Length: {avg_length:.1f}")
+        print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
+        print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
+        print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
+        print(f"  Success Rate: {success_rate*100:.1f}%\n")
+
+    return eval_stats
+
+
+def evaluate_single_agent_policy(
+    env: 'BiddingGridworld',
+    policy_fn,
+    num_episodes: int,
+    target_expiry_penalty: float = 0.0,
+    verbose: bool = True
+) -> Dict[str, List]:
+    """
+    Evaluate a single-agent policy on the environment.
+
+    Args:
+        env: BiddingGridworld environment (single-agent mode)
+        policy_fn: Callable that takes observation (shape: [obs_dim]) and returns
+                  action (scalar or shape: [1]). Should be deterministic for evaluation.
+        num_episodes: Number of episodes to evaluate
+        target_expiry_penalty: Target expiry penalty value (for counting expired targets)
+        verbose: Whether to print progress
+
+    Returns:
+        Dictionary containing evaluation statistics:
+        - episode_returns: List of total returns per episode
+        - episode_lengths: List of episode lengths
+        - targets_reached_per_episode: List of unique targets reached per episode
+        - expired_targets_per_episode: List of expired targets per episode
+        - min_targets_reached_per_episode: List of minimum reaches across targets
+        - targets_reached_count_per_episode: List of per-target reach counts
+        - episode_data_list: List of episode data dicts (states, actions, rewards)
+    """
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Evaluating single-agent policy")
+        print(f"Running {num_episodes} episodes")
+        print(f"{'='*60}\n")
+
+    eval_stats = {
+        "episode_returns": [],
+        "episode_lengths": [],
+        "targets_reached_per_episode": [],
+        "expired_targets_per_episode": [],
+        "min_targets_reached_per_episode": [],
+        "targets_reached_count_per_episode": [],
+        "episode_data_list": [],
+    }
+
+    for episode_idx in range(num_episodes):
+        # Reset environment
+        obs, _ = env.reset()
+
+        # Episode tracking
+        episode_states = []
+        episode_actions = []
+        episode_rewards = []
+        episode_return = 0
+        step_count = 0
+        terminated = False
+        truncated = False
+
+        # Track expired targets and targets reached per target
+        episode_expired_count = 0
+        targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)  # num_agents = num_targets in single mode
+
+        while not (terminated or truncated):
+            # Store state
+            episode_states.append(obs.copy())
+
+            # Get action from policy
+            action = policy_fn(obs)  # Should return scalar or [1]
+            if isinstance(action, np.ndarray):
+                action = int(action.item())
+            else:
+                action = int(action)
+
+            episode_actions.append(action)
+
+            # Step environment
+            obs, reward, terminated, truncated, info = env.step(action)
+
+            episode_return += reward
+            episode_rewards.append(reward)
+
+            # Track expired targets (if expiry is enabled)
+            if target_expiry_penalty > 0:
+                if reward <= -target_expiry_penalty:
+                    episode_expired_count += 1
+
+            # Track targets reached using info dict
+            targets_just_reached = info.get("targets_just_reached", {})
+            for target_idx in range(env.num_agents):
+                if targets_just_reached.get(target_idx, False):
+                    targets_reached_count[target_idx] += 1
+
+            step_count += 1
+
+        # Count total targets reached (at least once during episode)
+        targets_reached = sum(1 for count in targets_reached_count if count > 0)
+        min_targets_reached = int(np.min(targets_reached_count))
+
+        eval_stats["episode_returns"].append(episode_return)
+        eval_stats["episode_lengths"].append(step_count)
+        eval_stats["targets_reached_per_episode"].append(targets_reached)
+        eval_stats["expired_targets_per_episode"].append(episode_expired_count)
+        eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
+        eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
+
+        # Store episode data for visualization
+        episode_data = {
+            "states": episode_states,
+            "actions": episode_actions,
+            "rewards": episode_rewards,
+        }
+        eval_stats["episode_data_list"].append(episode_data)
+
+        if verbose:
+            print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
+                  f"Length={step_count}, Targets={targets_reached}/{env.num_agents}, "
+                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
+
+    if verbose:
+        avg_return = np.mean(eval_stats["episode_returns"])
+        avg_length = np.mean(eval_stats["episode_lengths"])
+        avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
+        avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
+        success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
+                          if t == env.num_agents) / num_episodes
+
+        print(f"\nEvaluation Summary:")
+        print(f"  Average Return: {avg_return:.2f}")
+        print(f"  Average Length: {avg_length:.1f}")
+        print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
+        print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
+        print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
+        print(f"  Success Rate: {success_rate*100:.1f}%\n")
+
+    return eval_stats
+
+
 def create_random_action(num_agents: int = 2, bid_upper_bound: int = 10, window_bidding: bool = False, action_window: int = 1) -> Dict:
     """Helper function to create a random action for testing."""
     action = {}
@@ -1100,9 +1400,11 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         # Execute parent step (agent movement and reward calculation)
         obs, rewards, terminated, truncated, info = super().step(action)
 
-        # Save winning_agent and bids from parent step
+        # Save winning_agent, bids, and targets_just_reached from parent step
+        # targets_just_reached indicates which targets were reached BEFORE they moved/respawned
         winning_agent = info.get("winning_agent", -1)
         bids = info.get("bids", {})
+        targets_just_reached = info.get("targets_just_reached", {})
 
         # Move targets after agent has moved
         self._move_targets()
@@ -1111,9 +1413,10 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         obs = self._get_observation()
         info = self._get_info()
 
-        # Restore winning_agent and bids from parent step
+        # Restore winning_agent, bids, and targets_just_reached from parent step
         info["winning_agent"] = winning_agent
         info["bids"] = bids
+        info["targets_just_reached"] = targets_just_reached
 
         # terminated is always false in this moving targets version
         terminated = False

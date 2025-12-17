@@ -121,3 +121,58 @@ With `--moving-targets` flag:
 - Targets move randomly with configurable probability
 - Observations track actual target positions (not fixed positions)
 - Tests agent adaptability to dynamic objectives
+
+## Evaluating Trained Models
+
+Use `evaluate_trained_models.py` to evaluate saved checkpoints:
+
+```bash
+source venv/bin/activate
+python evaluate_trained_models.py
+```
+
+### Configuration
+
+Edit the script's `main()` function to customize:
+
+```python
+# Experiment directories to evaluate
+SINGLE_AGENT_EXP = "logs/ppo_moving_targets_single_agent_exp5_20251216_214906"
+MULTI_AGENT_EXP = "logs/ppo_moving_targets_exp8_20251216_214612"
+
+# Evaluation settings
+NUM_EVAL_EPISODES = 20  # Number of episodes to run
+NUM_GIF_EPISODES = 5    # Number of GIFs to create
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+```
+
+### Output
+
+Creates an `evaluation/` subdirectory in each experiment folder:
+
+```
+logs/[experiment_name]/evaluation/eval_[timestamp]/
+├── episode_0.gif          # Episode visualization
+├── episode_1.gif
+├── ...
+├── episode_N.gif
+└── eval_stats.json        # Comprehensive statistics
+```
+
+### Key Statistics
+
+The `eval_stats.json` includes:
+- **avg_return**: Average total return per episode
+- **avg_targets_reached**: Average unique targets reached per episode
+- **avg_min_targets_reached**: Minimum reaches across all agents/targets
+- **success_rate**: Percentage of episodes where all targets reached
+- **avg_expired_targets**: Average target expiries per episode
+- **per_episode**: Detailed per-episode breakdown
+
+### Features
+
+- Automatically loads latest checkpoint from experiment
+- Uses deterministic (greedy) policy for reproducible evaluation
+- Correctly tracks targets with moving targets that respawn
+- Handles observation reordering for multi-agent models
+- Supports window bidding and target expiry mechanisms
