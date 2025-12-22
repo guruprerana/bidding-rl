@@ -68,6 +68,8 @@ class Args:
     """whether agents can choose their control window length"""
     window_penalty: float = 0.0
     """penalty multiplier for chosen window length (only applies when window_bidding=True)"""
+    visible_targets: Optional[int] = None
+    """number of nearest other targets visible to each agent (None = all targets visible, centralized)"""
 
     # Algorithm specific arguments
     total_timesteps: int = 500000
@@ -117,16 +119,19 @@ class BiddingEnvWrapper(gym.Wrapper):
     Wrapper to convert the multi-agent BiddingGridworld to a format compatible with vectorized training.
 
     Key features:
-    - Reorders target observations so each agent's target appears first
+    - Handles both centralized (Box) and decentralized (Dict) observation modes
+    - For centralized: Reorders target observations so each agent's target appears first
+    - For decentralized: Directly stacks per-agent observations from Dict
     - Flattens multi-agent actions/rewards into single vectors for parallel processing
-    - Each agent gets the same base observation but with reordered target information
 
-    Observation structure from BiddingGridworld:
-    [agent_pos (2), target_positions (2*num_agents), target_reached (num_agents), target_counters (num_agents), window_steps_remaining (1)]
+    Centralized mode (visible_targets=None):
+    - Base env returns Box observation with all targets
+    - We reorder for each agent so their target appears first
 
-    For agent pursuing target_idx, we reorder to:
-    [agent_pos (2), target_idx_pos (2), other_targets (2*(num_agents-1)),
-     target_idx_reached (1), other_reached (num_agents-1), target_idx_counter (1), other_counters (num_agents-1), window_steps_remaining (1)]
+    Decentralized mode (visible_targets<num_agents):
+    - Base env returns Dict of per-agent observations
+    - Each agent already sees own target + nearest visible targets
+    - We just stack the Dict values into an array
     """
 
     def __init__(self, env, num_agents, window_bidding=False):
@@ -134,11 +139,19 @@ class BiddingEnvWrapper(gym.Wrapper):
         self.num_agents = num_agents
         self.window_bidding = window_bidding
 
-        # Original observation dimension from BiddingGridworld (no change in size)
-        base_obs_dim = env.observation_space.shape[0]
+        # Check if environment uses per-agent observations (Dict space) or centralized (Box space)
+        self.use_per_agent_obs = isinstance(env.observation_space, gym.spaces.Dict)
 
-        # Observation space remains the same size, just reordered
-        # Shape is (num_agents, base_obs_dim) since we return stacked observations
+        if self.use_per_agent_obs:
+            # Decentralized mode: env returns Dict of observations
+            # Get the observation dimension from one agent's space
+            base_obs_dim = env.observation_space[f"agent_0"].shape[0]
+        else:
+            # Centralized mode: env returns single Box observation
+            # Original observation dimension from BiddingGridworld (no change in size)
+            base_obs_dim = env.observation_space.shape[0]
+
+        # Observation space is (num_agents, base_obs_dim) since we return stacked observations
         self.observation_space = gym.spaces.Box(
             low=0.0,
             high=1.0,
@@ -173,18 +186,23 @@ class BiddingEnvWrapper(gym.Wrapper):
         return reorder_observation_for_agent(base_obs, target_index, self.num_agents)
 
     def reset(self, **kwargs):
-        """Reset environment and return reordered observations for all agents."""
+        """Reset environment and return observations for all agents."""
         base_obs, info = self.env.reset(**kwargs)
 
-        # Create reordered observation for each agent (each pursuing different target)
-        obs_list = []
-        for agent_idx in range(self.num_agents):
-            reordered_obs = self._reorder_observation(base_obs, agent_idx)
-            obs_list.append(reordered_obs)
-
-        # Stack all agent observations into single array for vectorized processing
-        # Shape: (num_agents, obs_dim)
-        stacked_obs = np.stack(obs_list, axis=0)
+        if self.use_per_agent_obs:
+            # Decentralized mode: base_obs is a Dict with per-agent observations
+            # Stack them in order: agent_0, agent_1, ..., agent_n
+            obs_list = [base_obs[f"agent_{i}"] for i in range(self.num_agents)]
+            stacked_obs = np.stack(obs_list, axis=0)
+        else:
+            # Centralized mode: reorder observation for each agent (each pursuing different target)
+            obs_list = []
+            for agent_idx in range(self.num_agents):
+                reordered_obs = self._reorder_observation(base_obs, agent_idx)
+                obs_list.append(reordered_obs)
+            # Stack all agent observations into single array for vectorized processing
+            # Shape: (num_agents, obs_dim)
+            stacked_obs = np.stack(obs_list, axis=0)
 
         return stacked_obs, info
 
@@ -229,13 +247,18 @@ class BiddingEnvWrapper(gym.Wrapper):
         # Execute step in underlying environment
         base_obs, rewards_dict, terminated, truncated, info = self.env.step(env_action)
 
-        # Create reordered observations for all agents
-        obs_list = []
-        for agent_idx in range(self.num_agents):
-            reordered_obs = self._reorder_observation(base_obs, agent_idx)
-            obs_list.append(reordered_obs)
-
-        stacked_obs = np.stack(obs_list, axis=0)
+        if self.use_per_agent_obs:
+            # Decentralized mode: base_obs is a Dict with per-agent observations
+            # Stack them in order: agent_0, agent_1, ..., agent_n
+            obs_list = [base_obs[f"agent_{i}"] for i in range(self.num_agents)]
+            stacked_obs = np.stack(obs_list, axis=0)
+        else:
+            # Centralized mode: reorder observations for all agents
+            obs_list = []
+            for agent_idx in range(self.num_agents):
+                reordered_obs = self._reorder_observation(base_obs, agent_idx)
+                obs_list.append(reordered_obs)
+            stacked_obs = np.stack(obs_list, axis=0)
 
         # Extract rewards for all agents in order
         rewards_array = np.array([
@@ -264,7 +287,8 @@ def make_env(args, idx, run_name):
                 direction_change_prob=args.direction_change_prob,
                 target_move_interval=args.target_move_interval,
                 window_bidding=args.window_bidding,
-                window_penalty=args.window_penalty
+                window_penalty=args.window_penalty,
+                visible_targets=args.visible_targets
             )
         else:
             env = BiddingGridworld(
@@ -279,7 +303,8 @@ def make_env(args, idx, run_name):
                 target_expiry_steps=args.target_expiry_steps,
                 target_expiry_penalty=args.target_expiry_penalty,
                 window_bidding=args.window_bidding,
-                window_penalty=args.window_penalty
+                window_penalty=args.window_penalty,
+                visible_targets=args.visible_targets
             )
 
         # Wrap with our custom wrapper
@@ -628,6 +653,10 @@ class PPOTrainer:
         print(f"🚀 PPO Trainer initialized")
         print(f"   Device: {self.device}")
         print(f"   Observation dim: {self.obs_dim}")
+        if self.args.visible_targets is None:
+            print(f"   Observation mode: Centralized (all agents see all targets)")
+        else:
+            print(f"   Observation mode: Decentralized (visible_targets={self.args.visible_targets})")
         print(f"   Window bidding: {self.args.window_bidding}")
         if self.args.window_bidding:
             print(f"   Window penalty: {self.args.window_penalty}")

@@ -55,6 +55,7 @@ class PPOMovingTargetsExperiment:
         num_eval_episodes: int = 3,
         num_gif_episodes: int = 3,
         single_agent_mode: bool = False,
+        eval_max_steps: int = 600,
     ):
         """
         Initialize the experiment.
@@ -67,6 +68,7 @@ class PPOMovingTargetsExperiment:
             num_eval_episodes: Number of episodes per evaluation
             num_gif_episodes: Number of episodes to save as GIFs
             single_agent_mode: If True, use single-agent PPO; if False, use multi-agent PPO
+            eval_max_steps: Maximum steps per episode during evaluation
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
@@ -79,6 +81,7 @@ class PPOMovingTargetsExperiment:
         self.num_eval_episodes = num_eval_episodes
         self.num_gif_episodes = num_gif_episodes
         self.single_agent_mode = single_agent_mode
+        self.eval_max_steps = eval_max_steps
 
         # Create directory structure
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +175,7 @@ class PPOMovingTargetsExperiment:
             bid_upper_bound=trainer.args.bid_upper_bound,
             bid_penalty=trainer.args.bid_penalty,
             target_reward=trainer.args.target_reward,
-            max_steps=600,  # Use 600 for evaluation
+            max_steps=self.eval_max_steps,
             action_window=trainer.args.action_window,
             distance_reward_scale=trainer.args.distance_reward_scale,
             target_expiry_steps=trainer.args.target_expiry_steps,
@@ -181,20 +184,29 @@ class PPOMovingTargetsExperiment:
             target_move_interval=trainer.args.target_move_interval,
             window_bidding=trainer.args.window_bidding,
             window_penalty=trainer.args.window_penalty,
+            visible_targets=trainer.args.visible_targets,
         )
+
+        # Check if we're using per-agent observations (decentralized mode)
+        use_per_agent_obs = trainer.args.visible_targets is not None and trainer.args.visible_targets < trainer.args.num_agents
 
         # Create policy wrapper function
         def policy_fn(base_obs):
             """Convert base observation to agent-specific observations and get actions."""
-            # Prepare observations for all agents (reorder targets)
-            obs_list = []
-            for agent_idx in range(trainer.args.num_agents):
-                reordered_obs = reorder_observation_for_agent(
-                    base_obs, agent_idx, trainer.args.num_agents
-                )
-                obs_list.append(reordered_obs)
-
-            obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
+            if use_per_agent_obs:
+                # Decentralized mode: base_obs is already a Dict with per-agent observations
+                # Stack them in order: agent_0, agent_1, ..., agent_n
+                obs_list = [base_obs[f"agent_{i}"] for i in range(trainer.args.num_agents)]
+                obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
+            else:
+                # Centralized mode: reorder targets for each agent
+                obs_list = []
+                for agent_idx in range(trainer.args.num_agents):
+                    reordered_obs = reorder_observation_for_agent(
+                        base_obs, agent_idx, trainer.args.num_agents
+                    )
+                    obs_list.append(reordered_obs)
+                obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
 
             # Get actions (deterministic for evaluation)
             with torch.no_grad():
@@ -291,7 +303,7 @@ class PPOMovingTargetsExperiment:
                 grid_size=trainer.args.grid_size,
                 num_agents=trainer.args.num_targets,
                 target_reward=trainer.args.target_reward,
-                max_steps=600,  # Use 600 for evaluation
+                max_steps=self.eval_max_steps,
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
@@ -305,7 +317,7 @@ class PPOMovingTargetsExperiment:
                 grid_size=trainer.args.grid_size,
                 num_agents=trainer.args.num_targets,
                 target_reward=trainer.args.target_reward,
-                max_steps=600,  # Use 600 for evaluation
+                max_steps=self.eval_max_steps,
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
@@ -480,39 +492,41 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_single_agent_exp6"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_exp9"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 5000  # Save checkpoint every N iterations
     EVAL_FREQ = 5000  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 100  # Number of episodes per evaluation
     NUM_GIF_EPISODES = 3  # Number of episodes to save as GIFs
 
     # Environment parameters
-    GRID_SIZE = 15
-    NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
-    TARGET_REWARD = 1.0
-    MAX_STEPS = 300  # For training (evaluation uses 600)
+    GRID_SIZE = 50
+    NUM_AGENTS = 10  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    TARGET_REWARD = 20.0
+    MAX_STEPS = 1000  # Maximum steps per episode during training
+    EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
     DISTANCE_REWARD_SCALE = 0.01
     TARGET_EXPIRY_STEPS = 40
     TARGET_EXPIRY_PENALTY = 100.0
-    REWARD_DECAY_FACTOR = 0.5  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
+    REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
 
     # Multi-agent specific parameters (ignored in single-agent mode)
-    BID_UPPER_BOUND = 5
+    BID_UPPER_BOUND = 10
     BID_PENALTY = 0.05
-    ACTION_WINDOW = 8
+    ACTION_WINDOW = 10
     WINDOW_BIDDING = True  # Set to True to let agents choose their window length
     WINDOW_PENALTY = 0.05  # Penalty per window step (only applies when WINDOW_BIDDING = True)
+    VISIBLE_TARGETS = 3  # Set to None for centralized (all targets visible), or N for decentralized (each agent sees own target + N nearest others)
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
     DIRECTION_CHANGE_PROB = 0.1
     TARGET_MOVE_INTERVAL = 2
 
     # Training parameters
-    TOTAL_TIMESTEPS = int(5e7)
+    TOTAL_TIMESTEPS = int(1e8)
     LEARNING_RATE = 2.5e-4
     NUM_ENVS = 4
     NUM_STEPS = 128
@@ -579,6 +593,7 @@ def main():
             target_move_interval=TARGET_MOVE_INTERVAL,
             window_bidding=WINDOW_BIDDING,
             window_penalty=WINDOW_PENALTY,
+            visible_targets=VISIBLE_TARGETS,
 
             # Training config
             total_timesteps=TOTAL_TIMESTEPS,
@@ -595,6 +610,7 @@ def main():
         num_eval_episodes=NUM_EVAL_EPISODES,
         num_gif_episodes=NUM_GIF_EPISODES,
         single_agent_mode=SINGLE_AGENT_MODE,
+        eval_max_steps=EVAL_MAX_STEPS,
     )
 
     experiment.run(args)

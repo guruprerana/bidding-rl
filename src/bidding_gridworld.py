@@ -39,6 +39,7 @@ class BiddingGridworld(gym.Env):
         window_bidding: bool = False,
         window_penalty: float = 0.0,
         reward_decay_factor: float = 0.0,
+        visible_targets: Optional[int] = None,
         render_mode: Optional[str] = None
     ):
         """
@@ -74,6 +75,11 @@ class BiddingGridworld(gym.Env):
                                 When > 0, target rewards are multiplied by exp(-decay_factor * relative_count)
                                 where relative_count = (times_target_reached - min_count_across_targets)
                                 This incentivizes balanced pursuit of all targets.
+            visible_targets: Number of nearest other targets visible to each agent (multi-agent mode only) (default: None)
+                            When None, agents see all targets (centralized, current behavior).
+                            When set to N, each agent sees their own target plus the N nearest other targets.
+                            This creates decentralized observations where agents have limited visibility.
+                            Only applies in multi-agent mode; ignored in single-agent mode.
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
@@ -107,6 +113,19 @@ class BiddingGridworld(gym.Env):
         self.window_bidding = window_bidding
         self.window_penalty = window_penalty
         self.reward_decay_factor = reward_decay_factor
+
+        # Set visible_targets: default to seeing all targets
+        if visible_targets is None:
+            self.visible_targets = num_agents
+        else:
+            assert visible_targets >= 0, "visible_targets must be non-negative"
+            assert visible_targets < num_agents, \
+                f"visible_targets must be less than num_agents ({num_agents}), got {visible_targets}"
+            self.visible_targets = visible_targets
+
+        # Per-agent observations only used in multi-agent mode with limited visibility
+        self.use_per_agent_obs = (not single_agent_mode) and (self.visible_targets < num_agents)
+
         self.render_mode = render_mode
 
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
@@ -141,17 +160,36 @@ class BiddingGridworld(gym.Env):
                 })
         
         # Observation space: Box vector for NN policies (normalized to [0, 1])
-        # Base: [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
-        #        target0_reached, target1_reached, ..., target0_step_counter_norm, target1_step_counter_norm, ...,
-        #        window_steps_remaining_norm]
+        # In multi-agent mode with limited visibility (use_per_agent_obs=True):
+        #   Each agent has their own observation containing:
+        #   [agent_pos, own_target_pos, nearest_visible_targets_pos, own_target_reached,
+        #    visible_targets_reached, own_target_counter, window_remaining]
+        # In centralized mode (use_per_agent_obs=False):
+        #   Single shared observation containing all targets
         # Single-agent mode adds: [target0_count_relative, target1_count_relative, ...]
         #   where target_i_count_relative = (count[i] - min_count) normalized
-        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags) +
-        #        num_agents (step counters) + 1 (window steps remaining) + [num_agents (relative counts) if single_agent_mode else 0]
-        obs_dim = 2 + 2 * num_agents + num_agents + num_agents + 1
-        if single_agent_mode:
-            obs_dim += num_agents  # Add relative target counts
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
+
+        if self.use_per_agent_obs:
+            # Per-agent observations: each agent sees own target + visible_targets nearest others
+            # obs_dim = 2 (agent_pos) + 2 (own_target) + 2*visible_targets (other targets) +
+            #          1 (own_reached) + visible_targets (others_reached) +
+            #          1 (own_counter) + 1 (window_remaining)
+            obs_dim_per_agent = 7 + 3 * self.visible_targets
+            self.observation_space = spaces.Dict({
+                f"agent_{i}": spaces.Box(low=0.0, high=1.0, shape=(obs_dim_per_agent,), dtype=np.float32)
+                for i in range(num_agents)
+            })
+        else:
+            # Centralized observation: all agents see all targets (current behavior)
+            # Base: [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
+            #        target0_reached, target1_reached, ..., target0_step_counter_norm, target1_step_counter_norm, ...,
+            #        window_steps_remaining_norm]
+            # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags) +
+            #        num_agents (step counters) + 1 (window steps remaining) + [num_agents (relative counts) if single_agent_mode else 0]
+            obs_dim = 2 + 2 * num_agents + num_agents + num_agents + 1
+            if single_agent_mode:
+                obs_dim += num_agents  # Add relative target counts
+            self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
         
         # Initialize environment state
         self.reset()
@@ -493,51 +531,103 @@ class BiddingGridworld(gym.Env):
 
         return reward
 
-    def _get_observation(self) -> np.ndarray:
-        """Get current observation as a normalized vector in [0, 1]."""
+    def _get_observation(self):
+        """Get current observation as a normalized vector or dict of vectors in [0, 1]."""
         # Normalize positions to [0,1]; guard division for grid_size==1
         denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
         agent_row_norm = float(self.agent_position[0]) / denom
         agent_col_norm = float(self.agent_position[1]) / denom
 
-        # Build observation: [agent_pos, target_0_pos, ..., target_n_pos, target_0_reached, ..., target_n_reached, target_0_counter, ..., target_n_counter, window_steps_remaining]
-        obs_list = [agent_row_norm, agent_col_norm]
-
-        # Add all target positions
-        for target_pos in self.target_positions:
-            t_row_norm = float(target_pos[0]) / denom
-            t_col_norm = float(target_pos[1]) / denom
-            obs_list.extend([t_row_norm, t_col_norm])
-
-        # Add all target reached flags
-        for i in range(self.num_agents):
-            obs_list.append(float(self.targets_reached[i]))
-
-        # Add all target step counters (normalized)
-        # Normalize by target_expiry_steps if set, otherwise by max_steps
+        # Normalization denominators
         counter_denom = float(self.target_expiry_steps) if self.target_expiry_steps is not None else float(self.max_steps)
-        counter_denom = max(counter_denom, 1.0)  # Avoid division by zero
-        for i in range(self.num_agents):
-            counter_norm = min(float(self.target_step_counters[i]) / counter_denom, 1.0)  # Clamp to [0, 1]
-            obs_list.append(counter_norm)
-
-        # Add window steps remaining (normalized by action_window)
-        window_denom = max(float(self.action_window), 1.0)  # Avoid division by zero
+        counter_denom = max(counter_denom, 1.0)
+        window_denom = max(float(self.action_window), 1.0)
         window_steps_norm = float(self.window_steps_remaining) / window_denom
-        obs_list.append(window_steps_norm)
 
-        # In single-agent mode, add relative target counts (count - min_count)
-        if self.single_agent_mode:
-            min_count = int(np.min(self.targets_reached_count))
-            # Normalize by num_agents (reasonable upper bound for differences)
-            count_denom = max(float(self.num_agents), 1.0)
+        if self.use_per_agent_obs:
+            # Per-agent observations: each agent sees own target + visible_targets nearest others
+            observations = {}
+
+            for agent_id in range(self.num_agents):
+                obs_list = [agent_row_norm, agent_col_norm]
+
+                # Add own target position
+                own_target_pos = self.target_positions[agent_id]
+                own_t_row_norm = float(own_target_pos[0]) / denom
+                own_t_col_norm = float(own_target_pos[1]) / denom
+                obs_list.extend([own_t_row_norm, own_t_col_norm])
+
+                # Find nearest visible_targets other targets (not including own target)
+                other_targets = [(i, self.target_positions[i]) for i in range(self.num_agents) if i != agent_id]
+
+                # Calculate distances to other targets (Manhattan distance)
+                distances = []
+                for other_id, other_pos in other_targets:
+                    dist = abs(self.agent_position[0] - other_pos[0]) + abs(self.agent_position[1] - other_pos[1])
+                    distances.append((dist, other_id, other_pos))
+
+                # Sort by distance and take the nearest visible_targets targets
+                distances.sort(key=lambda x: x[0])
+                visible_other_targets = distances[:self.visible_targets]
+
+                # Add visible target positions
+                for _, other_id, other_pos in visible_other_targets:
+                    other_t_row_norm = float(other_pos[0]) / denom
+                    other_t_col_norm = float(other_pos[1]) / denom
+                    obs_list.extend([other_t_row_norm, other_t_col_norm])
+
+                # Add own target reached flag
+                obs_list.append(float(self.targets_reached[agent_id]))
+
+                # Add visible targets reached flags
+                for _, other_id, _ in visible_other_targets:
+                    obs_list.append(float(self.targets_reached[other_id]))
+
+                # Add own target counter
+                own_counter_norm = min(float(self.target_step_counters[agent_id]) / counter_denom, 1.0)
+                obs_list.append(own_counter_norm)
+
+                # Add window steps remaining
+                obs_list.append(window_steps_norm)
+
+                observations[f"agent_{agent_id}"] = np.array(obs_list, dtype=np.float32)
+
+            return observations
+        else:
+            # Centralized observation: all agents see all targets (current behavior)
+            # Build observation: [agent_pos, target_0_pos, ..., target_n_pos, target_0_reached, ..., target_n_reached, target_0_counter, ..., target_n_counter, window_steps_remaining]
+            obs_list = [agent_row_norm, agent_col_norm]
+
+            # Add all target positions
+            for target_pos in self.target_positions:
+                t_row_norm = float(target_pos[0]) / denom
+                t_col_norm = float(target_pos[1]) / denom
+                obs_list.extend([t_row_norm, t_col_norm])
+
+            # Add all target reached flags
             for i in range(self.num_agents):
-                relative_count = float(self.targets_reached_count[i] - min_count)
-                relative_count_norm = min(relative_count / count_denom, 1.0)  # Clamp to [0, 1]
-                obs_list.append(relative_count_norm)
+                obs_list.append(float(self.targets_reached[i]))
 
-        obs = np.array(obs_list, dtype=np.float32)
-        return obs
+            # Add all target step counters (normalized)
+            for i in range(self.num_agents):
+                counter_norm = min(float(self.target_step_counters[i]) / counter_denom, 1.0)  # Clamp to [0, 1]
+                obs_list.append(counter_norm)
+
+            # Add window steps remaining (normalized by action_window)
+            obs_list.append(window_steps_norm)
+
+            # In single-agent mode, add relative target counts (count - min_count)
+            if self.single_agent_mode:
+                min_count = int(np.min(self.targets_reached_count))
+                # Normalize by num_agents (reasonable upper bound for differences)
+                count_denom = max(float(self.num_agents), 1.0)
+                for i in range(self.num_agents):
+                    relative_count = float(self.targets_reached_count[i] - min_count)
+                    relative_count_norm = min(relative_count / count_denom, 1.0)  # Clamp to [0, 1]
+                    obs_list.append(relative_count_norm)
+
+            obs = np.array(obs_list, dtype=np.float32)
+            return obs
     
     def _get_info(self) -> Dict:
         """Get additional information."""
@@ -1354,6 +1444,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         window_bidding: bool = False,
         window_penalty: float = 0.0,
         reward_decay_factor: float = 0.0,
+        visible_targets: Optional[int] = None,
         render_mode: Optional[str] = None
     ):
         """
@@ -1384,6 +1475,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             window_bidding: If True, agents can choose their control window length (1 to action_window) (default: False)
             window_penalty: Penalty multiplier for chosen window length (default: 0.0)
             reward_decay_factor: Reward decay based on relative target count (single-agent mode only) (default: 0.0)
+            visible_targets: Number of nearest other targets visible to each agent (multi-agent mode only) (default: None)
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -1402,6 +1494,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             window_bidding=window_bidding,
             window_penalty=window_penalty,
             reward_decay_factor=reward_decay_factor,
+            visible_targets=visible_targets,
             render_mode=render_mode
         )
 
