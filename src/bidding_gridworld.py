@@ -38,6 +38,7 @@ class BiddingGridworld(gym.Env):
         single_agent_mode: bool = False,
         window_bidding: bool = False,
         window_penalty: float = 0.0,
+        reward_decay_factor: float = 0.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -69,6 +70,10 @@ class BiddingGridworld(gym.Env):
             window_penalty: Penalty multiplier for chosen window length (default: 0.0)
                            When window_bidding is enabled, agents pay window_penalty * chosen_window
                            Applied only on the first step of the window (similar to bid_penalty)
+            reward_decay_factor: Reward decay based on relative target count (single-agent mode only) (default: 0.0)
+                                When > 0, target rewards are multiplied by exp(-decay_factor * relative_count)
+                                where relative_count = (times_target_reached - min_count_across_targets)
+                                This incentivizes balanced pursuit of all targets.
             render_mode: Rendering mode (default: None)
         """
         super().__init__()
@@ -101,6 +106,7 @@ class BiddingGridworld(gym.Env):
         self.target_expiry_penalty = target_expiry_penalty
         self.window_bidding = window_bidding
         self.window_penalty = window_penalty
+        self.reward_decay_factor = reward_decay_factor
         self.render_mode = render_mode
 
         # Actions: 0=Left, 1=Right, 2=Up, 3=Down
@@ -135,10 +141,16 @@ class BiddingGridworld(gym.Env):
                 })
         
         # Observation space: Box vector for NN policies (normalized to [0, 1])
-        # [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
-        #  target0_reached, target1_reached, ..., target0_step_counter_norm, target1_step_counter_norm, ..., window_steps_remaining_norm]
-        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags) + num_agents (step counters) + 1 (window steps remaining)
+        # Base: [agent_row_norm, agent_col_norm, target0_row_norm, target0_col_norm, ...,
+        #        target0_reached, target1_reached, ..., target0_step_counter_norm, target1_step_counter_norm, ...,
+        #        window_steps_remaining_norm]
+        # Single-agent mode adds: [target0_count_relative, target1_count_relative, ...]
+        #   where target_i_count_relative = (count[i] - min_count) normalized
+        # Shape: 2 (agent position) + 2 * num_agents (target positions) + num_agents (target reached flags) +
+        #        num_agents (step counters) + 1 (window steps remaining) + [num_agents (relative counts) if single_agent_mode else 0]
         obs_dim = 2 + 2 * num_agents + num_agents + num_agents + 1
+        if single_agent_mode:
+            obs_dim += num_agents  # Add relative target counts
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32)
         
         # Initialize environment state
@@ -176,6 +188,9 @@ class BiddingGridworld(gym.Env):
 
         # Track which targets have been reached
         self.targets_reached = np.zeros(self.num_agents, dtype=np.int32)
+
+        # Track how many times each target has been reached (for single-agent mode)
+        self.targets_reached_count = np.zeros(self.num_agents, dtype=np.int32)
 
         # Track per-target step counters for expiry mechanism
         self.target_step_counters = np.zeros(self.num_agents, dtype=np.int32)
@@ -292,6 +307,7 @@ class BiddingGridworld(gym.Env):
         for i in range(self.num_agents):
             if np.array_equal(self.agent_position, self.target_positions[i]) and self.targets_reached[i] == 0:
                 self.targets_reached[i] = 1
+                self.targets_reached_count[i] += 1  # Increment the count of times this target has been reached
                 targets_just_reached[i] = True
                 # Reset counter when target is reached
                 self.target_step_counters[i] = 0
@@ -456,7 +472,19 @@ class BiddingGridworld(gym.Env):
         # Target rewards (sum for all targets reached this step)
         for i in range(self.num_agents):
             if targets_just_reached[i]:
-                reward += self.target_reward
+                target_reward = self.target_reward
+
+                # Apply reward decay based on relative count (only in single-agent mode)
+                if self.single_agent_mode and self.reward_decay_factor > 0:
+                    # Calculate relative count (how many more times this target was reached vs least-reached)
+                    min_count = int(np.min(self.targets_reached_count))
+                    relative_count = self.targets_reached_count[i] - min_count
+
+                    # Apply exponential decay: reward = base_reward * exp(-decay_factor * relative_count)
+                    decay_multiplier = np.exp(-self.reward_decay_factor * relative_count)
+                    target_reward *= decay_multiplier
+
+                reward += target_reward
 
         # Target expiry penalties (sum for all targets that expired)
         for i in range(self.num_agents):
@@ -498,6 +526,16 @@ class BiddingGridworld(gym.Env):
         window_steps_norm = float(self.window_steps_remaining) / window_denom
         obs_list.append(window_steps_norm)
 
+        # In single-agent mode, add relative target counts (count - min_count)
+        if self.single_agent_mode:
+            min_count = int(np.min(self.targets_reached_count))
+            # Normalize by num_agents (reasonable upper bound for differences)
+            count_denom = max(float(self.num_agents), 1.0)
+            for i in range(self.num_agents):
+                relative_count = float(self.targets_reached_count[i] - min_count)
+                relative_count_norm = min(relative_count / count_denom, 1.0)  # Clamp to [0, 1]
+                obs_list.append(relative_count_norm)
+
         obs = np.array(obs_list, dtype=np.float32)
         return obs
     
@@ -513,6 +551,11 @@ class BiddingGridworld(gym.Env):
             distance = abs(self.agent_position[0] - self.target_positions[i][0]) + \
                       abs(self.agent_position[1] - self.target_positions[i][1])
             info[f"manhattan_distance_to_target_{i}"] = distance
+
+        # In single-agent mode, add target reach counts and min count
+        if self.single_agent_mode:
+            info["targets_reached_count"] = self.targets_reached_count.tolist()
+            info["min_targets_reached"] = int(np.min(self.targets_reached_count))
 
         return info
     
@@ -1310,6 +1353,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
         single_agent_mode: bool = False,
         window_bidding: bool = False,
         window_penalty: float = 0.0,
+        reward_decay_factor: float = 0.0,
         render_mode: Optional[str] = None
     ):
         """
@@ -1339,6 +1383,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             single_agent_mode: If True, use single-agent mode with no bidding (default: False)
             window_bidding: If True, agents can choose their control window length (1 to action_window) (default: False)
             window_penalty: Penalty multiplier for chosen window length (default: 0.0)
+            reward_decay_factor: Reward decay based on relative target count (single-agent mode only) (default: 0.0)
             render_mode: Rendering mode (default: None)
         """
         super().__init__(
@@ -1356,6 +1401,7 @@ class MovingTargetBiddingGridworld(BiddingGridworld):
             single_agent_mode=single_agent_mode,
             window_bidding=window_bidding,
             window_penalty=window_penalty,
+            reward_decay_factor=reward_decay_factor,
             render_mode=render_mode
         )
 

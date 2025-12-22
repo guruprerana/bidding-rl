@@ -295,6 +295,7 @@ class PPOMovingTargetsExperiment:
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
+                reward_decay_factor=trainer.args.reward_decay_factor,
                 direction_change_prob=trainer.args.direction_change_prob,
                 target_move_interval=trainer.args.target_move_interval,
                 single_agent_mode=True
@@ -308,6 +309,7 @@ class PPOMovingTargetsExperiment:
                 distance_reward_scale=trainer.args.distance_reward_scale,
                 target_expiry_steps=trainer.args.target_expiry_steps,
                 target_expiry_penalty=trainer.args.target_expiry_penalty,
+                reward_decay_factor=trainer.args.reward_decay_factor,
                 single_agent_mode=True
             )
 
@@ -482,7 +484,7 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_single_agent_exp5"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_single_agent_exp6"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 5000  # Save checkpoint every N iterations
     EVAL_FREQ = 5000  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 100  # Number of episodes per evaluation
@@ -496,6 +498,7 @@ def main():
     DISTANCE_REWARD_SCALE = 0.01
     TARGET_EXPIRY_STEPS = 40
     TARGET_EXPIRY_PENALTY = 100.0
+    REWARD_DECAY_FACTOR = 0.5  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
 
     # Multi-agent specific parameters (ignored in single-agent mode)
     BID_UPPER_BOUND = 5
@@ -541,6 +544,7 @@ def main():
             distance_reward_scale=DISTANCE_REWARD_SCALE,
             target_expiry_steps=TARGET_EXPIRY_STEPS,
             target_expiry_penalty=TARGET_EXPIRY_PENALTY,
+            reward_decay_factor=REWARD_DECAY_FACTOR,
             moving_targets=MOVING_TARGETS,
             direction_change_prob=DIRECTION_CHANGE_PROB,
             target_move_interval=TARGET_MOVE_INTERVAL,

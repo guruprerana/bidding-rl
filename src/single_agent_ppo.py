@@ -51,6 +51,8 @@ class SingleAgentArgs:
     """maximum steps allowed before target expiry penalty"""
     target_expiry_penalty: float = 5.0
     """penalty for not reaching target within expiry_steps"""
+    reward_decay_factor: float = 0.0
+    """reward decay based on relative target count (0.0 = no decay)"""
     moving_targets: bool = False
     """whether to use moving targets variant"""
     direction_change_prob: float = 0.1
@@ -187,6 +189,7 @@ def make_env(args, idx, run_name):
                 distance_reward_scale=args.distance_reward_scale,
                 target_expiry_steps=args.target_expiry_steps,
                 target_expiry_penalty=args.target_expiry_penalty,
+                reward_decay_factor=args.reward_decay_factor,
                 direction_change_prob=args.direction_change_prob,
                 target_move_interval=args.target_move_interval,
                 single_agent_mode=True  # Enable single-agent mode
@@ -200,6 +203,7 @@ def make_env(args, idx, run_name):
                 distance_reward_scale=args.distance_reward_scale,
                 target_expiry_steps=args.target_expiry_steps,
                 target_expiry_penalty=args.target_expiry_penalty,
+                reward_decay_factor=args.reward_decay_factor,
                 single_agent_mode=True  # Enable single-agent mode
             )
 
@@ -271,9 +275,15 @@ class SingleAgentPPOTrainer:
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
 
+        # Calculate expected observation dimension components for single-agent mode
+        # Base: 2 (agent pos) + 2*num_targets (target pos) + num_targets (reached flags) +
+        #       num_targets (step counters) + 1 (window steps) + num_targets (relative counts)
+        expected_dim = 2 + 2*self.args.num_targets + self.args.num_targets + self.args.num_targets + 1 + self.args.num_targets
+
         print(f"🚀 Single-Agent PPO Trainer initialized")
         print(f"   Device: {self.device}")
-        print(f"   Observation dim: {self.obs_dim}")
+        print(f"   Observation dim: {self.obs_dim} (expected: {expected_dim})")
+        print(f"   Includes relative target counts (count - min_count) for fair pursuit")
         print(f"   Batch size: {self.args.batch_size}")
         print(f"   Num iterations: {self.args.num_iterations}")
         print(f"   Run name: {self.run_name}")
@@ -334,12 +344,32 @@ class SingleAgentPPOTrainer:
                 if "final_info" in infos:
                     for info in infos["final_info"]:
                         if info and "episode" in info:
-                            print(f"global_step={global_step}, episodic_return={info['episode']['r']:.2f}, episodic_length={info['episode']['l']}")
+                            # Extract target reach counts if available
+                            targets_reached_count = info.get("targets_reached_count", None)
+                            min_targets_reached = info.get("min_targets_reached", None)
+
+                            # Build log message
+                            log_msg = f"global_step={global_step}, episodic_return={info['episode']['r']:.2f}, episodic_length={info['episode']['l']}"
+                            if targets_reached_count is not None:
+                                log_msg += f", target_counts={targets_reached_count}, min_reached={min_targets_reached}"
+                            print(log_msg)
+
                             if self.args.track:
-                                wandb.log({
+                                log_dict = {
                                     "charts/episodic_return": info["episode"]["r"],
                                     "charts/episodic_length": info["episode"]["l"],
-                                }, step=global_step)
+                                }
+                                # Add target reach metrics if available
+                                if targets_reached_count is not None:
+                                    log_dict["charts/min_targets_reached"] = min_targets_reached
+                                    # Log individual target counts
+                                    for i, count in enumerate(targets_reached_count):
+                                        log_dict[f"charts/target_{i}_reached_count"] = count
+                                    # Log max-min spread (measure of balance)
+                                    spread = max(targets_reached_count) - min(targets_reached_count)
+                                    log_dict["charts/target_count_spread"] = spread
+
+                                wandb.log(log_dict, step=global_step)
 
             # Bootstrap value and compute advantages using shared utility
             with torch.no_grad():
