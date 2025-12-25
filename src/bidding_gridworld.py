@@ -713,10 +713,20 @@ class BiddingGridworld(gym.Env):
             target_agent_id: ID of the target being pursued
             fps: Frames per second for the animation
         """
-        fig, ax = plt.subplots(figsize=(10, 8))
+        # Scale figure size based on grid size
+        grid_size_inches = min(10, max(6, self.grid_size * 0.15))
+        info_width = 4
+        fig = plt.figure(figsize=(grid_size_inches + info_width, grid_size_inches))
+
+        # Create grid for layout: [grid_ax, info_ax]
+        gs = fig.add_gridspec(1, 2, width_ratios=[grid_size_inches, info_width], wspace=0.15)
+        grid_ax = fig.add_subplot(gs[0])
+        info_ax = fig.add_subplot(gs[1])
 
         def animate(frame):
-            ax.clear()
+            grid_ax.clear()
+            info_ax.clear()
+
             if frame >= len(episode_data["states"]):
                 return
 
@@ -731,13 +741,14 @@ class BiddingGridworld(gym.Env):
             target_reached_idx = 2 + 2 * self.num_agents + target_agent_id
             target_reached = int(state[target_reached_idx])
 
-            ax.set_xlim(-0.5, self.grid_size - 0.5)
-            ax.set_ylim(-0.5, self.grid_size - 0.5)
-            ax.set_aspect('equal')
+            # === Draw Grid ===
+            grid_ax.set_xlim(-0.5, self.grid_size - 0.5)
+            grid_ax.set_ylim(-0.5, self.grid_size - 0.5)
+            grid_ax.set_aspect('equal')
 
             for i in range(self.grid_size + 1):
-                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
-                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
+                grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
+                grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
             target_colors = ['lightblue', 'lightcoral', 'lightyellow']
             edge_colors = ['blue', 'red', 'orange']
@@ -752,33 +763,52 @@ class BiddingGridworld(gym.Env):
             edge_color = 'gold' if is_controlling else edge_colors[target_agent_id % 3]
 
             if target_reached == 0:
-                ax.add_patch(plt.Rectangle(
+                grid_ax.add_patch(plt.Rectangle(
                     (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
                     facecolor=target_colors[target_agent_id % 3],
                     edgecolor=edge_color, linewidth=edge_width
                 ))
-                ax.text(target_col, target_row, str(target_agent_id),
-                       ha='center', va='center', fontsize=12, fontweight='bold')
+                grid_ax.text(target_col, target_row, str(target_agent_id),
+                       ha='center', va='center', fontsize=10, fontweight='bold')
                 if is_controlling:
-                    ax.text(target_col, target_row - 0.6, '⚡',
-                           ha='center', va='center', fontsize=10, color='gold')
+                    grid_ax.text(target_col, target_row - 0.6, '⚡',
+                           ha='center', va='center', fontsize=8, color='gold')
             else:
-                ax.add_patch(plt.Rectangle(
+                grid_ax.add_patch(plt.Rectangle(
                     (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
                     facecolor='lightgreen', edgecolor='green', linewidth=2
                 ))
-                ax.text(target_col, target_row, '✓',
-                       ha='center', va='center', fontsize=12, fontweight='bold')
+                grid_ax.text(target_col, target_row, '✓',
+                       ha='center', va='center', fontsize=10, fontweight='bold')
 
             if winning_agent is not None and winning_agent >= 0:
                 ring_color = edge_colors[winning_agent % 3] if winning_agent != target_agent_id else 'gold'
-                ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
+                grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
                                        facecolor='none', edgecolor=ring_color, linewidth=3))
 
-            ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
+            grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
                                    facecolor='yellow', edgecolor='orange'))
-            ax.text(agent_col, agent_row, 'A',
-                   ha='center', va='center', fontsize=10, fontweight='bold')
+            grid_ax.text(agent_col, agent_row, 'A',
+                   ha='center', va='center', fontsize=9, fontweight='bold')
+
+            # Set grid title and ticks
+            grid_ax.set_title(f'Agent {target_agent_id} - Step {frame}', fontsize=11, fontweight='bold')
+
+            # Optimize tick marks for large grids
+            if self.grid_size <= 15:
+                tick_step = 1
+            elif self.grid_size <= 30:
+                tick_step = 2
+            else:
+                tick_step = 5
+
+            tick_positions = list(range(0, self.grid_size, tick_step))
+            grid_ax.set_xticks(tick_positions)
+            grid_ax.set_yticks(tick_positions)
+            grid_ax.invert_yaxis()
+
+            # === Draw Info Panel ===
+            info_ax.axis('off')
 
             # Extract reward for this agent
             reward = 0
@@ -799,8 +829,22 @@ class BiddingGridworld(gym.Env):
                     else:
                         total_reward += r
 
-            title = f'Agent {target_agent_id} - Step {frame} - Reward: {reward:.2f}\n'
-            title += f'Total Reward: {total_reward:.2f}'
+            # Build info text
+            info_lines = []
+            info_lines.append(f'AGENT ROLLOUT\n')
+            info_lines.append(f'Grid: {self.grid_size}x{self.grid_size}')
+            info_lines.append(f'Target: {target_agent_id}')
+            info_lines.append(f'')
+            info_lines.append(f'STATUS:')
+            info_lines.append(f'  Target: {"✓ Reached" if target_reached else "✗ Not Reached"}')
+            if is_controlling:
+                info_lines.append(f'  Control: ⚡ Active')
+            else:
+                info_lines.append(f'  Control: Waiting')
+            info_lines.append(f'')
+            info_lines.append(f'REWARDS:')
+            info_lines.append(f'  Step:  {reward:7.2f}')
+            info_lines.append(f'  Total: {total_reward:7.2f}')
 
             # Add bid and action information if available
             if frame < len(episode_data.get("actions", [])):
@@ -808,14 +852,21 @@ class BiddingGridworld(gym.Env):
                 if isinstance(action, dict) and f"agent_{target_agent_id}" in action:
                     direction_names = {0: "Left ←", 1: "Right →", 2: "Up ↑", 3: "Down ↓"}
                     agent_action = action[f"agent_{target_agent_id}"]
-                    direction = direction_names.get(agent_action["direction"], "?")
-                    bid = agent_action["bid"]
-                    title += f'\nBid: {bid} | Action: {direction}'
+                    direction = direction_names.get(agent_action.get("direction"), "?")
+                    bid = agent_action.get("bid", 0)
+                    info_lines.append(f'')
+                    info_lines.append(f'ACTIONS:')
+                    info_lines.append(f'  Bid:       {bid}')
+                    info_lines.append(f'  Direction: {direction}')
 
-            ax.set_title(title, fontsize=11)
-            ax.set_xticks(range(self.grid_size))
-            ax.set_yticks(range(self.grid_size))
-            ax.invert_yaxis()
+            # Render text
+            info_text = '\n'.join(info_lines)
+            info_ax.text(0.05, 0.95, info_text,
+                        transform=info_ax.transAxes,
+                        fontfamily='monospace',
+                        fontsize=10,
+                        verticalalignment='top',
+                        horizontalalignment='left')
 
         anim = animation.FuncAnimation(fig, animate,
                                       frames=len(episode_data["states"]) + 5,
@@ -842,10 +893,20 @@ class BiddingGridworld(gym.Env):
             output_path: Path where to save the GIF
             fps: Frames per second for the animation
         """
-        fig, ax = plt.subplots(figsize=(10, 8))
+        # Scale figure size based on grid size
+        grid_size_inches = min(10, max(6, self.grid_size * 0.15))
+        info_width = 4
+        fig = plt.figure(figsize=(grid_size_inches + info_width, grid_size_inches))
+
+        # Create grid for layout: [grid_ax, info_ax]
+        gs = fig.add_gridspec(1, 2, width_ratios=[grid_size_inches, info_width], wspace=0.15)
+        grid_ax = fig.add_subplot(gs[0])
+        info_ax = fig.add_subplot(gs[1])
 
         def animate(frame):
-            ax.clear()
+            grid_ax.clear()
+            info_ax.clear()
+
             if frame >= len(episode_data["states"]):
                 return
 
@@ -856,15 +917,15 @@ class BiddingGridworld(gym.Env):
             agent_row = int(state[0] * denom)
             agent_col = int(state[1] * denom)
 
-            # Set up plot
-            ax.set_xlim(-0.5, self.grid_size - 0.5)
-            ax.set_ylim(-0.5, self.grid_size - 0.5)
-            ax.set_aspect('equal')
+            # === Draw Grid ===
+            grid_ax.set_xlim(-0.5, self.grid_size - 0.5)
+            grid_ax.set_ylim(-0.5, self.grid_size - 0.5)
+            grid_ax.set_aspect('equal')
 
             # Draw grid
             for i in range(self.grid_size + 1):
-                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
-                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
+                grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
+                grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
             target_colors = ['lightblue', 'lightcoral', 'lightyellow']
             edge_colors = ['blue', 'red', 'orange']
@@ -879,27 +940,46 @@ class BiddingGridworld(gym.Env):
 
                 if target_reached == 0:
                     # Unreached target
-                    ax.add_patch(plt.Rectangle(
+                    grid_ax.add_patch(plt.Rectangle(
                         (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
                         facecolor=target_colors[target_id % 3],
                         edgecolor=edge_colors[target_id % 3], linewidth=2
                     ))
-                    ax.text(target_col, target_row, str(target_id),
-                           ha='center', va='center', fontsize=12, fontweight='bold')
+                    grid_ax.text(target_col, target_row, str(target_id),
+                           ha='center', va='center', fontsize=10, fontweight='bold')
                 else:
                     # Reached target
-                    ax.add_patch(plt.Rectangle(
+                    grid_ax.add_patch(plt.Rectangle(
                         (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
                         facecolor='lightgreen', edgecolor='green', linewidth=2
                     ))
-                    ax.text(target_col, target_row, '✓',
-                           ha='center', va='center', fontsize=12, fontweight='bold', color='darkgreen')
+                    grid_ax.text(target_col, target_row, '✓',
+                           ha='center', va='center', fontsize=10, fontweight='bold', color='darkgreen')
 
             # Draw agent
-            ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
+            grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
                                    facecolor='yellow', edgecolor='orange', linewidth=2))
-            ax.text(agent_col, agent_row, 'A',
-                   ha='center', va='center', fontsize=10, fontweight='bold')
+            grid_ax.text(agent_col, agent_row, 'A',
+                   ha='center', va='center', fontsize=9, fontweight='bold')
+
+            # Set grid title and ticks
+            grid_ax.set_title(f'Step {frame}', fontsize=11, fontweight='bold')
+
+            # Optimize tick marks for large grids
+            if self.grid_size <= 15:
+                tick_step = 1
+            elif self.grid_size <= 30:
+                tick_step = 2
+            else:
+                tick_step = 5
+
+            tick_positions = list(range(0, self.grid_size, tick_step))
+            grid_ax.set_xticks(tick_positions)
+            grid_ax.set_yticks(tick_positions)
+            grid_ax.invert_yaxis()
+
+            # === Draw Info Panel ===
+            info_ax.axis('off')
 
             # Get reward for this frame
             reward = 0
@@ -913,20 +993,42 @@ class BiddingGridworld(gym.Env):
             targets_reached = sum(1 for i in range(self.num_agents)
                                  if state[2 + 2 * self.num_agents + i] == 1)
 
-            title = f'Single Agent - Step {frame} - Reward: {reward:.2f}\n'
-            title += f'Total Reward: {total_reward:.2f} | Targets: {targets_reached}/{self.num_agents}'
+            # Build info text
+            info_lines = []
+            info_lines.append(f'SINGLE AGENT MODE\n')
+            info_lines.append(f'Grid: {self.grid_size}x{self.grid_size}')
+            info_lines.append(f'Targets: {targets_reached}/{self.num_agents}')
+            info_lines.append(f'')
+            info_lines.append(f'REWARDS:')
+            info_lines.append(f'  Step:  {reward:7.2f}')
+            info_lines.append(f'  Total: {total_reward:7.2f}')
 
             # Add action information if available
             if frame < len(episode_data.get("actions", [])):
                 action = episode_data["actions"][frame]
                 direction_names = {0: "Left ←", 1: "Right →", 2: "Up ↑", 3: "Down ↓"}
                 direction = direction_names.get(action, "?")
-                title += f'\nAction: {direction}'
+                info_lines.append(f'')
+                info_lines.append(f'ACTION:')
+                info_lines.append(f'  Direction: {direction}')
 
-            ax.set_title(title, fontsize=11)
-            ax.set_xticks(range(self.grid_size))
-            ax.set_yticks(range(self.grid_size))
-            ax.invert_yaxis()
+            # List target statuses
+            info_lines.append(f'')
+            info_lines.append(f'TARGET STATUS:')
+            for target_id in range(self.num_agents):
+                target_reached_idx = 2 + 2 * self.num_agents + target_id
+                target_reached = int(state[target_reached_idx])
+                status = '✓' if target_reached else '✗'
+                info_lines.append(f'  {target_id}: {status}')
+
+            # Render text
+            info_text = '\n'.join(info_lines)
+            info_ax.text(0.05, 0.95, info_text,
+                        transform=info_ax.transAxes,
+                        fontfamily='monospace',
+                        fontsize=10,
+                        verticalalignment='top',
+                        horizontalalignment='left')
 
         anim = animation.FuncAnimation(fig, animate,
                                       frames=len(episode_data["states"]) + 5,
@@ -953,10 +1055,21 @@ class BiddingGridworld(gym.Env):
             output_path: Path where to save the GIF
             fps: Frames per second for the animation
         """
-        fig, ax = plt.subplots(figsize=(10, 8))
+        # Scale figure size based on grid size
+        # Grid panel is square, info panel is fixed width
+        grid_size_inches = min(10, max(6, self.grid_size * 0.15))
+        info_width = 5
+        fig = plt.figure(figsize=(grid_size_inches + info_width, grid_size_inches))
+
+        # Create grid for layout: [grid_ax, info_ax]
+        gs = fig.add_gridspec(1, 2, width_ratios=[grid_size_inches, info_width], wspace=0.15)
+        grid_ax = fig.add_subplot(gs[0])
+        info_ax = fig.add_subplot(gs[1])
 
         def animate(frame):
-            ax.clear()
+            grid_ax.clear()
+            info_ax.clear()
+
             if frame >= len(episode_data["states"]):
                 return
 
@@ -978,74 +1091,124 @@ class BiddingGridworld(gym.Env):
             actions = episode_data["actions"][frame] if frame < len(episode_data["actions"]) else None
             rewards = episode_data["rewards"][frame] if frame < len(episode_data["rewards"]) else None
 
-            ax.set_xlim(-0.5, self.grid_size - 0.5)
-            ax.set_ylim(-0.5, self.grid_size - 0.5)
-            ax.set_aspect('equal')
+            # === Draw Grid ===
+            grid_ax.set_xlim(-0.5, self.grid_size - 0.5)
+            grid_ax.set_ylim(-0.5, self.grid_size - 0.5)
+            grid_ax.set_aspect('equal')
 
+            # Draw grid lines
             for i in range(self.grid_size + 1):
-                ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
-                ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
+                grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
+                grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
             target_colors = ['lightblue', 'lightcoral', 'lightyellow']
             edge_colors = ['blue', 'red', 'orange']
             winning_agent = step_detail.get("winning_agent", -1) if step_detail else None
 
+            # Draw targets
             for i in range(self.num_agents):
                 target_row, target_col = target_positions[i]
                 is_controlling = (winning_agent == i)
                 edge_width = 4 if is_controlling else 2
-                edge_color = 'gold' if is_controlling else edge_colors[i]
+                edge_color = 'gold' if is_controlling else edge_colors[i % 3]
 
                 if targets_reached[i] == 0:
-                    ax.add_patch(plt.Rectangle(
+                    grid_ax.add_patch(plt.Rectangle(
                         (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
-                        facecolor=target_colors[i], edgecolor=edge_color, linewidth=edge_width
+                        facecolor=target_colors[i % 3], edgecolor=edge_color, linewidth=edge_width
                     ))
-                    ax.text(target_col, target_row, str(i),
-                           ha='center', va='center', fontsize=12, fontweight='bold')
+                    grid_ax.text(target_col, target_row, str(i),
+                           ha='center', va='center', fontsize=10, fontweight='bold')
                     if is_controlling:
-                        ax.text(target_col, target_row - 0.6, '⚡',
-                               ha='center', va='center', fontsize=10, color='gold')
+                        grid_ax.text(target_col, target_row - 0.6, '⚡',
+                               ha='center', va='center', fontsize=8, color='gold')
                 else:
-                    ax.add_patch(plt.Rectangle(
+                    grid_ax.add_patch(plt.Rectangle(
                         (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
                         facecolor='lightgreen', edgecolor='green', linewidth=2
                     ))
-                    ax.text(target_col, target_row, '✓',
-                           ha='center', va='center', fontsize=12, fontweight='bold')
+                    grid_ax.text(target_col, target_row, '✓',
+                           ha='center', va='center', fontsize=10, fontweight='bold')
 
+            # Draw agent with ring indicating controlling agent
             if winning_agent is not None and 0 <= winning_agent < self.num_agents:
-                ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
-                                       facecolor='none', edgecolor=edge_colors[winning_agent], linewidth=3))
+                grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
+                                       facecolor='none', edgecolor=edge_colors[winning_agent % 3], linewidth=3))
 
-            ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
+            grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
                                    facecolor='yellow', edgecolor='orange'))
-            ax.text(agent_col, agent_row, 'A',
-                   ha='center', va='center', fontsize=10, fontweight='bold')
+            grid_ax.text(agent_col, agent_row, 'A',
+                   ha='center', va='center', fontsize=9, fontweight='bold')
 
-            title = f'Competition Episode - Step {frame}\n'
-            if step_detail:
-                targets_status = ", ".join([f"{i}={'✓' if targets_reached[i] else '✗'}" for i in range(self.num_agents)])
-                title += f'Targets: {targets_status}\n'
-                if rewards:
-                    cumulative = {f"agent_{i}": sum(episode_data["rewards"][f].get(f"agent_{i}", 0)
-                                                    for f in range(frame + 1)) for i in range(self.num_agents)}
-                    rewards_str = ", ".join([f"{i}={cumulative[f'agent_{i}']:.2f}" for i in range(self.num_agents)])
-                    title += f'Rewards: {rewards_str}\n'
+            # Set grid title and ticks
+            grid_ax.set_title(f'Step {frame}', fontsize=11, fontweight='bold')
 
-                # Add bids and actions
-                if actions:
-                    direction_names = {0: "←", 1: "→", 2: "↑", 3: "↓"}
-                    bids_str = ", ".join([f"{i}={actions[f'agent_{i}']['bid']}" for i in range(self.num_agents)])
-                    title += f'Bids: {bids_str}\n'
-                    actions_str = ", ".join([f"{i}={direction_names.get(actions[f'agent_{i}']['direction'], '?')}"
-                                            for i in range(self.num_agents)])
-                    title += f'Actions: {actions_str}'
+            # Optimize tick marks for large grids
+            if self.grid_size <= 15:
+                tick_step = 1
+            elif self.grid_size <= 30:
+                tick_step = 2
+            else:
+                tick_step = 5
 
-            ax.set_title(title, fontsize=10)
-            ax.set_xticks(range(self.grid_size))
-            ax.set_yticks(range(self.grid_size))
-            ax.invert_yaxis()
+            tick_positions = list(range(0, self.grid_size, tick_step))
+            grid_ax.set_xticks(tick_positions)
+            grid_ax.set_yticks(tick_positions)
+            grid_ax.invert_yaxis()
+
+            # === Draw Info Panel ===
+            info_ax.axis('off')
+
+            # Build info text
+            info_lines = []
+            info_lines.append(f'MULTI-AGENT COMPETITION\n')
+            info_lines.append(f'Grid: {self.grid_size}x{self.grid_size}')
+            info_lines.append(f'Agents: {self.num_agents}')
+            info_lines.append(f'')
+
+            # Targets status
+            targets_reached_count = sum(targets_reached)
+            info_lines.append(f'TARGETS: {targets_reached_count}/{self.num_agents}')
+            for i in range(self.num_agents):
+                status = '✓' if targets_reached[i] else '✗'
+                info_lines.append(f'  {i}: {status}')
+            info_lines.append(f'')
+
+            # Agent details
+            if step_detail and actions and rewards:
+                info_lines.append(f'AGENT DETAILS:')
+                direction_names = {0: "←", 1: "→", 2: "↑", 3: "↓"}
+
+                # Calculate cumulative rewards
+                cumulative = {}
+                for i in range(self.num_agents):
+                    cumulative[f"agent_{i}"] = sum(
+                        episode_data["rewards"][f].get(f"agent_{i}", 0)
+                        for f in range(min(frame + 1, len(episode_data["rewards"])))
+                    )
+
+                for i in range(self.num_agents):
+                    agent_key = f"agent_{i}"
+                    if agent_key in actions:
+                        action_data = actions[agent_key]
+                        bid = action_data.get('bid', 0)
+                        direction = direction_names.get(action_data.get('direction', 0), '?')
+                        reward = cumulative.get(agent_key, 0)
+
+                        # Highlight controlling agent
+                        if i == winning_agent:
+                            info_lines.append(f'  [{i}] ⚡ Bid:{bid:2d} {direction} R:{reward:6.1f}')
+                        else:
+                            info_lines.append(f'  [{i}]   Bid:{bid:2d} {direction} R:{reward:6.1f}')
+
+            # Render text
+            info_text = '\n'.join(info_lines)
+            info_ax.text(0.05, 0.95, info_text,
+                        transform=info_ax.transAxes,
+                        fontfamily='monospace',
+                        fontsize=9,
+                        verticalalignment='top',
+                        horizontalalignment='left')
 
         anim = animation.FuncAnimation(fig, animate,
                                       frames=len(episode_data["states"]) + 3,
