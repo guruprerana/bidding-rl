@@ -223,16 +223,20 @@ class PPOMovingTargetsExperiment:
         )
 
         # Create GIFs for first num_gif_episodes
-        for episode_idx in range(min(self.num_gif_episodes, self.num_eval_episodes)):
-            episode_data = eval_stats["episode_data_list"][episode_idx]
+        episode_data_list = eval_stats.get("episode_data_list", [])
+        max_gif_episodes = min(self.num_gif_episodes, self.num_eval_episodes, len(episode_data_list))
+        for episode_idx in range(max_gif_episodes):
+            episode_data = episode_data_list[episode_idx]
             gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
             eval_env.create_competition_gif(episode_data, gif_path, fps=2)
 
-            # Log to wandb
-            if trainer.args.track:
+            # Log to wandb if the GIF exists
+            if trainer.args.track and gif_path.exists() and gif_path.stat().st_size > 0:
                 wandb.log({
                     f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
                 }, step=global_step)
+            elif trainer.args.track:
+                print(f"⚠️  Skipping wandb.Video for missing GIF: {gif_path}")
 
         eval_env.close()
 
@@ -344,16 +348,20 @@ class PPOMovingTargetsExperiment:
         )
 
         # Create GIFs for first num_gif_episodes
-        for episode_idx in range(min(self.num_gif_episodes, self.num_eval_episodes)):
-            episode_data = eval_stats["episode_data_list"][episode_idx]
+        episode_data_list = eval_stats.get("episode_data_list", [])
+        max_gif_episodes = min(self.num_gif_episodes, self.num_eval_episodes, len(episode_data_list))
+        for episode_idx in range(max_gif_episodes):
+            episode_data = episode_data_list[episode_idx]
             gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
             eval_env.create_single_agent_gif(episode_data, gif_path, fps=2)
 
-            # Log to wandb
-            if trainer.args.track:
+            # Log to wandb if the GIF exists
+            if trainer.args.track and gif_path.exists() and gif_path.stat().st_size > 0:
                 wandb.log({
                     f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
                 }, step=global_step)
+            elif trainer.args.track:
+                print(f"⚠️  Skipping wandb.Video for missing GIF: {gif_path}")
 
         eval_env.close()
 
@@ -499,8 +507,8 @@ def main():
     EXPERIMENT_NAME = "ppo_moving_targets_exp9"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 5000  # Save checkpoint every N iterations
     EVAL_FREQ = 5000  # Evaluate every N iterations
-    NUM_EVAL_EPISODES = 100  # Number of episodes per evaluation
-    NUM_GIF_EPISODES = 3  # Number of episodes to save as GIFs
+    NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
+    NUM_GIF_EPISODES = 0  # Number of episodes to save as GIFs
 
     # Environment parameters
     GRID_SIZE = 50

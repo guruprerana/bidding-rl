@@ -628,6 +628,51 @@ class BiddingGridworld(gym.Env):
 
             obs = np.array(obs_list, dtype=np.float32)
             return obs
+
+    def _get_centralized_observation(self):
+        """Get centralized observation regardless of visible_targets settings."""
+        # Normalize positions to [0,1]; guard division for grid_size==1
+        denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+        agent_row_norm = float(self.agent_position[0]) / denom
+        agent_col_norm = float(self.agent_position[1]) / denom
+
+        # Normalization denominators
+        counter_denom = float(self.target_expiry_steps) if self.target_expiry_steps is not None else float(self.max_steps)
+        counter_denom = max(counter_denom, 1.0)
+        window_denom = max(float(self.action_window), 1.0)
+        window_steps_norm = float(self.window_steps_remaining) / window_denom
+
+        # Centralized observation: all agents see all targets
+        obs_list = [agent_row_norm, agent_col_norm]
+
+        # Add all target positions
+        for target_pos in self.target_positions:
+            t_row_norm = float(target_pos[0]) / denom
+            t_col_norm = float(target_pos[1]) / denom
+            obs_list.extend([t_row_norm, t_col_norm])
+
+        # Add all target reached flags
+        for i in range(self.num_agents):
+            obs_list.append(float(self.targets_reached[i]))
+
+        # Add all target step counters (normalized)
+        for i in range(self.num_agents):
+            counter_norm = min(float(self.target_step_counters[i]) / counter_denom, 1.0)
+            obs_list.append(counter_norm)
+
+        # Add window steps remaining (normalized by action_window)
+        obs_list.append(window_steps_norm)
+
+        # In single-agent mode, add relative target counts (count - min_count)
+        if self.single_agent_mode:
+            min_count = int(np.min(self.targets_reached_count))
+            count_denom = max(float(self.num_agents), 1.0)
+            for i in range(self.num_agents):
+                relative_count = float(self.targets_reached_count[i] - min_count)
+                relative_count_norm = min(relative_count / count_denom, 1.0)
+                obs_list.append(relative_count_norm)
+
+        return np.array(obs_list, dtype=np.float32)
     
     def _get_info(self) -> Dict:
         """Get additional information."""
@@ -1294,7 +1339,7 @@ def evaluate_multi_agent_policy(
 
         while not (terminated or truncated):
             # Store state
-            episode_states.append(base_obs.copy())
+            episode_states.append(env._get_centralized_observation().copy())
 
             # Get actions from policy
             actions = policy_fn(base_obs)  # Should return [num_agents, action_dim]

@@ -695,7 +695,7 @@ class PPOTrainer:
         print(f"Starting training for {self.args.total_timesteps} timesteps")
         print(f"{'='*60}\n")
 
-        for iteration in range(1, self.args.num_iterations + 1):
+        for iteration in range(self.args.num_iterations):
             # Annealing the learning rate
             if self.args.anneal_lr:
                 frac = 1.0 - (iteration - 1.0) / self.args.num_iterations
