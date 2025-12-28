@@ -5,7 +5,7 @@ from typing import Dict, Tuple, List, Any, Optional
 import random
 from pathlib import Path
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
+import cv2
 
 
 class BiddingGridworld(gym.Env):
@@ -913,16 +913,32 @@ class BiddingGridworld(gym.Env):
                         verticalalignment='top',
                         horizontalalignment='left')
 
-        anim = animation.FuncAnimation(fig, animate,
-                                      frames=len(episode_data["states"]) + 5,
-                                      interval=1000//fps, repeat=True)
-        try:
-            anim.save(str(output_path), writer='pillow', fps=fps)
-            print(f"✅ Episode GIF saved: {output_path}")
-        except Exception as e:
-            print(f"⚠️  Could not save GIF {output_path}: {e}")
-        finally:
-            plt.close(fig)
+        # Render frames to numpy arrays
+        frames = []
+        num_frames = len(episode_data["states"]) + 5
+        for frame_idx in range(num_frames):
+            animate(frame_idx)
+            fig.canvas.draw()
+            frame = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+            frames.append(frame)
+
+        plt.close(fig)
+
+        # Write video using OpenCV
+        if len(frames) > 0:
+            h, w = frames[0].shape[:2]
+            output_path_mp4 = str(output_path).replace('.gif', '.mp4')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path_mp4, fourcc, fps, (w, h))
+
+            try:
+                for frame in frames:
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                out.release()
+                print(f"✅ Episode video saved: {output_path_mp4}")
+            except Exception as e:
+                print(f"⚠️  Could not save video {output_path_mp4}: {e}")
+                out.release()
 
     def create_single_agent_gif(
         self,
@@ -1075,16 +1091,32 @@ class BiddingGridworld(gym.Env):
                         verticalalignment='top',
                         horizontalalignment='left')
 
-        anim = animation.FuncAnimation(fig, animate,
-                                      frames=len(episode_data["states"]) + 5,
-                                      interval=1000//fps, repeat=True)
-        try:
-            anim.save(str(output_path), writer='pillow', fps=fps)
-            print(f"✅ Single-agent GIF saved: {output_path}")
-        except Exception as e:
-            print(f"⚠️  Could not save GIF {output_path}: {e}")
-        finally:
-            plt.close(fig)
+        # Render frames to numpy arrays
+        frames = []
+        num_frames = len(episode_data["states"]) + 5
+        for frame_idx in range(num_frames):
+            animate(frame_idx)
+            fig.canvas.draw()
+            frame = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+            frames.append(frame)
+
+        plt.close(fig)
+
+        # Write video using OpenCV
+        if len(frames) > 0:
+            h, w = frames[0].shape[:2]
+            output_path_mp4 = str(output_path).replace('.gif', '.mp4')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path_mp4, fourcc, fps, (w, h))
+
+            try:
+                for frame in frames:
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                out.release()
+                print(f"✅ Single-agent video saved: {output_path_mp4}")
+            except Exception as e:
+                print(f"⚠️  Could not save video {output_path_mp4}: {e}")
+                out.release()
 
     def create_competition_gif(
         self,
@@ -1255,16 +1287,32 @@ class BiddingGridworld(gym.Env):
                         verticalalignment='top',
                         horizontalalignment='left')
 
-        anim = animation.FuncAnimation(fig, animate,
-                                      frames=len(episode_data["states"]) + 3,
-                                      interval=1000//fps, repeat=True)
-        try:
-            anim.save(str(output_path), writer='pillow', fps=fps)
-            print(f"✅ Competition GIF saved: {output_path}")
-        except Exception as e:
-            print(f"⚠️  Could not save GIF {output_path}: {e}")
-        finally:
-            plt.close(fig)
+        # Render frames to numpy arrays
+        frames = []
+        num_frames = len(episode_data["states"]) + 3
+        for frame_idx in range(num_frames):
+            animate(frame_idx)
+            fig.canvas.draw()
+            frame = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+            frames.append(frame)
+
+        plt.close(fig)
+
+        # Write video using OpenCV
+        if len(frames) > 0:
+            h, w = frames[0].shape[:2]
+            output_path_mp4 = str(output_path).replace('.gif', '.mp4')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path_mp4, fourcc, fps, (w, h))
+
+            try:
+                for frame in frames:
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                out.release()
+                print(f"✅ Competition video saved: {output_path_mp4}")
+            except Exception as e:
+                print(f"⚠️  Could not save video {output_path_mp4}: {e}")
+                out.release()
 
     def close(self):
         """Clean up rendering resources."""

@@ -8,7 +8,7 @@ Features:
 - Single-agent mode: One agent navigates to collect all targets
 - Multi-agent mode: Multiple agents bid for control to reach their targets
 - Periodic checkpointing
-- Regular rollout evaluations with GIF generation
+- Regular rollout evaluations with MP4 generation
 - Comprehensive wandb logging
 - Moving target environment support
 - All configuration in one place (no CLI arguments needed)
@@ -53,7 +53,7 @@ class PPOMovingTargetsExperiment:
         checkpoint_freq: int = 50,
         eval_freq: int = 25,
         num_eval_episodes: int = 3,
-        num_gif_episodes: int = 3,
+        num_video_episodes: int = 3,
         single_agent_mode: bool = False,
         eval_max_steps: int = 600,
     ):
@@ -66,7 +66,7 @@ class PPOMovingTargetsExperiment:
             checkpoint_freq: Save checkpoint every N iterations
             eval_freq: Evaluate every N iterations
             num_eval_episodes: Number of episodes per evaluation
-            num_gif_episodes: Number of episodes to save as GIFs
+            num_video_episodes: Number of episodes to save as MP4s
             single_agent_mode: If True, use single-agent PPO; if False, use multi-agent PPO
             eval_max_steps: Maximum steps per episode during evaluation
         """
@@ -79,7 +79,7 @@ class PPOMovingTargetsExperiment:
         self.checkpoint_freq = checkpoint_freq
         self.eval_freq = eval_freq
         self.num_eval_episodes = num_eval_episodes
-        self.num_gif_episodes = num_gif_episodes
+        self.num_video_episodes = num_video_episodes
         self.single_agent_mode = single_agent_mode
         self.eval_max_steps = eval_max_steps
 
@@ -96,7 +96,9 @@ class PPOMovingTargetsExperiment:
 
     def log_codebase_to_wandb(self, run):
         """Log src folder and training script to wandb as an artifact."""
-        if not run:
+        disabled = os.environ.get("WANDB_MODE", "").lower() == "disabled" or \
+            os.environ.get("WANDB_DISABLED", "").lower() in {"true", "1"}
+        if not run or disabled:
             return
 
         print("📦 Logging codebase to wandb...")
@@ -165,7 +167,7 @@ class PPOMovingTargetsExperiment:
         """Evaluate the current policy with rollouts and create visualizations."""
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
-        print(f"Running {self.num_eval_episodes} episodes (saving GIFs for first {self.num_gif_episodes})")
+        print(f"Running {self.num_eval_episodes} episodes (saving videos for first {self.num_video_episodes})")
         print(f"{'='*60}\n")
 
         # Create evaluation environment with longer max_steps
@@ -222,21 +224,21 @@ class PPOMovingTargetsExperiment:
             verbose=True
         )
 
-        # Create GIFs for first num_gif_episodes
+        # Create videos for first num_video_episodes
         episode_data_list = eval_stats.get("episode_data_list", [])
-        max_gif_episodes = min(self.num_gif_episodes, self.num_eval_episodes, len(episode_data_list))
-        for episode_idx in range(max_gif_episodes):
+        max_video_episodes = min(self.num_video_episodes, self.num_eval_episodes, len(episode_data_list))
+        for episode_idx in range(max_video_episodes):
             episode_data = episode_data_list[episode_idx]
-            gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
-            eval_env.create_competition_gif(episode_data, gif_path, fps=2)
+            video_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.mp4"
+            eval_env.create_competition_gif(episode_data, video_path, fps=2)
 
-            # Log to wandb if the GIF exists
-            if trainer.args.track and gif_path.exists() and gif_path.stat().st_size > 0:
+            # Log to wandb if enabled and the video exists
+            if trainer.args.track and LOG_VIDEOS_TO_WANDB and video_path.exists() and video_path.stat().st_size > 0:
                 wandb.log({
-                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
+                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(video_path), fps=2, format="mp4"),
                 }, step=global_step)
-            elif trainer.args.track:
-                print(f"⚠️  Skipping wandb.Video for missing GIF: {gif_path}")
+            elif trainer.args.track and LOG_VIDEOS_TO_WANDB:
+                print(f"⚠️  Skipping wandb.Video for missing video: {video_path}")
 
         eval_env.close()
 
@@ -298,7 +300,7 @@ class PPOMovingTargetsExperiment:
         """Evaluate the single-agent policy with rollouts and create visualizations."""
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
-        print(f"Running {self.num_eval_episodes} episodes (saving GIFs for first {self.num_gif_episodes})")
+        print(f"Running {self.num_eval_episodes} episodes (saving videos for first {self.num_video_episodes})")
         print(f"{'='*60}\n")
 
         # Create evaluation environment with longer max_steps
@@ -347,21 +349,21 @@ class PPOMovingTargetsExperiment:
             verbose=True
         )
 
-        # Create GIFs for first num_gif_episodes
+        # Create videos for first num_video_episodes
         episode_data_list = eval_stats.get("episode_data_list", [])
-        max_gif_episodes = min(self.num_gif_episodes, self.num_eval_episodes, len(episode_data_list))
-        for episode_idx in range(max_gif_episodes):
+        max_video_episodes = min(self.num_video_episodes, self.num_eval_episodes, len(episode_data_list))
+        for episode_idx in range(max_video_episodes):
             episode_data = episode_data_list[episode_idx]
-            gif_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.gif"
-            eval_env.create_single_agent_gif(episode_data, gif_path, fps=2)
+            video_path = self.rollouts_dir / f"iter_{iteration}_ep_{episode_idx}.mp4"
+            eval_env.create_single_agent_gif(episode_data, video_path, fps=2)
 
-            # Log to wandb if the GIF exists
-            if trainer.args.track and gif_path.exists() and gif_path.stat().st_size > 0:
+            # Log to wandb if enabled and the video exists
+            if trainer.args.track and LOG_VIDEOS_TO_WANDB and video_path.exists() and video_path.stat().st_size > 0:
                 wandb.log({
-                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(gif_path), fps=2, format="gif"),
+                    f"eval/rollout_ep_{episode_idx}": wandb.Video(str(video_path), fps=2, format="mp4"),
                 }, step=global_step)
-            elif trainer.args.track:
-                print(f"⚠️  Skipping wandb.Video for missing GIF: {gif_path}")
+            elif trainer.args.track and LOG_VIDEOS_TO_WANDB:
+                print(f"⚠️  Skipping wandb.Video for missing video: {video_path}")
 
         eval_env.close()
 
@@ -483,7 +485,7 @@ class PPOMovingTargetsExperiment:
 
         print(f"Checkpoint frequency: every {self.checkpoint_freq} iterations")
         print(f"Evaluation frequency: every {self.eval_freq} iterations")
-        print(f"Evaluation episodes: {self.num_eval_episodes} (saving GIFs for first {self.num_gif_episodes})\n")
+        print(f"Evaluation episodes: {self.num_eval_episodes} (saving videos for first {self.num_video_episodes})\n")
 
         trainer.train()
         trainer.save_model()
@@ -504,21 +506,21 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_exp9"  # Leave empty for default name with timestamp
-    CHECKPOINT_FREQ = 5000  # Save checkpoint every N iterations
-    EVAL_FREQ = 5000  # Evaluate every N iterations
-    NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
-    NUM_GIF_EPISODES = 0  # Number of episodes to save as GIFs
+    EXPERIMENT_NAME = "ppo_moving_targets_torch_env_test"  # Leave empty for default name with timestamp
+    CHECKPOINT_FREQ = 200  # Save checkpoint every N iterations
+    EVAL_FREQ = 200  # Evaluate every N iterations
+    NUM_EVAL_EPISODES = 5  # Number of episodes per evaluation
+    NUM_VIDEO_EPISODES = 3  # Number of episodes to save as MP4s
 
     # Environment parameters
-    GRID_SIZE = 50
-    NUM_AGENTS = 10  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    GRID_SIZE = 20
+    NUM_AGENTS = 6  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 20.0
-    MAX_STEPS = 1000  # Maximum steps per episode during training
-    EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
+    MAX_STEPS = 400  # Maximum steps per episode during training
+    EVAL_MAX_STEPS = 600  # Maximum steps per episode during evaluation (typically longer than training)
     DISTANCE_REWARD_SCALE = 0.01
-    TARGET_EXPIRY_STEPS = 40
-    TARGET_EXPIRY_PENALTY = 100.0
+    TARGET_EXPIRY_STEPS = 30
+    TARGET_EXPIRY_PENALTY = 50.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
 
     # Multi-agent specific parameters (ignored in single-agent mode)
@@ -534,16 +536,18 @@ def main():
     TARGET_MOVE_INTERVAL = 2
 
     # Training parameters
-    TOTAL_TIMESTEPS = int(1e8)
+    TOTAL_TIMESTEPS = int(2e6)
     LEARNING_RATE = 2.5e-4
-    NUM_ENVS = 4
+    NUM_ENVS = 64
     NUM_STEPS = 128
     SEED = 1
+    USE_TORCH_BATCHED_ENV = True
 
     # Wandb tracking
     WANDB_PROJECT = "bidding-rl"
     WANDB_ENTITY = None
     TRACK = True  # Set to False to disable wandb tracking
+    LOG_VIDEOS_TO_WANDB = False  # Set to True to upload MP4s to wandb
 
     # ========================================================================
     # End of configuration
@@ -576,6 +580,7 @@ def main():
             learning_rate=LEARNING_RATE,
             num_envs=NUM_ENVS,
             num_steps=NUM_STEPS,
+            use_torch_batched_env=USE_TORCH_BATCHED_ENV,
         )
     else:
         args = Args(
@@ -608,6 +613,7 @@ def main():
             learning_rate=LEARNING_RATE,
             num_envs=NUM_ENVS,
             num_steps=NUM_STEPS,
+            use_torch_batched_env=USE_TORCH_BATCHED_ENV,
         )
 
     # Create and run experiment
@@ -616,7 +622,7 @@ def main():
         checkpoint_freq=CHECKPOINT_FREQ,
         eval_freq=EVAL_FREQ,
         num_eval_episodes=NUM_EVAL_EPISODES,
-        num_gif_episodes=NUM_GIF_EPISODES,
+        num_video_episodes=NUM_VIDEO_EPISODES,
         single_agent_mode=SINGLE_AGENT_MODE,
         eval_max_steps=EVAL_MAX_STEPS,
     )

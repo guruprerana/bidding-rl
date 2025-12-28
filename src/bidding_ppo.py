@@ -17,6 +17,7 @@ from torch.distributions.categorical import Categorical
 import wandb
 
 from bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
+from torch_batched_env import TorchBatchedBiddingGridworld, TorchBatchedConfig
 from ppo_utils import layer_init, compute_gae, ppo_update_step, compute_explained_variance
 
 
@@ -30,6 +31,8 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
+    use_torch_batched_env: bool = False
+    """if toggled, use the GPU-native batched environment"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "bidding-rl"
@@ -627,17 +630,50 @@ class PPOTrainer:
         self.agent = None
         self.optimizer = None
         self.obs_dim = None
+        self.use_torch_env = False
 
     def setup(self):
         """Setup environments, agent, and optimizer."""
-        # Environment setup - use manual vectorization for multi-agent support
-        self.envs = ManualVectorEnv(
-            [make_env(self.args, i, self.run_name) for i in range(self.args.num_envs)]
-        )
+        # Environment setup
+        self.use_torch_env = bool(self.args.use_torch_batched_env)
+        if self.use_torch_env:
+            env_config = TorchBatchedConfig(
+                grid_size=self.args.grid_size,
+                num_agents=self.args.num_agents,
+                bid_upper_bound=self.args.bid_upper_bound,
+                bid_penalty=self.args.bid_penalty,
+                target_reward=self.args.target_reward,
+                max_steps=self.args.max_steps,
+                action_window=self.args.action_window,
+                distance_reward_scale=self.args.distance_reward_scale,
+                target_expiry_steps=self.args.target_expiry_steps,
+                target_expiry_penalty=self.args.target_expiry_penalty,
+                moving_targets=self.args.moving_targets,
+                direction_change_prob=self.args.direction_change_prob,
+                target_move_interval=self.args.target_move_interval,
+                window_bidding=self.args.window_bidding,
+                window_penalty=self.args.window_penalty,
+                visible_targets=self.args.visible_targets,
+                single_agent_mode=False,
+            )
+            self.envs = TorchBatchedBiddingGridworld(
+                env_config,
+                num_envs=self.args.num_envs,
+                device=self.device,
+                seed=self.args.seed,
+            )
+        else:
+            # Use manual vectorization for multi-agent support
+            self.envs = ManualVectorEnv(
+                [make_env(self.args, i, self.run_name) for i in range(self.args.num_envs)]
+            )
 
         # Create shared agent
         # Observation space is (num_agents, obs_dim), so we need shape[1] for per-agent obs dim
-        self.obs_dim = self.envs.single_observation_space.shape[1]
+        if self.use_torch_env:
+            self.obs_dim = self.envs.per_agent_obs_dim
+        else:
+            self.obs_dim = self.envs.single_observation_space.shape[1]
         num_actions_per_agent = 3 if self.args.window_bidding else 2
         self.agent = SharedAgent(
             self.obs_dim,
@@ -684,7 +720,8 @@ class PPOTrainer:
         global_step = 0
         start_time = time.time()
         next_obs, _ = self.envs.reset(seed=self.args.seed)
-        next_obs = torch.Tensor(next_obs).to(self.device)
+        if not self.use_torch_env:
+            next_obs = torch.Tensor(next_obs).to(self.device)
         next_done = torch.zeros((self.args.num_envs, self.args.num_agents)).to(self.device)
 
         # Track bidding-specific statistics (aggregated across rollout)
@@ -721,23 +758,32 @@ class PPOTrainer:
                 logprobs[step] = logprob
 
                 # Execute actions in environment
-                flat_action = action.reshape(self.args.num_envs, -1).cpu().numpy()
-                next_obs, reward, terminations, truncations, infos = self.envs.step(flat_action)
+                if self.use_torch_env:
+                    next_obs, reward, terminations, truncations, infos = self.envs.step(action)
+                    next_done_scalar = terminations | truncations
+                    next_done = next_done_scalar.unsqueeze(1).expand(-1, self.args.num_agents)
+                    rewards[step] = reward
+                    next_done = next_done.to(self.device, dtype=torch.float32)
+                else:
+                    flat_action = action.reshape(self.args.num_envs, -1).cpu().numpy()
+                    next_obs, reward, terminations, truncations, infos = self.envs.step(flat_action)
 
-                # Combine termination signals and broadcast to all agents
-                # terminations and truncations are shape (num_envs,)
-                # We need shape (num_envs, num_agents) since all agents share the same environment
-                next_done_scalar = np.logical_or(terminations, truncations)  # shape: (num_envs,)
-                next_done = np.broadcast_to(next_done_scalar[:, np.newaxis], (self.args.num_envs, self.args.num_agents))  # shape: (num_envs, num_agents)
+                    # Combine termination signals and broadcast to all agents
+                    # terminations and truncations are shape (num_envs,)
+                    # We need shape (num_envs, num_agents) since all agents share the same environment
+                    next_done_scalar = np.logical_or(terminations, truncations)  # shape: (num_envs,)
+                    next_done = np.broadcast_to(next_done_scalar[:, np.newaxis], (self.args.num_envs, self.args.num_agents))  # shape: (num_envs, num_agents)
 
-                rewards[step] = torch.tensor(reward).to(self.device)
-                next_obs = torch.Tensor(next_obs).to(self.device)
-                next_done = torch.Tensor(next_done).to(self.device)
+                    rewards[step] = torch.tensor(reward).to(self.device)
+                    next_obs = torch.Tensor(next_obs).to(self.device)
+                    next_done = torch.Tensor(next_done).to(self.device)
 
                 # Extract bidding information for logging
                 for env_idx in range(self.args.num_envs):
                     if isinstance(infos, dict) and "winning_agent" in infos:
                         winning_agent = infos["winning_agent"][env_idx] if hasattr(infos["winning_agent"], "__getitem__") else infos["winning_agent"]
+                        if isinstance(winning_agent, torch.Tensor):
+                            winning_agent = int(winning_agent.item())
                         if winning_agent is not None and winning_agent >= 0:
                             episode_agent_wins[f"agent_{winning_agent}"] += 1
 
