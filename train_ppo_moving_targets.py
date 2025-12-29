@@ -509,40 +509,52 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_moving_targets_torch_env_test"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_moving_targets_extended_timesteps_exp2_torch_batched"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 200  # Save checkpoint every N iterations
     EVAL_FREQ = 200  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
     NUM_VIDEO_EPISODES = 3  # Number of episodes to save as MP4s
 
     # Environment parameters
-    GRID_SIZE = 20
-    NUM_AGENTS = 6  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    GRID_SIZE = 15
+    NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 20.0
-    MAX_STEPS = 400  # Maximum steps per episode during training
+    MAX_STEPS = 300  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 600  # Maximum steps per episode during evaluation (typically longer than training)
-    DISTANCE_REWARD_SCALE = 0.01
-    TARGET_EXPIRY_STEPS = 30
-    TARGET_EXPIRY_PENALTY = 50.0
+    DISTANCE_REWARD_SCALE = 0.4
+    TARGET_EXPIRY_STEPS = 40
+    TARGET_EXPIRY_PENALTY = 200.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
 
     # Multi-agent specific parameters (ignored in single-agent mode)
-    BID_UPPER_BOUND = 10
+    BID_UPPER_BOUND = 5
     BID_PENALTY = 0.05
-    ACTION_WINDOW = 10
+    ACTION_WINDOW = 8
     WINDOW_BIDDING = True  # Set to True to let agents choose their window length
     WINDOW_PENALTY = 0.05  # Penalty per window step (only applies when WINDOW_BIDDING = True)
-    VISIBLE_TARGETS = 3  # Set to None for centralized (all targets visible), or N for decentralized (each agent sees own target + N nearest others)
+    VISIBLE_TARGETS = None  # Set to None for centralized (all targets visible), or N for decentralized (each agent sees own target + N nearest others)
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
     DIRECTION_CHANGE_PROB = 0.1
     TARGET_MOVE_INTERVAL = 2
 
     # Training parameters
-    TOTAL_TIMESTEPS = int(1e7)
-    LEARNING_RATE = 2.5e-4
-    NUM_ENVS = 64
-    NUM_STEPS = 128
+    TOTAL_TIMESTEPS = 150_000_000
+    LEARNING_RATE = 5.0e-4
+    NUM_ENVS = 2048
+    NUM_STEPS = 32
+    NUM_MINIBATCHES = 4
+    UPDATE_EPOCHS = 5
+    ANNEAL_LR = True
+    GAMMA = 0.99
+    GAE_LAMBDA = 0.95
+    NORM_ADV = True
+    CLIP_COEF = 0.2
+    CLIP_VLOSS = True
+    ENT_COEF = 0.01
+    VF_COEF = 0.5
+    MAX_GRAD_NORM = 0.5
+    TARGET_KL = None
     SEED = 1
     USE_TORCH_BATCHED_ENV = True
 
@@ -583,6 +595,18 @@ def main():
             learning_rate=LEARNING_RATE,
             num_envs=NUM_ENVS,
             num_steps=NUM_STEPS,
+            num_minibatches=NUM_MINIBATCHES,
+            update_epochs=UPDATE_EPOCHS,
+            anneal_lr=ANNEAL_LR,
+            gamma=GAMMA,
+            gae_lambda=GAE_LAMBDA,
+            norm_adv=NORM_ADV,
+            clip_coef=CLIP_COEF,
+            clip_vloss=CLIP_VLOSS,
+            ent_coef=ENT_COEF,
+            vf_coef=VF_COEF,
+            max_grad_norm=MAX_GRAD_NORM,
+            target_kl=TARGET_KL,
             use_torch_batched_env=USE_TORCH_BATCHED_ENV,
         )
     else:
@@ -616,6 +640,18 @@ def main():
             learning_rate=LEARNING_RATE,
             num_envs=NUM_ENVS,
             num_steps=NUM_STEPS,
+            num_minibatches=NUM_MINIBATCHES,
+            update_epochs=UPDATE_EPOCHS,
+            anneal_lr=ANNEAL_LR,
+            gamma=GAMMA,
+            gae_lambda=GAE_LAMBDA,
+            norm_adv=NORM_ADV,
+            clip_coef=CLIP_COEF,
+            clip_vloss=CLIP_VLOSS,
+            ent_coef=ENT_COEF,
+            vf_coef=VF_COEF,
+            max_grad_norm=MAX_GRAD_NORM,
+            target_kl=TARGET_KL,
             use_torch_batched_env=USE_TORCH_BATCHED_ENV,
         )
 

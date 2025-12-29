@@ -124,20 +124,24 @@ class SingleAgent(nn.Module):
 
         # Critic network: outputs single value estimate
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(obs_dim, 256)),
+            nn.ELU(),
+            layer_init(nn.Linear(256, 256)),
+            nn.ELU(),
+            layer_init(nn.Linear(256, 256)),
+            nn.ELU(),
+            layer_init(nn.Linear(256, 1), std=1.0),
         )
 
         # Actor network: outputs logits for direction (4 actions)
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 4), std=0.01),  # 4 directions
+            layer_init(nn.Linear(obs_dim, 128)),
+            nn.ELU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ELU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ELU(),
+            layer_init(nn.Linear(128, 4), std=0.01),  # 4 directions
         )
 
     def get_value(self, x):
@@ -354,7 +358,7 @@ class SingleAgentPPOTrainer:
         print(f"Starting training for {self.args.total_timesteps} timesteps")
         print(f"{'='*60}\n")
 
-        for iteration in range(self.args.num_iterations):
+        for iteration in range(1, self.args.num_iterations+1):
             # Annealing the learning rate
             if self.args.anneal_lr:
                 frac = 1.0 - (iteration - 1.0) / self.args.num_iterations

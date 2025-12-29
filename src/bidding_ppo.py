@@ -407,11 +407,13 @@ class SharedAgent(nn.Module):
 
         # Shared critic network: outputs single value estimate
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(obs_dim, 256)),
+            nn.ELU(),
+            layer_init(nn.Linear(256, 256)),
+            nn.ELU(),
+            layer_init(nn.Linear(256, 256)),
+            nn.ELU(),
+            layer_init(nn.Linear(256, 1), std=1.0),
         )
 
         # Shared actor network: outputs action logits
@@ -419,27 +421,29 @@ class SharedAgent(nn.Module):
         # If window_bidding: also outputs window (action_window actions)
         # We'll use separate heads for each action component
         self.actor_shared = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
+            layer_init(nn.Linear(obs_dim, 128)),
+            nn.ELU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ELU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ELU(),
         )
 
         # Separate heads for action components
-        self.direction_head = layer_init(nn.Linear(64, 4), std=0.01)  # 4 directions
+        self.direction_head = layer_init(nn.Linear(128, 4), std=0.01)  # 4 directions
         self.bid_head = None  # Will be set based on bid_upper_bound
         self.window_head = None  # Will be set based on action_window if window_bidding is True
 
     def set_bid_head(self, bid_upper_bound):
         """Set the bid head based on bid upper bound."""
-        self.bid_head = layer_init(nn.Linear(64, bid_upper_bound + 1), std=0.01)
+        self.bid_head = layer_init(nn.Linear(128, bid_upper_bound + 1), std=0.01)
         # Move to same device as the rest of the model
         self.bid_head = self.bid_head.to(next(self.parameters()).device)
 
     def set_window_head(self, action_window):
         """Set the window head based on action window (only for window_bidding mode)."""
         if self.window_bidding:
-            self.window_head = layer_init(nn.Linear(64, action_window), std=0.01)
+            self.window_head = layer_init(nn.Linear(128, action_window), std=0.01)
             # Move to same device as the rest of the model
             self.window_head = self.window_head.to(next(self.parameters()).device)
 
@@ -732,7 +736,7 @@ class PPOTrainer:
         print(f"Starting training for {self.args.total_timesteps} timesteps")
         print(f"{'='*60}\n")
 
-        for iteration in range(self.args.num_iterations):
+        for iteration in range(1, self.args.num_iterations+1):
             # Annealing the learning rate
             if self.args.anneal_lr:
                 frac = 1.0 - (iteration - 1.0) / self.args.num_iterations
