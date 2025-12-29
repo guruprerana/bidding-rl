@@ -899,9 +899,14 @@ class BiddingGridworld(gym.Env):
                     agent_action = action[f"agent_{target_agent_id}"]
                     direction = direction_names.get(agent_action.get("direction"), "?")
                     bid = agent_action.get("bid", 0)
+                    desired_window = None
+                    if self.window_bidding and "window" in agent_action:
+                        desired_window = int(agent_action.get("window", 0)) + 1
                     info_lines.append(f'')
                     info_lines.append(f'ACTIONS:')
                     info_lines.append(f'  Bid:       {bid}')
+                    if desired_window is not None:
+                        info_lines.append(f'  Window:    {desired_window}')
                     info_lines.append(f'  Direction: {direction}')
 
             # Render text
@@ -1241,14 +1246,8 @@ class BiddingGridworld(gym.Env):
             info_lines.append(f'MULTI-AGENT COMPETITION\n')
             info_lines.append(f'Grid: {self.grid_size}x{self.grid_size}')
             info_lines.append(f'Agents: {self.num_agents}')
-            info_lines.append(f'')
-
-            # Targets status
-            targets_reached_count = sum(targets_reached)
-            info_lines.append(f'TARGETS: {targets_reached_count}/{self.num_agents}')
-            for i in range(self.num_agents):
-                status = '✓' if targets_reached[i] else '✗'
-                info_lines.append(f'  {i}: {status}')
+            controller_label = str(winning_agent) if winning_agent is not None and winning_agent >= 0 else "None"
+            info_lines.append(f'Controller: {controller_label}')
             info_lines.append(f'')
 
             # Agent details
@@ -1270,13 +1269,17 @@ class BiddingGridworld(gym.Env):
                         action_data = actions[agent_key]
                         bid = action_data.get('bid', 0)
                         direction = direction_names.get(action_data.get('direction', 0), '?')
+                        window_steps = None
+                        if self.window_bidding and "window" in action_data:
+                            window_steps = int(action_data.get("window", 0)) + 1
                         reward = cumulative.get(agent_key, 0)
+                        window_str = f' W:{window_steps:2d}' if window_steps is not None else ''
 
                         # Highlight controlling agent
                         if i == winning_agent:
-                            info_lines.append(f'  [{i}] ⚡ Bid:{bid:2d} {direction} R:{reward:6.1f}')
+                            info_lines.append(f'  [{i}] ⚡ Bid:{bid:2d}{window_str} {direction} R:{reward:6.1f}')
                         else:
-                            info_lines.append(f'  [{i}]   Bid:{bid:2d} {direction} R:{reward:6.1f}')
+                            info_lines.append(f'  [{i}]   Bid:{bid:2d}{window_str} {direction} R:{reward:6.1f}')
 
             # Render text
             info_text = '\n'.join(info_lines)
