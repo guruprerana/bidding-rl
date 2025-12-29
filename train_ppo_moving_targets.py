@@ -539,12 +539,12 @@ def main():
     TARGET_MOVE_INTERVAL = 2
 
     # Training parameters
-    TOTAL_TIMESTEPS = 150_000_000
-    LEARNING_RATE = 5.0e-4
+    TOTAL_TIMESTEPS = 100_000_000
+    LEARNING_RATE = 2.5e-4
     NUM_ENVS = 2048
     NUM_STEPS = 32
-    NUM_MINIBATCHES = 4
-    UPDATE_EPOCHS = 5
+    NUM_MINIBATCHES = 16
+    UPDATE_EPOCHS = 16
     ANNEAL_LR = True
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
@@ -557,6 +557,10 @@ def main():
     TARGET_KL = None
     SEED = 1
     USE_TORCH_BATCHED_ENV = True
+
+    # Network architecture
+    ACTOR_HIDDEN_SIZES = [128, 128, 128]
+    CRITIC_HIDDEN_SIZES = [256, 256, 256]
 
     # Wandb tracking
     WANDB_PROJECT = "bidding-rl"
@@ -608,6 +612,8 @@ def main():
             max_grad_norm=MAX_GRAD_NORM,
             target_kl=TARGET_KL,
             use_torch_batched_env=USE_TORCH_BATCHED_ENV,
+            actor_hidden_sizes=ACTOR_HIDDEN_SIZES,
+            critic_hidden_sizes=CRITIC_HIDDEN_SIZES,
         )
     else:
         args = Args(
@@ -653,6 +659,8 @@ def main():
             max_grad_norm=MAX_GRAD_NORM,
             target_kl=TARGET_KL,
             use_torch_batched_env=USE_TORCH_BATCHED_ENV,
+            actor_hidden_sizes=ACTOR_HIDDEN_SIZES,
+            critic_hidden_sizes=CRITIC_HIDDEN_SIZES,
         )
 
     # Create and run experiment

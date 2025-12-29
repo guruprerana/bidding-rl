@@ -5,7 +5,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -63,6 +63,12 @@ class SingleAgentArgs:
     target_move_interval: int = 1
     """steps between target movements (for moving targets)"""
 
+    # Network architecture
+    actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
+    """hidden layer sizes for the actor network"""
+    critic_hidden_sizes: Tuple[int, ...] = (256, 256, 256)
+    """hidden layer sizes for the critic network"""
+
     # Algorithm specific arguments
     total_timesteps: int = 500000
     """total timesteps of the experiments"""
@@ -113,7 +119,7 @@ class SingleAgent(nn.Module):
     Only outputs direction actions (no bidding).
     """
 
-    def __init__(self, obs_dim):
+    def __init__(self, obs_dim, actor_hidden_sizes=None, critic_hidden_sizes=None):
         """
         Initialize single-agent actor-critic network.
 
@@ -122,27 +128,28 @@ class SingleAgent(nn.Module):
         """
         super().__init__()
 
+        actor_sizes = list(actor_hidden_sizes) if actor_hidden_sizes is not None else [128, 128, 128]
+        critic_sizes = list(critic_hidden_sizes) if critic_hidden_sizes is not None else [256, 256, 256]
+
         # Critic network: outputs single value estimate
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 256)),
-            nn.ELU(),
-            layer_init(nn.Linear(256, 256)),
-            nn.ELU(),
-            layer_init(nn.Linear(256, 256)),
-            nn.ELU(),
-            layer_init(nn.Linear(256, 1), std=1.0),
-        )
+        critic_layers = []
+        critic_in_dim = obs_dim
+        for hidden_size in critic_sizes:
+            critic_layers.append(layer_init(nn.Linear(critic_in_dim, hidden_size)))
+            critic_layers.append(nn.ELU())
+            critic_in_dim = hidden_size
+        critic_layers.append(layer_init(nn.Linear(critic_in_dim, 1), std=1.0))
+        self.critic = nn.Sequential(*critic_layers)
 
         # Actor network: outputs logits for direction (4 actions)
-        self.actor = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 128)),
-            nn.ELU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ELU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ELU(),
-            layer_init(nn.Linear(128, 4), std=0.01),  # 4 directions
-        )
+        actor_layers = []
+        actor_in_dim = obs_dim
+        for hidden_size in actor_sizes:
+            actor_layers.append(layer_init(nn.Linear(actor_in_dim, hidden_size)))
+            actor_layers.append(nn.ELU())
+            actor_in_dim = hidden_size
+        actor_layers.append(layer_init(nn.Linear(actor_in_dim, 4), std=0.01))  # 4 directions
+        self.actor = nn.Sequential(*actor_layers)
 
     def get_value(self, x):
         """Get value estimate for given observation."""
@@ -312,7 +319,11 @@ class SingleAgentPPOTrainer:
             self.obs_dim = self.envs.obs_dim
         else:
             self.obs_dim = np.array(self.envs.single_observation_space.shape).prod()
-        self.agent = SingleAgent(self.obs_dim).to(self.device)
+        self.agent = SingleAgent(
+            self.obs_dim,
+            actor_hidden_sizes=self.args.actor_hidden_sizes,
+            critic_hidden_sizes=self.args.critic_hidden_sizes,
+        ).to(self.device)
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
 

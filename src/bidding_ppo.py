@@ -6,7 +6,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -73,6 +73,12 @@ class Args:
     """penalty multiplier for chosen window length (only applies when window_bidding=True)"""
     visible_targets: Optional[int] = None
     """number of nearest other targets visible to each agent (None = all targets visible, centralized)"""
+
+    # Network architecture
+    actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
+    """hidden layer sizes for the actor network"""
+    critic_hidden_sizes: Tuple[int, ...] = (256, 256, 256)
+    """hidden layer sizes for the critic network"""
 
     # Algorithm specific arguments
     total_timesteps: int = 500000
@@ -393,7 +399,14 @@ class SharedAgent(nn.Module):
     inference separately through this shared network.
     """
 
-    def __init__(self, obs_dim, num_actions_per_agent, window_bidding=False):
+    def __init__(
+        self,
+        obs_dim,
+        num_actions_per_agent,
+        window_bidding=False,
+        actor_hidden_sizes=None,
+        critic_hidden_sizes=None,
+    ):
         """
         Initialize shared actor-critic network.
 
@@ -405,45 +418,47 @@ class SharedAgent(nn.Module):
         super().__init__()
         self.window_bidding = window_bidding
 
+        actor_sizes = list(actor_hidden_sizes) if actor_hidden_sizes is not None else [128, 128, 128]
+        critic_sizes = list(critic_hidden_sizes) if critic_hidden_sizes is not None else [256, 256, 256]
+
         # Shared critic network: outputs single value estimate
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 256)),
-            nn.ELU(),
-            layer_init(nn.Linear(256, 256)),
-            nn.ELU(),
-            layer_init(nn.Linear(256, 256)),
-            nn.ELU(),
-            layer_init(nn.Linear(256, 1), std=1.0),
-        )
+        critic_layers = []
+        critic_in_dim = obs_dim
+        for hidden_size in critic_sizes:
+            critic_layers.append(layer_init(nn.Linear(critic_in_dim, hidden_size)))
+            critic_layers.append(nn.ELU())
+            critic_in_dim = hidden_size
+        critic_layers.append(layer_init(nn.Linear(critic_in_dim, 1), std=1.0))
+        self.critic = nn.Sequential(*critic_layers)
 
         # Shared actor network: outputs action logits
         # For bidding gridworld: outputs logits for direction (4 actions) and bid (bid_upper_bound+1 actions)
         # If window_bidding: also outputs window (action_window actions)
         # We'll use separate heads for each action component
-        self.actor_shared = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 128)),
-            nn.ELU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ELU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ELU(),
-        )
+        actor_layers = []
+        actor_in_dim = obs_dim
+        for hidden_size in actor_sizes:
+            actor_layers.append(layer_init(nn.Linear(actor_in_dim, hidden_size)))
+            actor_layers.append(nn.ELU())
+            actor_in_dim = hidden_size
+        self.actor_shared = nn.Sequential(*actor_layers) if actor_layers else nn.Identity()
+        self.actor_feature_dim = actor_in_dim
 
         # Separate heads for action components
-        self.direction_head = layer_init(nn.Linear(128, 4), std=0.01)  # 4 directions
+        self.direction_head = layer_init(nn.Linear(self.actor_feature_dim, 4), std=0.01)  # 4 directions
         self.bid_head = None  # Will be set based on bid_upper_bound
         self.window_head = None  # Will be set based on action_window if window_bidding is True
 
     def set_bid_head(self, bid_upper_bound):
         """Set the bid head based on bid upper bound."""
-        self.bid_head = layer_init(nn.Linear(128, bid_upper_bound + 1), std=0.01)
+        self.bid_head = layer_init(nn.Linear(self.actor_feature_dim, bid_upper_bound + 1), std=0.01)
         # Move to same device as the rest of the model
         self.bid_head = self.bid_head.to(next(self.parameters()).device)
 
     def set_window_head(self, action_window):
         """Set the window head based on action window (only for window_bidding mode)."""
         if self.window_bidding:
-            self.window_head = layer_init(nn.Linear(128, action_window), std=0.01)
+            self.window_head = layer_init(nn.Linear(self.actor_feature_dim, action_window), std=0.01)
             # Move to same device as the rest of the model
             self.window_head = self.window_head.to(next(self.parameters()).device)
 
@@ -682,7 +697,9 @@ class PPOTrainer:
         self.agent = SharedAgent(
             self.obs_dim,
             num_actions_per_agent=num_actions_per_agent,
-            window_bidding=self.args.window_bidding
+            window_bidding=self.args.window_bidding,
+            actor_hidden_sizes=self.args.actor_hidden_sizes,
+            critic_hidden_sizes=self.args.critic_hidden_sizes,
         ).to(self.device)
         self.agent.set_bid_head(self.args.bid_upper_bound)
         if self.args.window_bidding:
