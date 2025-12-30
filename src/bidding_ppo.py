@@ -81,8 +81,8 @@ class Args:
     """hidden layer sizes for the critic network"""
 
     # Algorithm specific arguments
-    total_timesteps: int = 500000
-    """total timesteps of the experiments"""
+    num_iterations: int = 1000
+    """the number of policy iterations to run"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 4
@@ -119,8 +119,8 @@ class Args:
     """the batch size (computed in runtime)"""
     minibatch_size: int = 0
     """the mini-batch size (computed in runtime)"""
-    num_iterations: int = 0
-    """the number of iterations (computed in runtime)"""
+    total_timesteps: int = 0
+    """total timesteps of the experiments (computed in runtime)"""
 
 
 class BiddingEnvWrapper(gym.Wrapper):
@@ -622,7 +622,7 @@ class PPOTrainer:
         # Compute derived parameters
         self.args.batch_size = int(args.num_envs * args.num_steps * args.num_agents)
         self.args.minibatch_size = int(self.args.batch_size // args.num_minibatches)
-        self.args.num_iterations = args.total_timesteps // (args.num_envs * args.num_steps * args.num_agents)
+        self.args.total_timesteps = self.args.num_iterations * self.args.num_envs * self.args.num_steps * self.args.num_agents
 
         self.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
 
@@ -727,6 +727,16 @@ class PPOTrainer:
         if self.envs is None:
             raise RuntimeError("Must call setup() before train()")
 
+        def format_duration(seconds: float) -> str:
+            seconds = max(0.0, seconds)
+            total = int(seconds)
+            hours = total // 3600
+            minutes = (total % 3600) // 60
+            secs = total % 60
+            if hours > 0:
+                return f"{hours:d}:{minutes:02d}:{secs:02d}"
+            return f"{minutes:d}:{secs:02d}"
+
         # Storage setup
         # Observation space is (num_agents, obs_dim), so we need (num_steps, num_envs, num_agents, obs_dim)
         num_action_components = 3 if self.args.window_bidding else 2
@@ -750,10 +760,11 @@ class PPOTrainer:
         episode_bid_values = []
 
         print(f"\n{'='*60}")
-        print(f"Starting training for {self.args.total_timesteps} timesteps")
+        print(f"Starting training for {self.args.num_iterations} iterations ({self.args.total_timesteps} timesteps)")
         print(f"{'='*60}\n")
 
         for iteration in range(1, self.args.num_iterations+1):
+            iteration_start = time.time()
             # Annealing the learning rate
             if self.args.anneal_lr:
                 frac = 1.0 - (iteration - 1.0) / self.args.num_iterations
@@ -881,7 +892,13 @@ class PPOTrainer:
 
             # Log training metrics
             sps = int(global_step / (time.time() - start_time))
-            print(f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - Value Loss: {v_loss:.4f} - Policy Loss: {pg_loss:.4f}")
+            iter_time = time.time() - iteration_start
+            remaining_iters = self.args.num_iterations - iteration
+            eta = format_duration(remaining_iters * iter_time)
+            print(
+                f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - "
+                f"Value Loss: {v_loss:.4f} - Policy Loss: {pg_loss:.4f} - ETA: {eta}"
+            )
 
             if self.args.track:
                 log_dict = {

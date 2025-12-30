@@ -27,7 +27,8 @@ This repo implements multi-agent bidding RL in a gridworld. A shared policy lear
 
 - Multi-agent training uses PPO with a shared actor-critic network.
 - Single-agent mode learns to reach all targets without bidding.
-- Configure runs in `train_ppo_moving_targets.py`.
+- Configure runs in `train_ppo_moving_targets.py` (iterations are set via `NUM_ITERATIONS`).
+- Video rollouts can be throttled separately with `VIDEO_FREQ`.
 
 ## GPU Batched Environment (Torch)
 
