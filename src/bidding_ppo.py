@@ -895,9 +895,11 @@ class PPOTrainer:
             iter_time = time.time() - iteration_start
             remaining_iters = self.args.num_iterations - iteration
             eta = format_duration(remaining_iters * iter_time)
+            iter_time_str = format_duration(iter_time)
             print(
                 f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - "
-                f"Value Loss: {v_loss:.4f} - Policy Loss: {pg_loss:.4f} - ETA: {eta}"
+                f"Value Loss: {v_loss:.4f} - Policy Loss: {pg_loss:.4f} - "
+                f"Iter Time: {iter_time_str} - ETA: {eta}"
             )
 
             if self.args.track:
