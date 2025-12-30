@@ -1,24 +1,23 @@
-# BiddingGridworld
+# bidding-rl
 
-A custom multi-objective gridworld environment using Gymnasium where agents must navigate and bid for resources, with Zero-Sum Q-Learning implementation for decentralized training.
+Multi-agent bidding RL in a gridworld. A shared PPO policy learns to navigate toward targets while agents bid for control of a shared body. The project runs on a GPU-native batched environment and supports moving targets, action windows, bid penalties, target expiry, and decentralized observations.
 
-## Environment Description
+Note: The legacy CPU environment in `src/bidding_gridworld.py` is deprecated. The active environment is the GPU-native implementation in `src/bidding_gridworld_torch.py`.
 
-The BiddingGridworld is a 2-agent environment where:
-- Agents navigate in a gridworld
-- Each agent has a specific target to reach
-- Agents must bid for the right to take actions
-- Higher bids win, but cost resources
+## Highlights
 
-## Features
+- Shared policy PPO for multi-agent bidding and single-agent navigation.
+- GPU-native batched environment with moving targets and target expiry.
+- Optional action windows with bid penalties on the first step.
+- Centralized or per-agent observations (`visible_targets`).
+- Evaluation and MP4 rollout generation integrated into the training script.
 
-- **Discrete Action/Observation Spaces**: Optimized for tabular reinforcement learning
-- **Bidding Mechanism**: Agents compete through bidding
-- **Multi-Objective**: Multiple targets and competing objectives
-- **Zero-Sum Game Theory**: Nash-Q learning for decentralized training
-- **Configurable**: Grid size, bid limits, and rewards can be adjusted
+## Requirements
 
-## Installation
+- Python 3.10+ recommended
+- CUDA-capable GPU recommended
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -26,125 +25,87 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### 1. Test the System
+Train a PPO run (edit config in the script):
+
 ```bash
-python quick_test.py
+python train_ppo_moving_targets.py
 ```
 
-### 2. Run Example Training
+Evaluate checkpoints (edit paths in the script):
+
 ```bash
-python example_training.py
+python evaluate_trained_models.py
 ```
 
-### 3. Full Training with Plotting
-```bash
-python train_zero_sum.py
-```
+## Configuration
 
-### 4. Evaluate Trained Models
-```bash
-python evaluate_zero_sum.py
-```
+All training configuration lives at the top of `train_ppo_moving_targets.py`.
 
-## Usage
+Key sections:
 
-### Basic Environment
+- Mode selection: `SINGLE_AGENT_MODE` and `MOVING_TARGETS`.
+- Environment params: grid size, targets, expiry, rewards, bidding, windows.
+- Training params: `NUM_ITERATIONS`, rollout length, PPO epochs.
+- Evaluation params: `EVAL_FREQ`, `NUM_EVAL_EPISODES`, `VIDEO_FREQ`.
+
+Example:
 
 ```python
-from src.bidding_gridworld import BiddingGridworld
+SINGLE_AGENT_MODE = False
+MOVING_TARGETS = True
 
-env = BiddingGridworld(grid_size=10, bid_upper_bound=5)
-obs, info = env.reset()
+NUM_ITERATIONS = 1000
+NUM_ENVS = 2048
+NUM_STEPS = 256
 
-for _ in range(100):
-    # Random actions for both agents
-    actions = {
-        0: env.action_space.sample(),
-        1: env.action_space.sample()
-    }
-    obs, rewards, terminated, truncated, info = env.step(actions)
-    
-    if terminated or truncated:
-        obs, info = env.reset()
-
-env.close()
+EVAL_FREQ = 50
+VIDEO_FREQ = 100
+NUM_EVAL_EPISODES = 20
+NUM_VIDEO_EPISODES = 1
 ```
 
-### Zero-Sum Wrapper for Single-Agent Training
+## Environment
 
-```python
-from src.zero_sum_wrapper import ZeroSumBiddingWrapper
+GPU-native environment (torch tensors on CUDA):
 
-env = ZeroSumBiddingWrapper(target_agent_id=0)
-obs, info = env.reset()
+- File: `src/bidding_gridworld_torch.py`
+- Class: `BiddingGridworld`
+- Config: `BiddingGridworldConfig`
 
-for _ in range(100):
-    action = env.action_space.sample()
-    obs, rewards, terminated, truncated, info = env.step(action)
-    
-    if terminated or truncated:
-        obs, info = env.reset()
+Core mechanics:
 
-env.close()
+- Bidding: agents bid each step, highest bidder controls movement.
+- Action windows: winner can control for multiple steps; bid penalty applies on the first step.
+- Target expiry: penalties if a target is not reached within configured steps.
+- Moving targets: targets move and respawn after being reached or expired.
+- Observations: centralized (all targets) or per-agent (visible nearest targets).
+
+## Training
+
+PPO trainers:
+
+- Multi-agent: `src/bidding_ppo.py`
+- Single-agent: `src/single_agent_ppo.py`
+
+Both trainers use the GPU environment directly and avoid CPU conversions.
+
+## Evaluation and Rollouts
+
+`train_ppo_moving_targets.py` performs periodic evaluation and can save MP4 rollouts. Video frequency is independent from eval frequency via `VIDEO_FREQ`.
+
+Outputs are saved under `logs/` per run:
+
+```
+logs/<run_name>/
+  checkpoints/
+  rollouts/
+  config/
 ```
 
-### Zero-Sum Q-Learning
+## Deprecation Notice
 
-```python
-from src.zero_sum_qlearning import ZeroSumQLearning
+`src/bidding_gridworld.py` is deprecated and only kept for reference. Use `src/bidding_gridworld_torch.py` for new work.
 
-# Create agent
-agent = ZeroSumQLearning(
-    protagonist_action_space_size=16,
-    adversary_action_space_size=16,
-    observation_space_size=1250,
-    learning_rate=0.1,
-    discount_factor=0.95,
-    epsilon=0.3
-)
+## License
 
-# Training loop
-for episode in range(1000):
-    obs, info = env.reset()
-    while True:
-        action = agent.get_action(obs, bid_upper_bound=3, training=True)
-        next_obs, rewards, terminated, truncated, info = env.step(action)
-        agent.update(obs, action, rewards["protagonist"], next_obs, terminated)
-        obs = next_obs
-        if terminated or truncated:
-            break
-    agent.end_episode()
-
-# Save trained model
-agent.save_model('trained_agent.pkl')
-
-# Load trained model
-loaded_agent = ZeroSumQLearning.load_model('trained_agent.pkl')
-```
-
-## Architecture
-
-### Core Components
-
-1. **BiddingGridworld** (`src/bidding_gridworld.py`): Main multi-agent environment
-2. **ZeroSumBiddingWrapper** (`src/zero_sum_wrapper.py`): Single-agent wrapper for decentralized training
-3. **ZeroSumQLearning** (`src/zero_sum_qlearning.py`): Nash-Q learning algorithm implementation
-
-### Training Scripts
-
-1. **quick_test.py**: Fast system verification (50 episodes each agent)
-2. **example_training.py**: Medium training with demonstrations (500 episodes each agent)
-3. **train_zero_sum.py**: Full training with plotting and model saving (2000 episodes each agent)
-4. **evaluate_zero_sum.py**: Evaluation and comparison of trained models
-
-## Files
-
-- `src/bidding_gridworld.py`: Main multi-objective environment
-- `src/zero_sum_wrapper.py`: Zero-sum wrapper for training
-- `example_zero_sum.py`: Example usage demonstration
-
-## Installation
-
-```bash
-pip install -r requirements.txt
-```
+See `LICENSE`.

@@ -8,7 +8,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
 
-import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,8 +15,7 @@ import torch.optim as optim
 from torch.distributions.categorical import Categorical
 import wandb
 
-from bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
-from torch_batched_env import TorchBatchedBiddingGridworld, TorchBatchedConfig
+from bidding_gridworld_torch import BiddingGridworld, BiddingGridworldConfig
 from ppo_utils import layer_init, compute_gae, ppo_update_step, compute_explained_variance
 
 
@@ -31,8 +29,6 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    use_torch_batched_env: bool = False
-    """if toggled, use the GPU-native batched environment"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "bidding-rl"
@@ -121,273 +117,6 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     total_timesteps: int = 0
     """total timesteps of the experiments (computed in runtime)"""
-
-
-class BiddingEnvWrapper(gym.Wrapper):
-    """
-    Wrapper to convert the multi-agent BiddingGridworld to a format compatible with vectorized training.
-
-    Key features:
-    - Handles both centralized (Box) and decentralized (Dict) observation modes
-    - For centralized: Reorders target observations so each agent's target appears first
-    - For decentralized: Directly stacks per-agent observations from Dict
-    - Flattens multi-agent actions/rewards into single vectors for parallel processing
-
-    Centralized mode (visible_targets=None):
-    - Base env returns Box observation with all targets
-    - We reorder for each agent so their target appears first
-
-    Decentralized mode (visible_targets<num_agents):
-    - Base env returns Dict of per-agent observations
-    - Each agent already sees own target + nearest visible targets
-    - We just stack the Dict values into an array
-    """
-
-    def __init__(self, env, num_agents, window_bidding=False):
-        super().__init__(env)
-        self.num_agents = num_agents
-        self.window_bidding = window_bidding
-
-        # Check if environment uses per-agent observations (Dict space) or centralized (Box space)
-        self.use_per_agent_obs = isinstance(env.observation_space, gym.spaces.Dict)
-
-        if self.use_per_agent_obs:
-            # Decentralized mode: env returns Dict of observations
-            # Get the observation dimension from one agent's space
-            base_obs_dim = env.observation_space[f"agent_0"].shape[0]
-        else:
-            # Centralized mode: env returns single Box observation
-            # Original observation dimension from BiddingGridworld (no change in size)
-            base_obs_dim = env.observation_space.shape[0]
-
-        # Observation space is (num_agents, base_obs_dim) since we return stacked observations
-        self.observation_space = gym.spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(num_agents, base_obs_dim),
-            dtype=np.float32
-        )
-
-        # Action space: each agent outputs (direction, bid) or (direction, bid, window)
-        # We'll use a MultiDiscrete space
-        if window_bidding:
-            # [dir_agent0, bid_agent0, window_agent0, dir_agent1, bid_agent1, window_agent1, ...]
-            self.action_space = gym.spaces.MultiDiscrete(
-                [4, env.bid_upper_bound + 1, env.action_window] * num_agents
-            )
-        else:
-            # [dir_agent0, bid_agent0, dir_agent1, bid_agent1, ...]
-            self.action_space = gym.spaces.MultiDiscrete(
-                [4, env.bid_upper_bound + 1] * num_agents
-            )
-
-    def _reorder_observation(self, base_obs, target_index):
-        """
-        Reorder base observation so the agent's target appears first.
-
-        Args:
-            base_obs: Base observation from environment (numpy array)
-            target_index: Which target this agent is pursuing (0 to num_agents-1)
-
-        Returns:
-            Reordered observation with this agent's target information first
-        """
-        return reorder_observation_for_agent(base_obs, target_index, self.num_agents)
-
-    def reset(self, **kwargs):
-        """Reset environment and return observations for all agents."""
-        base_obs, info = self.env.reset(**kwargs)
-
-        if self.use_per_agent_obs:
-            # Decentralized mode: base_obs is a Dict with per-agent observations
-            # Stack them in order: agent_0, agent_1, ..., agent_n
-            obs_list = [base_obs[f"agent_{i}"] for i in range(self.num_agents)]
-            stacked_obs = np.stack(obs_list, axis=0)
-        else:
-            # Centralized mode: reorder observation for each agent (each pursuing different target)
-            obs_list = []
-            for agent_idx in range(self.num_agents):
-                reordered_obs = self._reorder_observation(base_obs, agent_idx)
-                obs_list.append(reordered_obs)
-            # Stack all agent observations into single array for vectorized processing
-            # Shape: (num_agents, obs_dim)
-            stacked_obs = np.stack(obs_list, axis=0)
-
-        return stacked_obs, info
-
-    def step(self, action):
-        """
-        Execute step with actions from all agents.
-
-        Args:
-            action: Flattened action array
-                   Without window_bidding: [dir_agent0, bid_agent0, dir_agent1, bid_agent1, ...]
-                   With window_bidding: [dir_agent0, bid_agent0, window_agent0, dir_agent1, bid_agent1, window_agent1, ...]
-
-        Returns:
-            observations: Reordered observations for all agents
-            rewards: Rewards for all agents
-            terminated: Episode termination flag
-            truncated: Episode truncation flag
-            info: Additional information
-        """
-        # Convert flattened action array to BiddingGridworld format
-        env_action = {}
-        actions_per_agent = 3 if self.window_bidding else 2
-
-        for agent_idx in range(self.num_agents):
-            # Extract direction and bid for this agent
-            base_idx = agent_idx * actions_per_agent
-            direction = int(action[base_idx])
-            bid = int(action[base_idx + 1])
-
-            agent_action = {
-                "direction": direction,
-                "bid": bid
-            }
-
-            if self.window_bidding:
-                # Add 1 because the action space is 0 to action_window-1
-                window = int(action[base_idx + 2])
-                agent_action["window"] = window
-
-            env_action[f"agent_{agent_idx}"] = agent_action
-
-        # Execute step in underlying environment
-        base_obs, rewards_dict, terminated, truncated, info = self.env.step(env_action)
-
-        if self.use_per_agent_obs:
-            # Decentralized mode: base_obs is a Dict with per-agent observations
-            # Stack them in order: agent_0, agent_1, ..., agent_n
-            obs_list = [base_obs[f"agent_{i}"] for i in range(self.num_agents)]
-            stacked_obs = np.stack(obs_list, axis=0)
-        else:
-            # Centralized mode: reorder observations for all agents
-            obs_list = []
-            for agent_idx in range(self.num_agents):
-                reordered_obs = self._reorder_observation(base_obs, agent_idx)
-                obs_list.append(reordered_obs)
-            stacked_obs = np.stack(obs_list, axis=0)
-
-        # Extract rewards for all agents in order
-        rewards_array = np.array([
-            rewards_dict[f"agent_{i}"] for i in range(self.num_agents)
-        ], dtype=np.float32)
-
-        return stacked_obs, rewards_array, terminated, truncated, info
-
-
-def make_env(args, idx, run_name):
-    """Create a single BiddingGridworld environment with wrapper."""
-    def thunk():
-        # Create base environment (either static or moving targets)
-        if args.moving_targets:
-            env = MovingTargetBiddingGridworld(
-                grid_size=args.grid_size,
-                num_agents=args.num_agents,
-                bid_upper_bound=args.bid_upper_bound,
-                bid_penalty=args.bid_penalty,
-                target_reward=args.target_reward,
-                max_steps=args.max_steps,
-                action_window=args.action_window,
-                distance_reward_scale=args.distance_reward_scale,
-                target_expiry_steps=args.target_expiry_steps,
-                target_expiry_penalty=args.target_expiry_penalty,
-                direction_change_prob=args.direction_change_prob,
-                target_move_interval=args.target_move_interval,
-                window_bidding=args.window_bidding,
-                window_penalty=args.window_penalty,
-                visible_targets=args.visible_targets
-            )
-        else:
-            env = BiddingGridworld(
-                grid_size=args.grid_size,
-                num_agents=args.num_agents,
-                bid_upper_bound=args.bid_upper_bound,
-                bid_penalty=args.bid_penalty,
-                target_reward=args.target_reward,
-                max_steps=args.max_steps,
-                action_window=args.action_window,
-                distance_reward_scale=args.distance_reward_scale,
-                target_expiry_steps=args.target_expiry_steps,
-                target_expiry_penalty=args.target_expiry_penalty,
-                window_bidding=args.window_bidding,
-                window_penalty=args.window_penalty,
-                visible_targets=args.visible_targets
-            )
-
-        # Wrap with our custom wrapper
-        env = BiddingEnvWrapper(env, args.num_agents, window_bidding=args.window_bidding)
-
-        return env
-
-    return thunk
-
-
-def reorder_observation_for_agent(base_obs: np.ndarray, target_index: int, num_agents: int) -> np.ndarray:
-    """
-    Reorder base observation so the specified agent's target appears first.
-
-    This is a utility function that can be used anywhere we need to prepare
-    observations for individual agents (training, evaluation, deployment, etc.).
-
-    Args:
-        base_obs: Base observation from BiddingGridworld environment
-                 Structure: [agent_pos(2), all_targets(2*N), all_reached(N), all_counters(N), window_steps_remaining(1)]
-        target_index: Which target this agent is pursuing (0 to num_agents-1)
-        num_agents: Total number of agents/targets
-
-    Returns:
-        Reordered observation with the agent's target information first
-        Structure: [agent_pos(2), target_idx(2), others(2*(N-1)),
-                   target_idx_reached(1), others_reached(N-1),
-                   target_idx_counter(1), others_counters(N-1),
-                   window_steps_remaining(1)]
-    """
-    # Parse observation sections
-    agent_pos = base_obs[0:2]  # First 2 values: agent position
-
-    # Target positions: next 2*num_agents values
-    target_pos_start = 2
-    target_pos_end = 2 + 2 * num_agents
-    all_target_positions = base_obs[target_pos_start:target_pos_end].reshape(num_agents, 2)
-
-    # Target reached flags: next num_agents values
-    reached_start = target_pos_end
-    reached_end = reached_start + num_agents
-    all_target_reached = base_obs[reached_start:reached_end]
-
-    # Target step counters: next num_agents values
-    counter_start = reached_end
-    counter_end = counter_start + num_agents
-    all_target_counters = base_obs[counter_start:counter_end]
-
-    # Window steps remaining: last value
-    window_steps_remaining = base_obs[-1]
-
-    # Reorder each section so target_index comes first
-    # Create index permutation: [target_index, other indices...]
-    indices = [target_index] + [i for i in range(num_agents) if i != target_index]
-
-    # Reorder target positions
-    reordered_positions = all_target_positions[indices].flatten()
-
-    # Reorder target reached flags
-    reordered_reached = all_target_reached[indices]
-
-    # Reorder target counters
-    reordered_counters = all_target_counters[indices]
-
-    # Reconstruct observation
-    reordered_obs = np.concatenate([
-        agent_pos,
-        reordered_positions,
-        reordered_reached,
-        reordered_counters,
-        [window_steps_remaining]  # Add window steps remaining at the end
-    ])
-
-    return reordered_obs
 
 
 class SharedAgent(nn.Module):
@@ -544,65 +273,6 @@ class SharedAgent(nn.Module):
         return action, total_log_prob, entropy, value
 
 
-class ManualVectorEnv:
-    """
-    Manual vectorization for multi-agent environments.
-
-    Handles environments that return multi-dimensional rewards and observations.
-    """
-
-    def __init__(self, env_fns):
-        """
-        Initialize manual vectorized environment.
-
-        Args:
-            env_fns: List of functions that create environments
-        """
-        self.envs = [fn() for fn in env_fns]
-        self.num_envs = len(self.envs)
-        self.single_observation_space = self.envs[0].observation_space
-        self.single_action_space = self.envs[0].action_space
-
-    def reset(self, **kwargs):
-        """Reset all environments."""
-        observations = []
-        infos = []
-        for env in self.envs:
-            obs, info = env.reset(**kwargs)
-            observations.append(obs)
-            infos.append(info)
-        return np.array(observations), infos
-
-    def step(self, actions):
-        """Step all environments."""
-        observations = []
-        rewards = []
-        terminations = []
-        truncations = []
-        infos = []
-
-        for i, (env, action) in enumerate(zip(self.envs, actions)):
-            obs, reward, terminated, truncated, info = env.step(action)
-            observations.append(obs)
-            rewards.append(reward)
-            terminations.append(terminated)
-            truncations.append(truncated)
-            infos.append(info)
-
-        return (
-            np.array(observations),
-            np.array(rewards),
-            np.array(terminations),
-            np.array(truncations),
-            infos
-        )
-
-    def close(self):
-        """Close all environments."""
-        for env in self.envs:
-            env.close()
-
-
 class PPOTrainer:
     """PPO Trainer for multi-agent bidding gridworld with shared networks."""
 
@@ -649,50 +319,39 @@ class PPOTrainer:
         self.agent = None
         self.optimizer = None
         self.obs_dim = None
-        self.use_torch_env = False
 
     def setup(self):
         """Setup environments, agent, and optimizer."""
-        # Environment setup
-        self.use_torch_env = bool(self.args.use_torch_batched_env)
-        if self.use_torch_env:
-            env_config = TorchBatchedConfig(
-                grid_size=self.args.grid_size,
-                num_agents=self.args.num_agents,
-                bid_upper_bound=self.args.bid_upper_bound,
-                bid_penalty=self.args.bid_penalty,
-                target_reward=self.args.target_reward,
-                max_steps=self.args.max_steps,
-                action_window=self.args.action_window,
-                distance_reward_scale=self.args.distance_reward_scale,
-                target_expiry_steps=self.args.target_expiry_steps,
-                target_expiry_penalty=self.args.target_expiry_penalty,
-                moving_targets=self.args.moving_targets,
-                direction_change_prob=self.args.direction_change_prob,
-                target_move_interval=self.args.target_move_interval,
-                window_bidding=self.args.window_bidding,
-                window_penalty=self.args.window_penalty,
-                visible_targets=self.args.visible_targets,
-                single_agent_mode=False,
-            )
-            self.envs = TorchBatchedBiddingGridworld(
-                env_config,
-                num_envs=self.args.num_envs,
-                device=self.device,
-                seed=self.args.seed,
-            )
-        else:
-            # Use manual vectorization for multi-agent support
-            self.envs = ManualVectorEnv(
-                [make_env(self.args, i, self.run_name) for i in range(self.args.num_envs)]
-            )
+        # Environment setup (torch batched only)
+        env_config = BiddingGridworldConfig(
+            grid_size=self.args.grid_size,
+            num_agents=self.args.num_agents,
+            bid_upper_bound=self.args.bid_upper_bound,
+            bid_penalty=self.args.bid_penalty,
+            target_reward=self.args.target_reward,
+            max_steps=self.args.max_steps,
+            action_window=self.args.action_window,
+            distance_reward_scale=self.args.distance_reward_scale,
+            target_expiry_steps=self.args.target_expiry_steps,
+            target_expiry_penalty=self.args.target_expiry_penalty,
+            moving_targets=self.args.moving_targets,
+            direction_change_prob=self.args.direction_change_prob,
+            target_move_interval=self.args.target_move_interval,
+            window_bidding=self.args.window_bidding,
+            window_penalty=self.args.window_penalty,
+            visible_targets=self.args.visible_targets,
+            single_agent_mode=False,
+        )
+        self.envs = BiddingGridworld(
+            env_config,
+            num_envs=self.args.num_envs,
+            device=self.device,
+            seed=self.args.seed,
+        )
 
         # Create shared agent
         # Observation space is (num_agents, obs_dim), so we need shape[1] for per-agent obs dim
-        if self.use_torch_env:
-            self.obs_dim = self.envs.per_agent_obs_dim
-        else:
-            self.obs_dim = self.envs.single_observation_space.shape[1]
+        self.obs_dim = self.envs.per_agent_obs_dim
         num_actions_per_agent = 3 if self.args.window_bidding else 2
         self.agent = SharedAgent(
             self.obs_dim,
@@ -751,8 +410,6 @@ class PPOTrainer:
         global_step = 0
         start_time = time.time()
         next_obs, _ = self.envs.reset(seed=self.args.seed)
-        if not self.use_torch_env:
-            next_obs = torch.Tensor(next_obs).to(self.device)
         next_done = torch.zeros((self.args.num_envs, self.args.num_agents)).to(self.device)
 
         # Track bidding-specific statistics (aggregated across rollout)
@@ -790,25 +447,11 @@ class PPOTrainer:
                 logprobs[step] = logprob
 
                 # Execute actions in environment
-                if self.use_torch_env:
-                    next_obs, reward, terminations, truncations, infos = self.envs.step(action)
-                    next_done_scalar = terminations | truncations
-                    next_done = next_done_scalar.unsqueeze(1).expand(-1, self.args.num_agents)
-                    rewards[step] = reward
-                    next_done = next_done.to(self.device, dtype=torch.float32)
-                else:
-                    flat_action = action.reshape(self.args.num_envs, -1).cpu().numpy()
-                    next_obs, reward, terminations, truncations, infos = self.envs.step(flat_action)
-
-                    # Combine termination signals and broadcast to all agents
-                    # terminations and truncations are shape (num_envs,)
-                    # We need shape (num_envs, num_agents) since all agents share the same environment
-                    next_done_scalar = np.logical_or(terminations, truncations)  # shape: (num_envs,)
-                    next_done = np.broadcast_to(next_done_scalar[:, np.newaxis], (self.args.num_envs, self.args.num_agents))  # shape: (num_envs, num_agents)
-
-                    rewards[step] = torch.tensor(reward).to(self.device)
-                    next_obs = torch.Tensor(next_obs).to(self.device)
-                    next_done = torch.Tensor(next_done).to(self.device)
+                next_obs, reward, terminations, truncations, infos = self.envs.step(action)
+                next_done_scalar = terminations | truncations
+                next_done = next_done_scalar.unsqueeze(1).expand(-1, self.args.num_agents)
+                rewards[step] = reward
+                next_done = next_done.to(self.device, dtype=torch.float32)
 
                 # Extract bidding information for logging
                 for env_idx in range(self.args.num_envs):

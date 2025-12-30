@@ -1,3 +1,5 @@
+"""Deprecated: use src/torch_batched_env.py (GPU-native) instead."""
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
@@ -6,6 +8,14 @@ import random
 from pathlib import Path
 import matplotlib.pyplot as plt
 import cv2
+
+import warnings
+
+warnings.warn(
+    "src/bidding_gridworld.py is deprecated; use src/torch_batched_env.py instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 class BiddingGridworld(gym.Env):

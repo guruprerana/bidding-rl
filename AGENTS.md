@@ -13,7 +13,7 @@ This repo implements multi-agent bidding RL in a gridworld. A shared policy lear
 - `src/single_agent_ppo.py` - Single-agent PPO trainer.
 - `train_ppo_moving_targets.py` - Training entry point and configuration.
 - `evaluate_trained_models.py` - Evaluation script for saved checkpoints.
-- `src/torch_batched_env.py` - GPU-native batched gridworld environment (torch tensors on CUDA).
+- `src/bidding_gridworld_torch.py` - GPU-native batched gridworld environment (torch tensors on CUDA).
 
 ## Key Mechanics
 
@@ -32,16 +32,13 @@ This repo implements multi-agent bidding RL in a gridworld. A shared policy lear
 
 ## GPU Batched Environment (Torch)
 
-The GPU-native env is implemented in `src/torch_batched_env.py` as `TorchBatchedBiddingGridworld`.
+The GPU-native env is implemented in `src/bidding_gridworld_torch.py` as `BiddingGridworld`.
 
 Capabilities:
 - Batched, GPU-only step logic (bidding/windowing, movement, rewards, expiry).
 - Moving targets and respawn logic on GPU.
 - Centralized and per-agent observation layouts on GPU.
-
-How to enable:
-- Set `USE_TORCH_BATCHED_ENV = True` in `train_ppo_moving_targets.py`.
-- The trainers (`src/bidding_ppo.py` and `src/single_agent_ppo.py`) read `use_torch_batched_env` to toggle CPU vs GPU envs.
+- Evaluation helpers and video rendering used by `train_ppo_moving_targets.py`.
 
 Notes:
 - The GPU env returns torch tensors directly; the PPO loops avoid CPU conversions when enabled.

@@ -33,13 +33,13 @@ import shutil
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from bidding_ppo import PPOTrainer, Args, reorder_observation_for_agent
+from bidding_ppo import PPOTrainer, Args
 from single_agent_ppo import SingleAgentPPOTrainer, SingleAgentArgs
-from bidding_gridworld import (
+from bidding_gridworld_torch import (
     BiddingGridworld,
-    MovingTargetBiddingGridworld,
+    BiddingGridworldConfig,
     evaluate_multi_agent_policy,
-    evaluate_single_agent_policy
+    evaluate_single_agent_policy,
 )
 
 
@@ -180,7 +180,7 @@ class PPOMovingTargetsExperiment:
         print(f"{'='*60}\n")
 
         # Create evaluation environment with longer max_steps
-        eval_env = MovingTargetBiddingGridworld(
+        env_config = BiddingGridworldConfig(
             grid_size=trainer.args.grid_size,
             num_agents=trainer.args.num_agents,
             bid_upper_bound=trainer.args.bid_upper_bound,
@@ -191,38 +191,30 @@ class PPOMovingTargetsExperiment:
             distance_reward_scale=trainer.args.distance_reward_scale,
             target_expiry_steps=trainer.args.target_expiry_steps,
             target_expiry_penalty=trainer.args.target_expiry_penalty,
+            moving_targets=True,
             direction_change_prob=trainer.args.direction_change_prob,
             target_move_interval=trainer.args.target_move_interval,
             window_bidding=trainer.args.window_bidding,
             window_penalty=trainer.args.window_penalty,
             visible_targets=trainer.args.visible_targets,
+            single_agent_mode=False,
+        )
+        eval_env = BiddingGridworld(
+            env_config,
+            num_envs=1,
+            device=trainer.device,
+            seed=trainer.args.seed,
         )
 
-        # Check if we're using per-agent observations (decentralized mode)
-        use_per_agent_obs = trainer.args.visible_targets is not None and trainer.args.visible_targets < trainer.args.num_agents
-
         # Create policy wrapper function
-        def policy_fn(base_obs):
-            """Convert base observation to agent-specific observations and get actions."""
-            if use_per_agent_obs:
-                # Decentralized mode: base_obs is already a Dict with per-agent observations
-                # Stack them in order: agent_0, agent_1, ..., agent_n
-                obs_list = [base_obs[f"agent_{i}"] for i in range(trainer.args.num_agents)]
-                obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
-            else:
-                # Centralized mode: reorder targets for each agent
-                obs_list = []
-                for agent_idx in range(trainer.args.num_agents):
-                    reordered_obs = reorder_observation_for_agent(
-                        base_obs, agent_idx, trainer.args.num_agents
-                    )
-                    obs_list.append(reordered_obs)
-                obs = torch.tensor(np.stack(obs_list), dtype=torch.float32).to(trainer.device)
+        def policy_fn(obs):
+            """Get actions for a single env using per-agent observations."""
+            obs_tensor = obs if torch.is_tensor(obs) else torch.tensor(obs, dtype=torch.float32)
+            obs_tensor = obs_tensor.to(trainer.device)
 
-            # Get actions (deterministic for evaluation)
             with torch.no_grad():
-                action, _, _, _ = trainer.agent.get_action_and_value(obs)
-                return action.cpu().numpy()
+                action, _, _, _ = trainer.agent.get_action_and_value(obs_tensor)
+                return action
 
         # Run evaluation using refactored function
         eval_stats = evaluate_multi_agent_policy(
@@ -317,41 +309,41 @@ class PPOMovingTargetsExperiment:
         print(f"{'='*60}\n")
 
         # Create evaluation environment with longer max_steps
-        if trainer.args.moving_targets:
-            eval_env = MovingTargetBiddingGridworld(
-                grid_size=trainer.args.grid_size,
-                num_agents=trainer.args.num_targets,
-                target_reward=trainer.args.target_reward,
-                max_steps=self.eval_max_steps,
-                distance_reward_scale=trainer.args.distance_reward_scale,
-                target_expiry_steps=trainer.args.target_expiry_steps,
-                target_expiry_penalty=trainer.args.target_expiry_penalty,
-                reward_decay_factor=trainer.args.reward_decay_factor,
-                direction_change_prob=trainer.args.direction_change_prob,
-                target_move_interval=trainer.args.target_move_interval,
-                single_agent_mode=True
-            )
-        else:
-            eval_env = BiddingGridworld(
-                grid_size=trainer.args.grid_size,
-                num_agents=trainer.args.num_targets,
-                target_reward=trainer.args.target_reward,
-                max_steps=self.eval_max_steps,
-                distance_reward_scale=trainer.args.distance_reward_scale,
-                target_expiry_steps=trainer.args.target_expiry_steps,
-                target_expiry_penalty=trainer.args.target_expiry_penalty,
-                reward_decay_factor=trainer.args.reward_decay_factor,
-                single_agent_mode=True
-            )
+        env_config = BiddingGridworldConfig(
+            grid_size=trainer.args.grid_size,
+            num_agents=trainer.args.num_targets,
+            bid_upper_bound=0,
+            bid_penalty=0.0,
+            target_reward=trainer.args.target_reward,
+            max_steps=self.eval_max_steps,
+            action_window=1,
+            distance_reward_scale=trainer.args.distance_reward_scale,
+            target_expiry_steps=trainer.args.target_expiry_steps,
+            target_expiry_penalty=trainer.args.target_expiry_penalty,
+            moving_targets=trainer.args.moving_targets,
+            direction_change_prob=trainer.args.direction_change_prob,
+            target_move_interval=trainer.args.target_move_interval,
+            window_bidding=False,
+            window_penalty=0.0,
+            visible_targets=None,
+            single_agent_mode=True,
+            reward_decay_factor=trainer.args.reward_decay_factor,
+        )
+        eval_env = BiddingGridworld(
+            env_config,
+            num_envs=1,
+            device=trainer.device,
+            seed=trainer.args.seed,
+        )
 
         # Create policy wrapper function
         def policy_fn(obs):
-            """Convert observation to tensor and get action."""
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).to(trainer.device)
-            # Get action (deterministic for evaluation)
+            """Get action for a single env."""
+            obs_tensor = obs if torch.is_tensor(obs) else torch.tensor(obs, dtype=torch.float32)
+            obs_tensor = obs_tensor.to(trainer.device)
             with torch.no_grad():
                 action, _, _, _ = trainer.agent.get_action_and_value(obs_tensor.unsqueeze(0))
-                return action.squeeze(0).cpu().numpy()
+                return action.squeeze(0)
 
         # Run evaluation using refactored function
         eval_stats = evaluate_single_agent_policy(
@@ -540,15 +532,15 @@ def main():
     GRID_SIZE = 30
     NUM_AGENTS = 8  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 50.0
-    MAX_STEPS = 1000  # Maximum steps per episode during training
+    MAX_STEPS = 2000  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
-    DISTANCE_REWARD_SCALE = 0.8
-    TARGET_EXPIRY_STEPS = 150
-    TARGET_EXPIRY_PENALTY = 100.0
+    DISTANCE_REWARD_SCALE = 0.6
+    TARGET_EXPIRY_STEPS = 200
+    TARGET_EXPIRY_PENALTY = 50.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
 
     # Multi-agent specific parameters (ignored in single-agent mode)
-    BID_UPPER_BOUND = 5
+    BID_UPPER_BOUND = 6
     BID_PENALTY = 0.1
     ACTION_WINDOW = 5
     WINDOW_BIDDING = False  # Set to True to let agents choose their window length
@@ -560,11 +552,11 @@ def main():
     TARGET_MOVE_INTERVAL = 5
 
     # Training parameters
-    NUM_ITERATIONS = 200
+    NUM_ITERATIONS = 400
     LEARNING_RATE = 2.5e-4
-    NUM_ENVS = 2048
+    NUM_ENVS = 4096
     NUM_STEPS = 256
-    NUM_MINIBATCHES = 128
+    NUM_MINIBATCHES = 256
     UPDATE_EPOCHS = 8
     ANNEAL_LR = True
     GAMMA = 0.99
@@ -577,8 +569,6 @@ def main():
     MAX_GRAD_NORM = 0.5
     TARGET_KL = None
     SEED = 1
-    USE_TORCH_BATCHED_ENV = True
-
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
@@ -632,7 +622,6 @@ def main():
             vf_coef=VF_COEF,
             max_grad_norm=MAX_GRAD_NORM,
             target_kl=TARGET_KL,
-            use_torch_batched_env=USE_TORCH_BATCHED_ENV,
             actor_hidden_sizes=ACTOR_HIDDEN_SIZES,
             critic_hidden_sizes=CRITIC_HIDDEN_SIZES,
         )
@@ -679,7 +668,6 @@ def main():
             vf_coef=VF_COEF,
             max_grad_norm=MAX_GRAD_NORM,
             target_kl=TARGET_KL,
-            use_torch_batched_env=USE_TORCH_BATCHED_ENV,
             actor_hidden_sizes=ACTOR_HIDDEN_SIZES,
             critic_hidden_sizes=CRITIC_HIDDEN_SIZES,
         )

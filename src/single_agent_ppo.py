@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
 
-import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -15,8 +14,7 @@ import torch.optim as optim
 from torch.distributions.categorical import Categorical
 import wandb
 
-from bidding_gridworld import BiddingGridworld, MovingTargetBiddingGridworld
-from torch_batched_env import TorchBatchedBiddingGridworld, TorchBatchedConfig
+from bidding_gridworld_torch import BiddingGridworld, BiddingGridworldConfig
 from ppo_utils import layer_init, compute_gae, ppo_update_step, compute_explained_variance
 
 
@@ -30,8 +28,6 @@ class SingleAgentArgs:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    use_torch_batched_env: bool = False
-    """if toggled, use the GPU-native batched environment"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "bidding-rl"
@@ -189,46 +185,6 @@ class SingleAgent(nn.Module):
         return action, log_prob, entropy, value
 
 
-def make_env(args, idx, run_name):
-    """Create a single BiddingGridworld environment in single-agent mode."""
-    def thunk():
-        # Create base environment (either static or moving targets)
-        # Note: num_agents parameter now determines number of targets
-        if args.moving_targets:
-            env = MovingTargetBiddingGridworld(
-                grid_size=args.grid_size,
-                num_agents=args.num_targets,  # num_agents = number of targets in single-agent mode
-                target_reward=args.target_reward,
-                max_steps=args.max_steps,
-                distance_reward_scale=args.distance_reward_scale,
-                target_expiry_steps=args.target_expiry_steps,
-                target_expiry_penalty=args.target_expiry_penalty,
-                reward_decay_factor=args.reward_decay_factor,
-                direction_change_prob=args.direction_change_prob,
-                target_move_interval=args.target_move_interval,
-                single_agent_mode=True  # Enable single-agent mode
-            )
-        else:
-            env = BiddingGridworld(
-                grid_size=args.grid_size,
-                num_agents=args.num_targets,  # num_agents = number of targets in single-agent mode
-                target_reward=args.target_reward,
-                max_steps=args.max_steps,
-                distance_reward_scale=args.distance_reward_scale,
-                target_expiry_steps=args.target_expiry_steps,
-                target_expiry_penalty=args.target_expiry_penalty,
-                reward_decay_factor=args.reward_decay_factor,
-                single_agent_mode=True  # Enable single-agent mode
-            )
-
-        # Wrap with RecordEpisodeStatistics for automatic episode tracking
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-
-        return env
-
-    return thunk
-
-
 class SingleAgentPPOTrainer:
     """PPO Trainer for single-agent gridworld navigation."""
 
@@ -275,50 +231,39 @@ class SingleAgentPPOTrainer:
         self.agent = None
         self.optimizer = None
         self.obs_dim = None
-        self.use_torch_env = False
 
     def setup(self):
         """Setup environments, agent, and optimizer."""
-        # Environment setup
-        self.use_torch_env = bool(self.args.use_torch_batched_env)
-        if self.use_torch_env:
-            env_config = TorchBatchedConfig(
-                grid_size=self.args.grid_size,
-                num_agents=self.args.num_targets,
-                bid_upper_bound=0,
-                bid_penalty=0.0,
-                target_reward=self.args.target_reward,
-                max_steps=self.args.max_steps,
-                action_window=1,
-                distance_reward_scale=self.args.distance_reward_scale,
-                target_expiry_steps=self.args.target_expiry_steps,
-                target_expiry_penalty=self.args.target_expiry_penalty,
-                moving_targets=self.args.moving_targets,
-                direction_change_prob=self.args.direction_change_prob,
-                target_move_interval=self.args.target_move_interval,
-                window_bidding=False,
-                window_penalty=0.0,
-                visible_targets=None,
-                single_agent_mode=True,
-                reward_decay_factor=self.args.reward_decay_factor,
-            )
-            self.envs = TorchBatchedBiddingGridworld(
-                env_config,
-                num_envs=self.args.num_envs,
-                device=self.device,
-                seed=self.args.seed,
-            )
-        else:
-            # Environment setup - use SyncVectorEnv for single-agent
-            self.envs = gym.vector.SyncVectorEnv(
-                [make_env(self.args, i, self.run_name) for i in range(self.args.num_envs)]
-            )
+        # Environment setup (torch batched only)
+        env_config = BiddingGridworldConfig(
+            grid_size=self.args.grid_size,
+            num_agents=self.args.num_targets,
+            bid_upper_bound=0,
+            bid_penalty=0.0,
+            target_reward=self.args.target_reward,
+            max_steps=self.args.max_steps,
+            action_window=1,
+            distance_reward_scale=self.args.distance_reward_scale,
+            target_expiry_steps=self.args.target_expiry_steps,
+            target_expiry_penalty=self.args.target_expiry_penalty,
+            moving_targets=self.args.moving_targets,
+            direction_change_prob=self.args.direction_change_prob,
+            target_move_interval=self.args.target_move_interval,
+            window_bidding=False,
+            window_penalty=0.0,
+            visible_targets=None,
+            single_agent_mode=True,
+            reward_decay_factor=self.args.reward_decay_factor,
+        )
+        self.envs = BiddingGridworld(
+            env_config,
+            num_envs=self.args.num_envs,
+            device=self.device,
+            seed=self.args.seed,
+        )
 
         # Create agent
-        if self.use_torch_env:
-            self.obs_dim = self.envs.obs_dim
-        else:
-            self.obs_dim = np.array(self.envs.single_observation_space.shape).prod()
+        self.obs_dim = self.envs.obs_dim
         self.agent = SingleAgent(
             self.obs_dim,
             actor_hidden_sizes=self.args.actor_hidden_sizes,
@@ -356,12 +301,8 @@ class SingleAgentPPOTrainer:
             return f"{minutes:d}:{secs:02d}"
 
         # Storage setup
-        if self.use_torch_env:
-            obs = torch.zeros((self.args.num_steps, self.args.num_envs, self.obs_dim), device=self.device)
-            actions = torch.zeros((self.args.num_steps, self.args.num_envs), device=self.device)
-        else:
-            obs = torch.zeros((self.args.num_steps, self.args.num_envs) + self.envs.single_observation_space.shape).to(self.device)
-            actions = torch.zeros((self.args.num_steps, self.args.num_envs) + self.envs.single_action_space.shape).to(self.device)
+        obs = torch.zeros((self.args.num_steps, self.args.num_envs, self.obs_dim), device=self.device)
+        actions = torch.zeros((self.args.num_steps, self.args.num_envs), device=self.device)
         logprobs = torch.zeros((self.args.num_steps, self.args.num_envs)).to(self.device)
         rewards = torch.zeros((self.args.num_steps, self.args.num_envs)).to(self.device)
         dones = torch.zeros((self.args.num_steps, self.args.num_envs)).to(self.device)
@@ -371,8 +312,6 @@ class SingleAgentPPOTrainer:
         global_step = 0
         start_time = time.time()
         next_obs, _ = self.envs.reset(seed=self.args.seed)
-        if not self.use_torch_env:
-            next_obs = torch.Tensor(next_obs).to(self.device)
         next_done = torch.zeros(self.args.num_envs).to(self.device)
 
         print(f"\n{'='*60}")
@@ -402,20 +341,13 @@ class SingleAgentPPOTrainer:
                 logprobs[step] = logprob
 
                 # Execute actions in environment
-                if self.use_torch_env:
-                    next_obs, reward, terminations, truncations, infos = self.envs.step(action)
-                    next_done = terminations | truncations
-                    rewards[step] = reward.view(-1)
-                    next_done = next_done.to(self.device, dtype=torch.float32)
-                else:
-                    next_obs, reward, terminations, truncations, infos = self.envs.step(action.cpu().numpy())
-                    next_done = np.logical_or(terminations, truncations)
-                    rewards[step] = torch.tensor(reward).to(self.device).view(-1)
-                    next_obs = torch.Tensor(next_obs).to(self.device)
-                    next_done = torch.Tensor(next_done).to(self.device)
+                next_obs, reward, terminations, truncations, infos = self.envs.step(action)
+                next_done = terminations | truncations
+                rewards[step] = reward.view(-1)
+                next_done = next_done.to(self.device, dtype=torch.float32)
 
                 # Log episode statistics
-                if (not self.use_torch_env) and "final_info" in infos:
+                if "final_info" in infos:
                     for info in infos["final_info"]:
                         if info and "episode" in info:
                             # Extract target reach counts if available
@@ -454,12 +386,8 @@ class SingleAgentPPOTrainer:
                 )
 
             # Flatten the batch
-            if self.use_torch_env:
-                b_obs = obs.reshape((-1, self.obs_dim))
-                b_actions = actions.reshape(-1)
-            else:
-                b_obs = obs.reshape((-1,) + self.envs.single_observation_space.shape)
-                b_actions = actions.reshape((-1,) + self.envs.single_action_space.shape)
+            b_obs = obs.reshape((-1, self.obs_dim))
+            b_actions = actions.reshape(-1)
             b_logprobs = logprobs.reshape(-1)
             b_advantages = advantages.reshape(-1)
             b_returns = returns.reshape(-1)
