@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
+from tqdm import tqdm
 import wandb
 
 from bidding_gridworld_torch import BiddingGridworld, BiddingGridworldConfig
@@ -273,9 +274,12 @@ class SingleAgentPPOTrainer:
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
 
         # Calculate expected observation dimension components for single-agent mode
-        # Base: 2 (agent pos) + 2*num_targets (target pos) + num_targets (reached flags) +
-        #       num_targets (step counters) + 1 (window steps) + num_targets (relative counts)
-        expected_dim = 2 + 2*self.args.num_targets + self.args.num_targets + self.args.num_targets + 1 + self.args.num_targets
+        # Base: 2 (agent pos) + 2*num_targets (target pos) + num_targets (step counters) +
+        #       1 (window steps) + num_targets (relative counts) [+ num_targets (reached flags)]
+        include_reached = not self.args.moving_targets
+        expected_dim = 2 + 2 * self.args.num_targets + self.args.num_targets + 1 + self.args.num_targets
+        if include_reached:
+            expected_dim += self.args.num_targets
 
         print(f"🚀 Single-Agent PPO Trainer initialized")
         print(f"   Device: {self.device}")
@@ -318,7 +322,7 @@ class SingleAgentPPOTrainer:
         print(f"Starting training for {self.args.num_iterations} iterations ({self.args.total_timesteps} timesteps)")
         print(f"{'='*60}\n")
 
-        for iteration in range(1, self.args.num_iterations+1):
+        for iteration in tqdm(range(1, self.args.num_iterations + 1), desc="PPO iterations"):
             iteration_start = time.time()
             # Annealing the learning rate
             if self.args.anneal_lr:
@@ -437,7 +441,7 @@ class SingleAgentPPOTrainer:
             remaining_iters = self.args.num_iterations - iteration
             eta = format_duration(remaining_iters * iter_time)
             iter_time_str = format_duration(iter_time)
-            print(
+            tqdm.write(
                 f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - "
                 f"Value Loss: {metrics['v_loss']:.4f} - Policy Loss: {metrics['pg_loss']:.4f} - "
                 f"Iter Time: {iter_time_str} - ETA: {eta}"

@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
+from tqdm import tqdm
 import wandb
 
 from bidding_gridworld_torch import BiddingGridworld, BiddingGridworldConfig
@@ -70,6 +71,14 @@ class Args:
     visible_targets: Optional[int] = None
     """number of nearest other targets visible to each agent (None = all targets visible, centralized)"""
 
+    # Target attention pooling
+    use_target_attention_pooling: bool = False
+    """whether to use masked attention pooling over target observations"""
+    target_embed_dim: int = 64
+    """embedding dimension for target attention pooling"""
+    target_encoder_hidden_sizes: Tuple[int, ...] = (64, 64)
+    """hidden layer sizes for per-target encoder used before pooling"""
+
     # Network architecture
     actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
     """hidden layer sizes for the actor network"""
@@ -119,6 +128,38 @@ class Args:
     """total timesteps of the experiments (computed in runtime)"""
 
 
+def build_mlp(input_dim: int, hidden_sizes: Tuple[int, ...], output_dim: int) -> nn.Sequential:
+    """Build a simple MLP with ELU activations."""
+    layers = []
+    in_dim = input_dim
+    for hidden_size in hidden_sizes:
+        layers.append(layer_init(nn.Linear(in_dim, hidden_size)))
+        layers.append(nn.ELU())
+        in_dim = hidden_size
+    layers.append(layer_init(nn.Linear(in_dim, output_dim)))
+    return nn.Sequential(*layers)
+
+
+class MaskedAttentionPooling(nn.Module):
+    """Masked attention pooling with a learned query over per-target embeddings."""
+
+    def __init__(self, input_dim: int, embed_dim: int, hidden_sizes: Tuple[int, ...]):
+        super().__init__()
+        self.encoder = build_mlp(input_dim, hidden_sizes, embed_dim)
+        self.query = nn.Parameter(torch.randn(embed_dim))
+
+    def forward(self, target_feats: torch.Tensor, target_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        batch_size, num_targets, feat_dim = target_feats.shape
+        flat = target_feats.reshape(batch_size * num_targets, feat_dim)
+        embeddings = self.encoder(flat).reshape(batch_size, num_targets, -1)
+        scores = torch.einsum("bnd,d->bn", embeddings, self.query)
+        if target_mask is not None:
+            scores = scores.masked_fill(~target_mask, -1e9)
+        weights = torch.softmax(scores, dim=-1)
+        pooled = torch.einsum("bnd,bn->bd", embeddings, weights)
+        return pooled
+
+
 class SharedAgent(nn.Module):
     """
     Shared actor-critic network used by all agents.
@@ -135,6 +176,11 @@ class SharedAgent(nn.Module):
         window_bidding=False,
         actor_hidden_sizes=None,
         critic_hidden_sizes=None,
+        use_target_attention_pooling: bool = False,
+        target_embed_dim: int = 64,
+        target_encoder_hidden_sizes: Optional[Tuple[int, ...]] = None,
+        attention_pooling_layout: str = "centralized",
+        include_target_reached: bool = True,
     ):
         """
         Initialize shared actor-critic network.
@@ -146,13 +192,29 @@ class SharedAgent(nn.Module):
         """
         super().__init__()
         self.window_bidding = window_bidding
+        self.use_target_attention_pooling = use_target_attention_pooling
+        self.attention_pooling_layout = attention_pooling_layout
+        self.include_target_reached = include_target_reached
 
         actor_sizes = list(actor_hidden_sizes) if actor_hidden_sizes is not None else [128, 128, 128]
         critic_sizes = list(critic_hidden_sizes) if critic_hidden_sizes is not None else [256, 256, 256]
 
+        if self.use_target_attention_pooling:
+            encoder_sizes = target_encoder_hidden_sizes if target_encoder_hidden_sizes is not None else (64, 64)
+            target_feat_dim = 6 if self.include_target_reached else 5
+            self.target_pool = MaskedAttentionPooling(
+                input_dim=target_feat_dim,
+                embed_dim=target_embed_dim,
+                hidden_sizes=encoder_sizes,
+            )
+            own_feat_dim = target_feat_dim
+            self.encoded_obs_dim = 3 + own_feat_dim + target_embed_dim
+        else:
+            self.encoded_obs_dim = obs_dim
+
         # Shared critic network: outputs single value estimate
         critic_layers = []
-        critic_in_dim = obs_dim
+        critic_in_dim = self.encoded_obs_dim
         for hidden_size in critic_sizes:
             critic_layers.append(layer_init(nn.Linear(critic_in_dim, hidden_size)))
             critic_layers.append(nn.ELU())
@@ -165,7 +227,7 @@ class SharedAgent(nn.Module):
         # If window_bidding: also outputs window (action_window actions)
         # We'll use separate heads for each action component
         actor_layers = []
-        actor_in_dim = obs_dim
+        actor_in_dim = self.encoded_obs_dim
         for hidden_size in actor_sizes:
             actor_layers.append(layer_init(nn.Linear(actor_in_dim, hidden_size)))
             actor_layers.append(nn.ELU())
@@ -177,6 +239,78 @@ class SharedAgent(nn.Module):
         self.direction_head = layer_init(nn.Linear(self.actor_feature_dim, 4), std=0.01)  # 4 directions
         self.bid_head = None  # Will be set based on bid_upper_bound
         self.window_head = None  # Will be set based on action_window if window_bidding is True
+
+    def _encode_obs(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.use_target_attention_pooling:
+            return x
+
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+
+        agent_pos = x[:, :2]
+        window_steps = x[:, -1:]
+        obs_dim = x.shape[1]
+
+        if self.attention_pooling_layout == "centralized":
+            target_block = x[:, 2:-1]
+            block_width = 4 if self.include_target_reached else 3
+            if target_block.shape[1] % block_width != 0:
+                raise ValueError(f"Invalid centralized obs layout for attention pooling (obs_dim={obs_dim}).")
+            num_targets = target_block.shape[1] // block_width
+            target_pos = target_block[:, : 2 * num_targets].reshape(-1, num_targets, 2)
+            if self.include_target_reached:
+                target_reached = target_block[:, 2 * num_targets: 3 * num_targets].reshape(-1, num_targets, 1)
+                target_counters = target_block[:, 3 * num_targets: 4 * num_targets].reshape(-1, num_targets, 1)
+            else:
+                target_reached = None
+                target_counters = target_block[:, 2 * num_targets: 3 * num_targets].reshape(-1, num_targets, 1)
+        elif self.attention_pooling_layout == "visible":
+            if self.include_target_reached:
+                if (obs_dim - 7) % 3 != 0:
+                    raise ValueError(f"Invalid visible-targets obs layout for attention pooling (obs_dim={obs_dim}).")
+                visible_targets = (obs_dim - 7) // 3
+            else:
+                if (obs_dim - 6) % 2 != 0:
+                    raise ValueError(f"Invalid visible-targets obs layout for attention pooling (obs_dim={obs_dim}).")
+                visible_targets = (obs_dim - 6) // 2
+            num_targets = visible_targets + 1
+
+            own_pos = x[:, 2:4].reshape(-1, 1, 2)
+            if visible_targets > 0:
+                vis_pos = x[:, 4:4 + 2 * visible_targets].reshape(-1, visible_targets, 2)
+                target_pos = torch.cat([own_pos, vis_pos], dim=1)
+            else:
+                target_pos = own_pos
+
+            if self.include_target_reached:
+                own_reached = x[:, 4 + 2 * visible_targets:5 + 2 * visible_targets].reshape(-1, 1, 1)
+                if visible_targets > 0:
+                    vis_reached = x[:, 5 + 2 * visible_targets:5 + 2 * visible_targets + visible_targets].reshape(
+                        -1, visible_targets, 1
+                    )
+                    target_reached = torch.cat([own_reached, vis_reached], dim=1)
+                else:
+                    target_reached = own_reached
+                own_counter = x[:, 5 + 3 * visible_targets:6 + 3 * visible_targets].reshape(-1, 1, 1)
+            else:
+                target_reached = None
+                own_counter = x[:, 4 + 2 * visible_targets:5 + 2 * visible_targets].reshape(-1, 1, 1)
+            if visible_targets > 0:
+                zeros = torch.zeros((x.shape[0], visible_targets, 1), device=x.device, dtype=x.dtype)
+                target_counters = torch.cat([own_counter, zeros], dim=1)
+            else:
+                target_counters = own_counter
+        else:
+            raise ValueError(f"Unknown attention pooling layout: {self.attention_pooling_layout}")
+
+        rel_pos = target_pos - agent_pos.unsqueeze(1)
+        if self.include_target_reached:
+            target_feats = torch.cat([target_pos, rel_pos, target_reached, target_counters], dim=-1)
+        else:
+            target_feats = torch.cat([target_pos, rel_pos, target_counters], dim=-1)
+        pooled = self.target_pool(target_feats)
+        own_feats = target_feats[:, 0, :]
+        return torch.cat([agent_pos, window_steps, own_feats, pooled], dim=-1)
 
     def set_bid_head(self, bid_upper_bound):
         """Set the bid head based on bid upper bound."""
@@ -201,7 +335,8 @@ class SharedAgent(nn.Module):
         Returns:
             Value estimate
         """
-        return self.critic(x)
+        encoded = self._encode_obs(x)
+        return self.critic(encoded)
 
     def get_action_and_value(self, x, action=None):
         """
@@ -221,6 +356,7 @@ class SharedAgent(nn.Module):
             entropy: Entropy of the action distribution
             value: Value estimate
         """
+        x = self._encode_obs(x)
         # Get shared features
         shared_features = self.actor_shared(x)
 
@@ -359,6 +495,11 @@ class PPOTrainer:
             window_bidding=self.args.window_bidding,
             actor_hidden_sizes=self.args.actor_hidden_sizes,
             critic_hidden_sizes=self.args.critic_hidden_sizes,
+            use_target_attention_pooling=self.args.use_target_attention_pooling,
+            target_embed_dim=self.args.target_embed_dim,
+            target_encoder_hidden_sizes=self.args.target_encoder_hidden_sizes,
+            attention_pooling_layout="centralized" if self.args.visible_targets is None else "visible",
+            include_target_reached=not self.args.moving_targets,
         ).to(self.device)
         self.agent.set_bid_head(self.args.bid_upper_bound)
         if self.args.window_bidding:
@@ -376,6 +517,11 @@ class PPOTrainer:
         print(f"   Window bidding: {self.args.window_bidding}")
         if self.args.window_bidding:
             print(f"   Window penalty: {self.args.window_penalty}")
+        print(f"   Target attention pooling: {self.args.use_target_attention_pooling}")
+        if self.args.use_target_attention_pooling:
+            layout = "centralized" if self.args.visible_targets is None else "visible"
+            print(f"   Attention layout: {layout}")
+            print(f"   Target embed dim: {self.args.target_embed_dim}")
         print(f"   Actions per agent: {num_actions_per_agent}")
         print(f"   Batch size: {self.args.batch_size}")
         print(f"   Num iterations: {self.args.num_iterations}")
@@ -420,7 +566,7 @@ class PPOTrainer:
         print(f"Starting training for {self.args.num_iterations} iterations ({self.args.total_timesteps} timesteps)")
         print(f"{'='*60}\n")
 
-        for iteration in range(1, self.args.num_iterations+1):
+        for iteration in tqdm(range(1, self.args.num_iterations + 1), desc="PPO iterations"):
             iteration_start = time.time()
             # Annealing the learning rate
             if self.args.anneal_lr:
@@ -539,7 +685,7 @@ class PPOTrainer:
             remaining_iters = self.args.num_iterations - iteration
             eta = format_duration(remaining_iters * iter_time)
             iter_time_str = format_duration(iter_time)
-            print(
+            tqdm.write(
                 f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - "
                 f"Value Loss: {v_loss:.4f} - Policy Loss: {pg_loss:.4f} - "
                 f"Iter Time: {iter_time_str} - ETA: {eta}"

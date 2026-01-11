@@ -98,16 +98,17 @@ class BiddingGridworld:
         else:
             self._diag_mask = None
 
-        # Observation shape metadata
+        include_reached = not self.config.moving_targets
         if self.config.single_agent_mode:
-            self.obs_dim = 3 + 5 * self.config.num_agents
+            base_dim = 3 + (5 if include_reached else 4) * self.config.num_agents
+            self.obs_dim = base_dim
             self.obs_shape = (self.num_envs, self.obs_dim)
             self.per_agent_obs_dim = None
         else:
             if self.config.visible_targets is None:
-                self.per_agent_obs_dim = 3 + 4 * self.config.num_agents
+                self.per_agent_obs_dim = 3 + (4 if include_reached else 3) * self.config.num_agents
             else:
-                self.per_agent_obs_dim = 7 + 3 * self.config.visible_targets
+                self.per_agent_obs_dim = 7 + 3 * self.config.visible_targets if include_reached else 6 + 2 * self.config.visible_targets
             self.obs_dim = None
             self.obs_shape = (self.num_envs, self.config.num_agents, self.per_agent_obs_dim)
 
@@ -326,6 +327,7 @@ class BiddingGridworld:
 
         agent_pos = self.agent_pos.to(torch.float32) / denom
         target_pos = self.target_pos.to(torch.float32) / denom
+        include_reached = not cfg.moving_targets
         targets_reached = self.targets_reached.to(torch.float32)
 
         if cfg.target_expiry_steps is not None:
@@ -338,16 +340,27 @@ class BiddingGridworld:
         window_denom = float(max(cfg.action_window, 1))
         window_steps = (self.window_steps_remaining.to(torch.float32) / window_denom).unsqueeze(-1)
 
-        base_obs = torch.cat(
-            [
-                agent_pos,
-                target_pos.reshape(self.num_envs, -1),
-                targets_reached,
-                target_counters,
-                window_steps,
-            ],
-            dim=-1,
-        )
+        if include_reached:
+            base_obs = torch.cat(
+                [
+                    agent_pos,
+                    target_pos.reshape(self.num_envs, -1),
+                    targets_reached,
+                    target_counters,
+                    window_steps,
+                ],
+                dim=-1,
+            )
+        else:
+            base_obs = torch.cat(
+                [
+                    agent_pos,
+                    target_pos.reshape(self.num_envs, -1),
+                    target_counters,
+                    window_steps,
+                ],
+                dim=-1,
+            )
 
         if cfg.single_agent_mode:
             min_count = self.targets_reached_count.min(dim=1).values
@@ -374,6 +387,7 @@ class BiddingGridworld:
 
         agent_pos = self.agent_pos.to(torch.float32) / denom
         target_pos = self.target_pos.to(torch.float32) / denom
+        include_reached = not cfg.moving_targets
         targets_reached = self.targets_reached.to(torch.float32)
 
         if cfg.target_expiry_steps is not None:
@@ -388,16 +402,27 @@ class BiddingGridworld:
         window_steps = window_steps.unsqueeze(-1)
 
         if cfg.single_agent_mode:
-            base_obs = torch.cat(
-                [
-                    agent_pos,
-                    target_pos.reshape(self.num_envs, -1),
-                    targets_reached,
-                    target_counters,
-                    window_steps,
-                ],
-                dim=-1,
-            )
+            if include_reached:
+                base_obs = torch.cat(
+                    [
+                        agent_pos,
+                        target_pos.reshape(self.num_envs, -1),
+                        targets_reached,
+                        target_counters,
+                        window_steps,
+                    ],
+                    dim=-1,
+                )
+            else:
+                base_obs = torch.cat(
+                    [
+                        agent_pos,
+                        target_pos.reshape(self.num_envs, -1),
+                        target_counters,
+                        window_steps,
+                    ],
+                    dim=-1,
+                )
             min_count = self.targets_reached_count.min(dim=1).values
             count_denom = float(max(cfg.num_agents, 1))
             relative = (self.targets_reached_count - min_count.unsqueeze(1)).to(torch.float32)
@@ -406,12 +431,20 @@ class BiddingGridworld:
 
         if cfg.visible_targets is None:
             reordered_pos = target_pos[:, self._reorder_idx, :].reshape(self.num_envs, cfg.num_agents, -1)
-            reordered_reached = targets_reached[:, self._reorder_idx]
             reordered_counters = target_counters[:, self._reorder_idx]
+            if include_reached:
+                reordered_reached = targets_reached[:, self._reorder_idx]
+                return torch.cat(
+                    [agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                     reordered_pos,
+                     reordered_reached,
+                     reordered_counters,
+                     window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1)],
+                    dim=-1,
+                )
             return torch.cat(
                 [agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                  reordered_pos,
-                 reordered_reached,
                  reordered_counters,
                  window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1)],
                 dim=-1,
@@ -427,20 +460,30 @@ class BiddingGridworld:
         vis_pos = target_pos_exp.gather(2, idx.unsqueeze(-1).expand(-1, -1, -1, 2)).reshape(
             self.num_envs, cfg.num_agents, -1
         )
-        targets_reached_exp = targets_reached.unsqueeze(1).expand(-1, cfg.num_agents, -1)
-        vis_reached = targets_reached_exp.gather(2, idx)
-
         own_pos = target_pos
-        own_reached = targets_reached.unsqueeze(-1)
         own_counter = target_counters.unsqueeze(-1)
 
+        if include_reached:
+            targets_reached_exp = targets_reached.unsqueeze(1).expand(-1, cfg.num_agents, -1)
+            vis_reached = targets_reached_exp.gather(2, idx)
+            own_reached = targets_reached.unsqueeze(-1)
+            return torch.cat(
+                [
+                    agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                    own_pos,
+                    vis_pos,
+                    own_reached,
+                    vis_reached,
+                    own_counter,
+                    window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                ],
+                dim=-1,
+            )
         return torch.cat(
             [
                 agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                 own_pos,
                 vis_pos,
-                own_reached,
-                vis_reached,
                 own_counter,
                 window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
             ],
@@ -604,12 +647,16 @@ class BiddingGridworld:
 
             target_positions = []
             targets_reached = []
+            include_reached = not self.config.moving_targets
             for i in range(self.num_agents):
                 target_idx = 2 + i * 2
                 target_positions.append((int(state[target_idx] * denom),
                                        int(state[target_idx + 1] * denom)))
-                target_reached_idx = 2 + 2 * self.num_agents + i
-                targets_reached.append(int(state[target_reached_idx]))
+                if include_reached:
+                    target_reached_idx = 2 + 2 * self.num_agents + i
+                    targets_reached.append(int(state[target_reached_idx]))
+                else:
+                    targets_reached.append(0)
 
             grid_ax.set_xlim(-0.5, self.grid_size - 0.5)
             grid_ax.set_ylim(-0.5, self.grid_size - 0.5)
@@ -623,20 +670,20 @@ class BiddingGridworld:
 
             for i in range(self.num_agents):
                 target_row, target_col = target_positions[i]
-                if targets_reached[i] == 0:
-                    grid_ax.add_patch(plt.Rectangle(
-                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
-                        facecolor=target_colors[i % 3], edgecolor='black', linewidth=2
-                    ))
-                    grid_ax.text(target_col, target_row, str(i),
-                           ha='center', va='center', fontsize=10, fontweight='bold')
-                else:
+                if include_reached and targets_reached[i] != 0:
                     grid_ax.add_patch(plt.Rectangle(
                         (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
                         facecolor='lightgreen', edgecolor='green', linewidth=2
                     ))
                     grid_ax.text(target_col, target_row, 'OK',
                            ha='center', va='center', fontsize=9, fontweight='bold')
+                else:
+                    grid_ax.add_patch(plt.Rectangle(
+                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                        facecolor=target_colors[i % 3], edgecolor='black', linewidth=2
+                    ))
+                    grid_ax.text(target_col, target_row, str(i),
+                           ha='center', va='center', fontsize=10, fontweight='bold')
 
             grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
                                    facecolor='yellow', edgecolor='orange'))
@@ -675,12 +722,13 @@ class BiddingGridworld:
             info_lines.append(f'  Step:  {reward:7.2f}')
             info_lines.append(f'  Total: {total_reward:7.2f}')
             info_lines.append('')
-            info_lines.append('TARGET STATUS:')
-            for target_id in range(self.num_agents):
-                target_reached_idx = 2 + 2 * self.num_agents + target_id
-                target_reached = int(state[target_reached_idx])
-                status = 'OK' if target_reached else 'NO'
-                info_lines.append(f'  {target_id}: {status}')
+            if include_reached:
+                info_lines.append('TARGET STATUS:')
+                for target_id in range(self.num_agents):
+                    target_reached_idx = 2 + 2 * self.num_agents + target_id
+                    target_reached = int(state[target_reached_idx])
+                    status = 'OK' if target_reached else 'NO'
+                    info_lines.append(f'  {target_id}: {status}')
 
             info_text = '\n'.join(info_lines)
             info_ax.text(0.05, 0.95, info_text,
@@ -744,12 +792,16 @@ class BiddingGridworld:
 
             target_positions = []
             targets_reached = []
+            include_reached = not self.config.moving_targets
             for i in range(self.num_agents):
                 target_idx = 2 + i * 2
                 target_positions.append((int(state[target_idx] * denom),
                                        int(state[target_idx + 1] * denom)))
-                target_reached_idx = 2 + 2 * self.num_agents + i
-                targets_reached.append(int(state[target_reached_idx]))
+                if include_reached:
+                    target_reached_idx = 2 + 2 * self.num_agents + i
+                    targets_reached.append(int(state[target_reached_idx]))
+                else:
+                    targets_reached.append(0)
 
             step_detail = episode_data["step_details"][frame] if frame < len(episode_data["step_details"]) else None
             actions = episode_data["actions"][frame] if frame < len(episode_data["actions"]) else None
@@ -773,7 +825,14 @@ class BiddingGridworld:
                 edge_width = 4 if is_controlling else 2
                 edge_color = 'gold' if is_controlling else edge_colors[i % 3]
 
-                if targets_reached[i] == 0:
+                if include_reached and targets_reached[i] != 0:
+                    grid_ax.add_patch(plt.Rectangle(
+                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
+                        facecolor='lightgreen', edgecolor='green', linewidth=2
+                    ))
+                    grid_ax.text(target_col, target_row, 'OK',
+                           ha='center', va='center', fontsize=9, fontweight='bold')
+                else:
                     grid_ax.add_patch(plt.Rectangle(
                         (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
                         facecolor=target_colors[i % 3], edgecolor=edge_color, linewidth=edge_width
@@ -783,13 +842,6 @@ class BiddingGridworld:
                     if is_controlling:
                         grid_ax.text(target_col, target_row - 0.6, '*',
                                ha='center', va='center', fontsize=8, color='gold')
-                else:
-                    grid_ax.add_patch(plt.Rectangle(
-                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
-                        facecolor='lightgreen', edgecolor='green', linewidth=2
-                    ))
-                    grid_ax.text(target_col, target_row, 'OK',
-                           ha='center', va='center', fontsize=9, fontweight='bold')
 
             if winning_agent is not None and 0 <= winning_agent < self.num_agents:
                 grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,

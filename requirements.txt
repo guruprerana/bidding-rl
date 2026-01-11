@@ -7,3 +7,4 @@ stable-baselines3[extra]
 wandb
 torch
 torchvision
+ tqdm

@@ -521,7 +521,7 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_8moving_targets_exp1"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_8moving_targets_emb_exp1"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 100  # Save checkpoint every N iterations
     EVAL_FREQ = 20  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
@@ -556,7 +556,7 @@ def main():
     LEARNING_RATE = 2.5e-4
     NUM_ENVS = 4096
     NUM_STEPS = 256
-    NUM_MINIBATCHES = 256
+    NUM_MINIBATCHES = 128
     UPDATE_EPOCHS = 8
     ANNEAL_LR = True
     GAMMA = 0.99
@@ -572,6 +572,9 @@ def main():
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
+    USE_TARGET_ATTENTION_POOLING = True
+    TARGET_EMBED_DIM = 64
+    TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 
     # Wandb tracking
     WANDB_PROJECT = "bidding-rl"
@@ -624,6 +627,9 @@ def main():
             target_kl=TARGET_KL,
             actor_hidden_sizes=ACTOR_HIDDEN_SIZES,
             critic_hidden_sizes=CRITIC_HIDDEN_SIZES,
+            use_target_attention_pooling=USE_TARGET_ATTENTION_POOLING,
+            target_embed_dim=TARGET_EMBED_DIM,
+            target_encoder_hidden_sizes=TARGET_ENCODER_HIDDEN_SIZES,
         )
     else:
         args = Args(
@@ -670,6 +676,9 @@ def main():
             target_kl=TARGET_KL,
             actor_hidden_sizes=ACTOR_HIDDEN_SIZES,
             critic_hidden_sizes=CRITIC_HIDDEN_SIZES,
+            use_target_attention_pooling=USE_TARGET_ATTENTION_POOLING,
+            target_embed_dim=TARGET_EMBED_DIM,
+            target_encoder_hidden_sizes=TARGET_ENCODER_HIDDEN_SIZES,
         )
 
     # Create and run experiment
