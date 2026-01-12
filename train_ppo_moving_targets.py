@@ -58,6 +58,8 @@ class PPOMovingTargetsExperiment:
         log_videos_to_wandb: bool = False,
         single_agent_mode: bool = False,
         eval_max_steps: int = 600,
+        eval_num_agents: int | None = None,
+        eval_num_targets: int | None = None,
     ):
         """
         Initialize the experiment.
@@ -73,6 +75,8 @@ class PPOMovingTargetsExperiment:
             log_videos_to_wandb: If True, upload MP4s to wandb
             single_agent_mode: If True, use single-agent PPO; if False, use multi-agent PPO
             eval_max_steps: Maximum steps per episode during evaluation
+            eval_num_agents: Optional override for number of agents/targets during eval (multi-agent only)
+            eval_num_targets: Optional override for number of targets during eval (single-agent only)
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
@@ -88,6 +92,8 @@ class PPOMovingTargetsExperiment:
         self.log_videos_to_wandb = log_videos_to_wandb
         self.single_agent_mode = single_agent_mode
         self.eval_max_steps = eval_max_steps
+        self.eval_num_agents = eval_num_agents
+        self.eval_num_targets = eval_num_targets
 
         # Create directory structure
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -171,6 +177,12 @@ class PPOMovingTargetsExperiment:
 
     def evaluate_policy(self, trainer: PPOTrainer, iteration: int, global_step: int, create_videos: bool = True):
         """Evaluate the current policy with rollouts and create visualizations."""
+        eval_num_agents = self.eval_num_agents or trainer.args.num_agents
+        if eval_num_agents != trainer.args.num_agents and not trainer.args.use_target_attention_pooling:
+            raise ValueError(
+                "Eval num_agents differs from training, but use_target_attention_pooling=False. "
+                "Enable USE_TARGET_ATTENTION_POOLING to support variable target counts during eval."
+            )
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
         if create_videos:
@@ -182,7 +194,7 @@ class PPOMovingTargetsExperiment:
         # Create evaluation environment with longer max_steps
         env_config = BiddingGridworldConfig(
             grid_size=trainer.args.grid_size,
-            num_agents=trainer.args.num_agents,
+            num_agents=eval_num_agents,
             bid_upper_bound=trainer.args.bid_upper_bound,
             bid_penalty=trainer.args.bid_penalty,
             target_reward=trainer.args.target_reward,
@@ -251,7 +263,7 @@ class PPOMovingTargetsExperiment:
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
-                          if t == trainer.args.num_agents) / self.num_eval_episodes
+                          if t == eval_num_agents) / self.num_eval_episodes
 
         # Log to wandb
         if trainer.args.track:
@@ -269,7 +281,8 @@ class PPOMovingTargetsExperiment:
             "iteration": iteration,
             "global_step": global_step,
             "num_episodes": self.num_eval_episodes,
-            "num_agents": trainer.args.num_agents,
+            "num_agents": eval_num_agents,
+            "train_num_agents": trainer.args.num_agents,
             "timestamp": datetime.now().isoformat(),
             "statistics": {
                 "avg_return": float(avg_return),
@@ -300,6 +313,12 @@ class PPOMovingTargetsExperiment:
 
     def evaluate_single_agent_policy(self, trainer: SingleAgentPPOTrainer, iteration: int, global_step: int, create_videos: bool = True):
         """Evaluate the single-agent policy with rollouts and create visualizations."""
+        eval_num_targets = self.eval_num_targets or trainer.args.num_targets
+        if eval_num_targets != trainer.args.num_targets:
+            raise ValueError(
+                "Eval num_targets differs from training in single-agent mode, which uses a fixed "
+                "observation size. Train with the desired target count or add a variable-target encoder."
+            )
         print(f"\n{'='*60}")
         print(f"EVALUATION - Iteration {iteration}")
         if create_videos:
@@ -311,7 +330,7 @@ class PPOMovingTargetsExperiment:
         # Create evaluation environment with longer max_steps
         env_config = BiddingGridworldConfig(
             grid_size=trainer.args.grid_size,
-            num_agents=trainer.args.num_targets,
+            num_agents=eval_num_targets,
             bid_upper_bound=0,
             bid_penalty=0.0,
             target_reward=trainer.args.target_reward,
@@ -380,7 +399,7 @@ class PPOMovingTargetsExperiment:
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
-                          if t == trainer.args.num_targets) / self.num_eval_episodes
+                          if t == eval_num_targets) / self.num_eval_episodes
 
         # Log to wandb
         if trainer.args.track:
@@ -398,7 +417,8 @@ class PPOMovingTargetsExperiment:
             "iteration": iteration,
             "global_step": global_step,
             "num_episodes": self.num_eval_episodes,
-            "num_targets": trainer.args.num_targets,
+            "num_targets": eval_num_targets,
+            "train_num_targets": trainer.args.num_targets,
             "timestamp": datetime.now().isoformat(),
             "statistics": {
                 "avg_return": float(avg_return),
@@ -521,16 +541,18 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_8moving_targets_emb_exp1"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_10moving_targets_emb_exp1"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 100  # Save checkpoint every N iterations
     EVAL_FREQ = 20  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
     NUM_VIDEO_EPISODES = 1  # Number of episodes to save as MP4s
     VIDEO_FREQ = 100  # Save video rollouts every N iterations (0 = use eval freq)
+    EVAL_NUM_AGENTS = 10  # Multi-agent only: override number of agents/targets during eval (requires attention pooling)
+    EVAL_NUM_TARGETS = None  # Single-agent only: override number of targets during eval (fixed obs; keep None)
 
     # Environment parameters
     GRID_SIZE = 30
-    NUM_AGENTS = 8  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    NUM_AGENTS = 6  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 50.0
     MAX_STEPS = 2000  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
@@ -556,8 +578,8 @@ def main():
     LEARNING_RATE = 2.5e-4
     NUM_ENVS = 4096
     NUM_STEPS = 256
-    NUM_MINIBATCHES = 128
-    UPDATE_EPOCHS = 8
+    NUM_MINIBATCHES = 256
+    UPDATE_EPOCHS = 4
     ANNEAL_LR = True
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
@@ -692,6 +714,8 @@ def main():
         log_videos_to_wandb=LOG_VIDEOS_TO_WANDB,
         single_agent_mode=SINGLE_AGENT_MODE,
         eval_max_steps=EVAL_MAX_STEPS,
+        eval_num_agents=EVAL_NUM_AGENTS,
+        eval_num_targets=EVAL_NUM_TARGETS,
     )
 
     experiment.run(args)

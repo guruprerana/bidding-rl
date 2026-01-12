@@ -559,8 +559,12 @@ class PPOTrainer:
         next_done = torch.zeros((self.args.num_envs, self.args.num_agents)).to(self.device)
 
         # Track bidding-specific statistics (aggregated across rollout)
-        episode_agent_wins = {f"agent_{i}": 0 for i in range(self.args.num_agents)}
-        episode_bid_values = []
+        if self.args.track:
+            episode_agent_wins = torch.zeros(self.args.num_agents, device=self.device, dtype=torch.int64)
+            episode_bid_sum = torch.zeros((), device=self.device, dtype=torch.float32)
+            episode_bid_count = torch.zeros((), device=self.device, dtype=torch.int64)
+            episode_bid_min = None
+            episode_bid_max = None
 
         print(f"\n{'='*60}")
         print(f"Starting training for {self.args.num_iterations} iterations ({self.args.total_timesteps} timesteps)")
@@ -599,20 +603,27 @@ class PPOTrainer:
                 rewards[step] = reward
                 next_done = next_done.to(self.device, dtype=torch.float32)
 
-                # Extract bidding information for logging
-                for env_idx in range(self.args.num_envs):
-                    if isinstance(infos, dict) and "winning_agent" in infos:
-                        winning_agent = infos["winning_agent"][env_idx] if hasattr(infos["winning_agent"], "__getitem__") else infos["winning_agent"]
-                        if isinstance(winning_agent, torch.Tensor):
-                            winning_agent = int(winning_agent.item())
-                        if winning_agent is not None and winning_agent >= 0:
-                            episode_agent_wins[f"agent_{winning_agent}"] += 1
+                # Extract bidding information for logging (vectorized)
+                if self.args.track and isinstance(infos, dict):
+                    winning_agent = infos.get("winning_agent", None)
+                    if torch.is_tensor(winning_agent):
+                        valid = winning_agent >= 0
+                        if torch.any(valid):
+                            counts = torch.bincount(
+                                winning_agent[valid].to(torch.int64),
+                                minlength=self.args.num_agents,
+                            )
+                            episode_agent_wins += counts
 
-                    if isinstance(infos, dict) and "bids" in infos:
-                        bids = infos["bids"][env_idx] if hasattr(infos["bids"], "__getitem__") else infos["bids"]
-                        if isinstance(bids, dict):
-                            for agent_key, bid_value in bids.items():
-                                episode_bid_values.append(bid_value)
+                    bids = infos.get("bids", None)
+                    if torch.is_tensor(bids):
+                        bids_f = bids.to(torch.float32)
+                        episode_bid_sum += bids_f.sum()
+                        episode_bid_count += bids_f.numel()
+                        step_min = bids_f.min()
+                        step_max = bids_f.max()
+                        episode_bid_min = step_min if episode_bid_min is None else torch.minimum(episode_bid_min, step_min)
+                        episode_bid_max = step_max if episode_bid_max is None else torch.maximum(episode_bid_max, step_max)
 
 
             # Bootstrap value and compute advantages using shared utility
@@ -635,11 +646,10 @@ class PPOTrainer:
             b_values = values.reshape(-1)
 
             # Optimize policy and value network using shared utility
-            b_inds = np.arange(self.args.batch_size)
             clipfracs = []
 
             for epoch in range(self.args.update_epochs):
-                np.random.shuffle(b_inds)
+                b_inds = torch.randperm(self.args.batch_size, device=self.device)
 
                 for start in range(0, self.args.batch_size, self.args.minibatch_size):
                     end = start + self.args.minibatch_size
@@ -676,8 +686,11 @@ class PPOTrainer:
             approx_kl = metrics["approx_kl"]
 
             # Compute explained variance using shared utility
-            y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-            explained_var = compute_explained_variance(y_pred, y_true)
+            var_y = torch.var(b_returns)
+            if var_y.item() == 0.0:
+                explained_var = float("nan")
+            else:
+                explained_var = (1 - torch.var(b_returns - b_values) / var_y).item()
 
             # Log training metrics
             sps = int(global_step / (time.time() - start_time))
@@ -718,24 +731,28 @@ class PPOTrainer:
                 log_dict["advantages/std"] = advantages.std().item()
 
                 # Add bidding statistics (aggregated over this rollout)
-                if episode_bid_values:
-                    log_dict["bidding/avg_bid_value"] = np.mean(episode_bid_values)
-                    log_dict["bidding/max_bid_value"] = np.max(episode_bid_values)
-                    log_dict["bidding/min_bid_value"] = np.min(episode_bid_values)
+                if self.args.track and episode_bid_count.item() > 0:
+                    log_dict["bidding/avg_bid_value"] = (episode_bid_sum / episode_bid_count).item()
+                    log_dict["bidding/max_bid_value"] = episode_bid_max.item() if episode_bid_max is not None else 0.0
+                    log_dict["bidding/min_bid_value"] = episode_bid_min.item() if episode_bid_min is not None else 0.0
 
                 # Add per-agent win rates (over this rollout)
-                total_wins = sum(episode_agent_wins.values())
+                total_wins = int(episode_agent_wins.sum().item())
                 if total_wins > 0:
                     for agent_idx in range(self.args.num_agents):
                         agent_key = f"agent_{agent_idx}"
-                        win_rate = episode_agent_wins[agent_key] / total_wins
+                        win_rate = episode_agent_wins[agent_idx].item() / total_wins
                         log_dict[f"agents/{agent_key}_win_rate"] = win_rate
 
                 wandb.log(log_dict, step=global_step)
 
                 # Reset rollout statistics for next iteration
-                episode_bid_values = []
-                episode_agent_wins = {f"agent_{i}": 0 for i in range(self.args.num_agents)}
+                if self.args.track:
+                    episode_agent_wins.zero_()
+                    episode_bid_sum.zero_()
+                    episode_bid_count.zero_()
+                    episode_bid_min = None
+                    episode_bid_max = None
 
             # Call iteration callback if provided
             if "on_iteration_end" in self.callbacks:
