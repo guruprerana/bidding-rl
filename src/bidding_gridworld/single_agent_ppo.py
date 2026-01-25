@@ -15,8 +15,16 @@ from torch.distributions.categorical import Categorical
 from tqdm import tqdm
 import wandb
 
-from bidding_gridworld_torch import BiddingGridworld, BiddingGridworldConfig
-from ppo_utils import layer_init, compute_gae, ppo_update_step, compute_explained_variance
+from bidding_gridworld.bidding_gridworld_torch import (
+    BiddingGridworld,
+    BiddingGridworldConfig,
+)
+from ppo_utils import (
+    layer_init,
+    compute_gae,
+    ppo_update_step,
+    compute_explained_variance,
+)
 
 
 @dataclass

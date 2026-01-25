@@ -8,12 +8,12 @@ This repo implements multi-agent bidding RL in a gridworld. A shared policy lear
 
 ## Core Files
 
-- `src/bidding_gridworld.py` - CPU gridworld environment with bidding, action windows, and moving targets.
-- `src/bidding_ppo.py` - Multi-agent PPO trainer with shared actor-critic.
-- `src/single_agent_ppo.py` - Single-agent PPO trainer.
+- `src/bidding_gridworld/bidding_gridworld.py` - CPU gridworld environment with bidding, action windows, and moving targets.
+- `src/bidding_gridworld/bidding_ppo.py` - Multi-agent PPO trainer with shared actor-critic.
+- `src/bidding_gridworld/single_agent_ppo.py` - Single-agent PPO trainer.
 - `train_ppo_moving_targets.py` - Training entry point and configuration.
 - `evaluate_trained_models.py` - Evaluation script for saved checkpoints.
-- `src/bidding_gridworld_torch.py` - GPU-native batched gridworld environment (torch tensors on CUDA).
+- `src/bidding_gridworld/bidding_gridworld_torch.py` - GPU-native batched gridworld environment (torch tensors on CUDA).
 
 ## Key Mechanics
 
@@ -34,7 +34,7 @@ This repo implements multi-agent bidding RL in a gridworld. A shared policy lear
 
 ## GPU Batched Environment (Torch)
 
-The GPU-native env is implemented in `src/bidding_gridworld_torch.py` as `BiddingGridworld`.
+The GPU-native env is implemented in `src/bidding_gridworld/bidding_gridworld_torch.py` as `BiddingGridworld`.
 
 Capabilities:
 - Batched, GPU-only step logic (bidding/windowing, movement, rewards, expiry).
@@ -73,7 +73,7 @@ The key innovation is learning a generalizable navigation policy through adversa
 
 ## Project Structure
 
-- `src/bidding_gridworld.py` - Core gridworld environment with bidding mechanism and action windows
+- `src/bidding_gridworld/bidding_gridworld.py` - Core gridworld environment with bidding mechanism and action windows
 - `src/zero_sum_wrapper.py` - Environment wrapper that creates zero-sum training scenarios
 - `src/zero_sum_dqn.py` - Zero-Sum DQN algorithm for adversarial training
 - `comprehensive_experiment.py` - Main experiment runner with training, evaluation, and visualization

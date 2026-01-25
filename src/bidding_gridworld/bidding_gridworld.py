@@ -1,4 +1,4 @@
-"""Deprecated: use src/torch_batched_env.py (GPU-native) instead."""
+"""Deprecated: use src/bidding_gridworld/bidding_gridworld_torch.py (GPU-native) instead."""
 
 import gymnasium as gym
 import numpy as np
@@ -12,7 +12,8 @@ import cv2
 import warnings
 
 warnings.warn(
-    "src/bidding_gridworld.py is deprecated; use src/torch_batched_env.py instead.",
+    "src/bidding_gridworld/bidding_gridworld.py is deprecated; "
+    "use src/bidding_gridworld/bidding_gridworld_torch.py instead.",
     DeprecationWarning,
     stacklevel=2,
 )

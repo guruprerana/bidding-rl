@@ -2,7 +2,7 @@
 
 Multi-agent bidding RL in a gridworld. A shared PPO policy learns to navigate toward targets while agents bid for control of a shared body. The project runs on a GPU-native batched environment and supports moving targets, action windows, bid penalties, target expiry, and decentralized observations.
 
-Note: The legacy CPU environment in `src/bidding_gridworld.py` is deprecated. The active environment is the GPU-native implementation in `src/bidding_gridworld_torch.py`.
+Note: The legacy CPU environment in `src/bidding_gridworld/bidding_gridworld.py` is deprecated. The active environment is the GPU-native implementation in `src/bidding_gridworld/bidding_gridworld_torch.py`.
 
 ## Highlights
 
@@ -68,7 +68,7 @@ NUM_VIDEO_EPISODES = 1
 
 GPU-native environment (torch tensors on CUDA):
 
-- File: `src/bidding_gridworld_torch.py`
+- File: `src/bidding_gridworld/bidding_gridworld_torch.py`
 - Class: `BiddingGridworld`
 - Config: `BiddingGridworldConfig`
 
@@ -84,8 +84,8 @@ Core mechanics:
 
 PPO trainers:
 
-- Multi-agent: `src/bidding_ppo.py`
-- Single-agent: `src/single_agent_ppo.py`
+- Multi-agent: `src/bidding_gridworld/bidding_ppo.py`
+- Single-agent: `src/bidding_gridworld/single_agent_ppo.py`
 
 Both trainers use the GPU environment directly and avoid CPU conversions.
 
@@ -104,7 +104,7 @@ logs/<run_name>/
 
 ## Deprecation Notice
 
-`src/bidding_gridworld.py` is deprecated and only kept for reference. Use `src/bidding_gridworld_torch.py` for new work.
+`src/bidding_gridworld/bidding_gridworld.py` is deprecated and only kept for reference. Use `src/bidding_gridworld/bidding_gridworld_torch.py` for new work.
 
 ## License
 
