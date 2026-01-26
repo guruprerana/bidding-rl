@@ -1,4 +1,4 @@
-gymnasium
+gymnasium[atari, accept-rom-license]
 numpy
 scipy
 matplotlib
@@ -7,4 +7,5 @@ stable-baselines3[extra]
 wandb
 torch
 torchvision
- tqdm
+tqdm
+ocatari

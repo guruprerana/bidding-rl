@@ -2,29 +2,21 @@
 # Simpler than multi-agent version - just learns to navigate and collect all targets
 
 import os
-import random
-import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
-from tqdm import tqdm
 import wandb
 
 from bidding_gridworld.bidding_gridworld_torch import (
     BiddingGridworld,
     BiddingGridworldConfig,
 )
-from ppo_utils import (
-    layer_init,
-    compute_gae,
-    ppo_update_step,
-    compute_explained_variance,
-)
+from ppo_utils import layer_init
+from ppo_trainer_base import SingleAgentPPOTrainerBase
 
 
 @dataclass
@@ -194,7 +186,7 @@ class SingleAgent(nn.Module):
         return action, log_prob, entropy, value
 
 
-class SingleAgentPPOTrainer:
+class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
     """PPO Trainer for single-agent gridworld navigation."""
 
     def __init__(self, args: SingleAgentArgs, callbacks: Optional[Dict] = None):
@@ -207,38 +199,7 @@ class SingleAgentPPOTrainer:
                 - on_iteration_end(trainer, iteration, global_step): Called after each iteration
                 - on_training_end(trainer, global_step): Called when training completes
         """
-        self.args = args
-        self.callbacks = callbacks or {}
-
-        # Compute derived parameters
-        self.args.batch_size = int(args.num_envs * args.num_steps)
-        self.args.minibatch_size = int(self.args.batch_size // args.num_minibatches)
-        self.args.total_timesteps = self.args.num_iterations * self.args.num_envs * self.args.num_steps
-
-        self.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
-
-        # Initialize wandb
-        if self.args.track:
-            wandb.init(
-                project=args.wandb_project_name,
-                entity=args.wandb_entity,
-                config=vars(args),
-                name=self.run_name,
-                save_code=True,
-            )
-
-        # Seeding
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        torch.backends.cudnn.deterministic = args.torch_deterministic
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
-        # These will be initialized in setup()
-        self.envs = None
-        self.agent = None
-        self.optimizer = None
+        super().__init__(args, callbacks=callbacks)
         self.obs_dim = None
 
     def setup(self):
@@ -281,6 +242,9 @@ class SingleAgentPPOTrainer:
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
 
+        self.args.batch_size = int(self.args.num_envs * self.args.num_steps)
+        self.args.minibatch_size = int(self.args.batch_size // self.args.num_minibatches)
+
         # Calculate expected observation dimension components for single-agent mode
         # Base: 2 (agent pos) + 2*num_targets (target pos) + num_targets (step counters) +
         #       1 (window steps) + num_targets (relative counts) [+ num_targets (reached flags)]
@@ -297,190 +261,37 @@ class SingleAgentPPOTrainer:
         print(f"   Num iterations: {self.args.num_iterations}")
         print(f"   Run name: {self.run_name}")
 
-    def train(self):
-        """Run the main training loop."""
-        if self.envs is None:
-            raise RuntimeError("Must call setup() before train()")
-
-        def format_duration(seconds: float) -> str:
-            seconds = max(0.0, seconds)
-            total = int(seconds)
-            hours = total // 3600
-            minutes = (total % 3600) // 60
-            secs = total % 60
-            if hours > 0:
-                return f"{hours:d}:{minutes:02d}:{secs:02d}"
-            return f"{minutes:d}:{secs:02d}"
-
-        # Storage setup
-        obs = torch.zeros((self.args.num_steps, self.args.num_envs, self.obs_dim), device=self.device)
-        actions = torch.zeros((self.args.num_steps, self.args.num_envs), device=self.device)
-        logprobs = torch.zeros((self.args.num_steps, self.args.num_envs)).to(self.device)
-        rewards = torch.zeros((self.args.num_steps, self.args.num_envs)).to(self.device)
-        dones = torch.zeros((self.args.num_steps, self.args.num_envs)).to(self.device)
-        values = torch.zeros((self.args.num_steps, self.args.num_envs)).to(self.device)
-
-        # Start the game
-        global_step = 0
-        start_time = time.time()
-        next_obs, _ = self.envs.reset(seed=self.args.seed)
-        next_done = torch.zeros(self.args.num_envs).to(self.device)
-
-        print(f"\n{'='*60}")
-        print(f"Starting training for {self.args.num_iterations} iterations ({self.args.total_timesteps} timesteps)")
-        print(f"{'='*60}\n")
-
-        for iteration in tqdm(range(1, self.args.num_iterations + 1), desc="PPO iterations"):
-            iteration_start = time.time()
-            # Annealing the learning rate
-            if self.args.anneal_lr:
-                frac = 1.0 - (iteration - 1.0) / self.args.num_iterations
-                lrnow = frac * self.args.learning_rate
-                self.optimizer.param_groups[0]["lr"] = lrnow
-
-            # Rollout phase
-            for step in range(0, self.args.num_steps):
-                global_step += self.args.num_envs
-                obs[step] = next_obs
-                dones[step] = next_done
-
-                # Get actions from network
-                with torch.no_grad():
-                    action, logprob, _, value = self.agent.get_action_and_value(next_obs)
-                    values[step] = value.flatten()
-
-                actions[step] = action
-                logprobs[step] = logprob
-
-                # Execute actions in environment
-                next_obs, reward, terminations, truncations, infos = self.envs.step(action)
-                next_done = terminations | truncations
-                rewards[step] = reward.view(-1)
-                next_done = next_done.to(self.device, dtype=torch.float32)
-
-                # Log episode statistics
-                if "final_info" in infos:
-                    for info in infos["final_info"]:
-                        if info and "episode" in info:
-                            # Extract target reach counts if available
-                            targets_reached_count = info.get("targets_reached_count", None)
-                            min_targets_reached = info.get("min_targets_reached", None)
-
-                            # Build log message
-                            log_msg = f"global_step={global_step}, episodic_return={info['episode']['r']:.2f}, episodic_length={info['episode']['l']}"
-                            if targets_reached_count is not None:
-                                log_msg += f", target_counts={targets_reached_count}, min_reached={min_targets_reached}"
-                            print(log_msg)
-
-                            if self.args.track:
-                                log_dict = {
-                                    "charts/episodic_return": info["episode"]["r"],
-                                    "charts/episodic_length": info["episode"]["l"],
-                                }
-                                # Add target reach metrics if available
-                                if targets_reached_count is not None:
-                                    log_dict["charts/min_targets_reached"] = min_targets_reached
-                                    # Log individual target counts
-                                    for i, count in enumerate(targets_reached_count):
-                                        log_dict[f"charts/target_{i}_reached_count"] = count
-                                    # Log max-min spread (measure of balance)
-                                    spread = max(targets_reached_count) - min(targets_reached_count)
-                                    log_dict["charts/target_count_spread"] = spread
-
-                                wandb.log(log_dict, step=global_step)
-
-            # Bootstrap value and compute advantages using shared utility
-            with torch.no_grad():
-                next_value = self.agent.get_value(next_obs).reshape(-1)
-                advantages, returns = compute_gae(
-                    rewards, values, dones, next_value, next_done,
-                    self.args.gamma, self.args.gae_lambda
-                )
-
-            # Flatten the batch
-            b_obs = obs.reshape((-1, self.obs_dim))
-            b_actions = actions.reshape(-1)
-            b_logprobs = logprobs.reshape(-1)
-            b_advantages = advantages.reshape(-1)
-            b_returns = returns.reshape(-1)
-            b_values = values.reshape(-1)
-
-            # Optimizing the policy and value network
-            b_inds = np.arange(self.args.batch_size)
-            clipfracs = []
-
-            for epoch in range(self.args.update_epochs):
-                np.random.shuffle(b_inds)
-
-                for start in range(0, self.args.batch_size, self.args.minibatch_size):
-                    end = start + self.args.minibatch_size
-                    mb_inds = b_inds[start:end]
-
-                    # Use shared PPO update step
-                    metrics = ppo_update_step(
-                        self.agent,
-                        self.optimizer,
-                        b_obs[mb_inds],
-                        b_actions.long()[mb_inds],
-                        b_logprobs[mb_inds],
-                        b_advantages[mb_inds],
-                        b_returns[mb_inds],
-                        b_values[mb_inds],
-                        self.args.clip_coef,
-                        self.args.ent_coef,
-                        self.args.vf_coef,
-                        self.args.max_grad_norm,
-                        self.args.norm_adv,
-                        self.args.clip_vloss
-                    )
-
-                    clipfracs.append(metrics["clipfrac"])
-
-                if self.args.target_kl is not None and metrics["approx_kl"] > self.args.target_kl:
-                    break
-
-            # Compute explained variance
-            y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-            explained_var = compute_explained_variance(y_pred, y_true)
-
-            # Log training metrics
-            sps = int(global_step / (time.time() - start_time))
-            iter_time = time.time() - iteration_start
-            remaining_iters = self.args.num_iterations - iteration
-            eta = format_duration(remaining_iters * iter_time)
-            iter_time_str = format_duration(iter_time)
-            tqdm.write(
-                f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - "
-                f"Value Loss: {metrics['v_loss']:.4f} - Policy Loss: {metrics['pg_loss']:.4f} - "
-                f"Iter Time: {iter_time_str} - ETA: {eta}"
+    def _on_rollout_step(self, infos, global_step: int):
+        if not isinstance(infos, dict):
+            return
+        if 'final_info' not in infos:
+            return
+        for info in infos['final_info']:
+            if not info or 'episode' not in info:
+                continue
+            targets_reached_count = info.get('targets_reached_count', None)
+            min_targets_reached = info.get('min_targets_reached', None)
+            log_msg = (
+                f"global_step={global_step}, episodic_return={info['episode']['r']:.2f}, "
+                f"episodic_length={info['episode']['l']}"
             )
+            if targets_reached_count is not None:
+                log_msg += f", target_counts={targets_reached_count}, min_reached={min_targets_reached}"
+            print(log_msg)
 
             if self.args.track:
-                wandb.log({
-                    "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "losses/value_loss": metrics["v_loss"],
-                    "losses/policy_loss": metrics["pg_loss"],
-                    "losses/entropy": metrics["entropy_loss"],
-                    "losses/old_approx_kl": metrics["old_approx_kl"],
-                    "losses/approx_kl": metrics["approx_kl"],
-                    "losses/clipfrac": np.mean(clipfracs),
-                    "losses/explained_variance": explained_var,
-                    "charts/SPS": sps,
-                    "charts/iteration": iteration,
-                    "global_step": global_step,
-                }, step=global_step)
+                log_dict = {
+                    'charts/episodic_return': info['episode']['r'],
+                    'charts/episodic_length': info['episode']['l'],
+                }
+                if targets_reached_count is not None:
+                    log_dict['charts/min_targets_reached'] = min_targets_reached
+                    for i, count in enumerate(targets_reached_count):
+                        log_dict[f'charts/target_{i}_reached_count'] = count
+                    spread = max(targets_reached_count) - min(targets_reached_count)
+                    log_dict['charts/target_count_spread'] = spread
 
-            # Call iteration callback if provided
-            if "on_iteration_end" in self.callbacks:
-                self.callbacks["on_iteration_end"](self, iteration, global_step)
-
-        print(f"\n{'='*60}")
-        print(f"Training completed!")
-        print(f"{'='*60}\n")
-
-        # Call training end callback if provided
-        if "on_training_end" in self.callbacks:
-            self.callbacks["on_training_end"](self, global_step)
+                wandb.log(log_dict, step=global_step)
 
     def save_model(self, path: Optional[str] = None):
         """Save the trained model."""

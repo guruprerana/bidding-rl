@@ -154,3 +154,27 @@ def compute_explained_variance(y_pred: np.ndarray, y_true: np.ndarray) -> float:
     """Compute explained variance."""
     var_y = np.var(y_true)
     return np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+
+
+def format_duration(seconds: float) -> str:
+    """Format seconds into H:MM:SS or M:SS."""
+    seconds = max(0.0, seconds)
+    total = int(seconds)
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
+
+
+def build_mlp(input_dim: int, hidden_sizes: tuple[int, ...], output_dim: int) -> nn.Sequential:
+    """Build a simple MLP with ELU activations."""
+    layers = []
+    in_dim = input_dim
+    for hidden in hidden_sizes:
+        layers.append(layer_init(nn.Linear(in_dim, hidden)))
+        layers.append(nn.ELU())
+        in_dim = hidden
+    layers.append(layer_init(nn.Linear(in_dim, output_dim)))
+    return nn.Sequential(*layers)

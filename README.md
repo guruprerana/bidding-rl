@@ -31,6 +31,12 @@ Train a PPO run (edit config in the script):
 python train_ppo_moving_targets.py
 ```
 
+Train Assault PPO (edit config in the script):
+
+```bash
+python train_assault_ppo.py
+```
+
 Evaluate checkpoints (edit paths in the script):
 
 ```bash
@@ -69,6 +75,10 @@ NUM_VIDEO_EPISODES = 1
 GPU-native environment (torch tensors on CUDA):
 
 - File: `src/bidding_gridworld/bidding_gridworld_torch.py`
+- OCAtari Assault (object-state): `src/assault/assault_torch.py`
+- Assault PPO (multi-agent bidding): `src/assault/assault_bidding_ppo.py`
+- Assault PPO (single-agent): `src/assault/assault_single_agent_ppo.py`
+- Assault experiment runner: `src/assault/assault_experiment.py`
 - Class: `BiddingGridworld`
 - Config: `BiddingGridworldConfig`
 

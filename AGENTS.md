@@ -14,6 +14,10 @@ This repo implements multi-agent bidding RL in a gridworld. A shared policy lear
 - `train_ppo_moving_targets.py` - Training entry point and configuration.
 - `evaluate_trained_models.py` - Evaluation script for saved checkpoints.
 - `src/bidding_gridworld/bidding_gridworld_torch.py` - GPU-native batched gridworld environment (torch tensors on CUDA).
+- `src/assault/assault_torch.py` - OCAtari Assault env with object-state observations (single-agent + bidding).
+- `src/assault/assault_bidding_ppo.py` - Assault multi-agent PPO trainer with bidding.
+- `src/assault/assault_single_agent_ppo.py` - Assault single-agent PPO trainer.
+- `src/assault/assault_experiment.py` - Assault experiment runner with checkpoints and eval.
 
 ## Key Mechanics
 
@@ -50,6 +54,7 @@ Notes:
 
 ```
 python train_ppo_moving_targets.py
+python train_assault_ppo.py
 python evaluate_trained_models.py
 ```
 

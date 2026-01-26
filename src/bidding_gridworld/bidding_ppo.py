@@ -3,29 +3,21 @@
 # Adapted for multi-agent bidding with shared actor-critic networks
 
 import os
-import random
-import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
-from tqdm import tqdm
 import wandb
 
 from bidding_gridworld.bidding_gridworld_torch import (
     BiddingGridworld,
     BiddingGridworldConfig,
 )
-from ppo_utils import (
-    layer_init,
-    compute_gae,
-    ppo_update_step,
-    compute_explained_variance,
-)
+from ppo_utils import build_mlp, layer_init
+from ppo_trainer_base import MultiAgentPPOTrainerBase
 
 
 @dataclass
@@ -134,18 +126,6 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     total_timesteps: int = 0
     """total timesteps of the experiments (computed in runtime)"""
-
-
-def build_mlp(input_dim: int, hidden_sizes: Tuple[int, ...], output_dim: int) -> nn.Sequential:
-    """Build a simple MLP with ELU activations."""
-    layers = []
-    in_dim = input_dim
-    for hidden_size in hidden_sizes:
-        layers.append(layer_init(nn.Linear(in_dim, hidden_size)))
-        layers.append(nn.ELU())
-        in_dim = hidden_size
-    layers.append(layer_init(nn.Linear(in_dim, output_dim)))
-    return nn.Sequential(*layers)
 
 
 class MaskedAttentionPooling(nn.Module):
@@ -417,7 +397,7 @@ class SharedAgent(nn.Module):
         return action, total_log_prob, entropy, value
 
 
-class PPOTrainer:
+class PPOTrainer(MultiAgentPPOTrainerBase):
     """PPO Trainer for multi-agent bidding gridworld with shared networks."""
 
     def __init__(self, args: Args, callbacks: Optional[Dict] = None):
@@ -430,39 +410,14 @@ class PPOTrainer:
                 - on_iteration_end(trainer, iteration, global_step): Called after each iteration
                 - on_training_end(trainer, global_step): Called when training completes
         """
-        self.args = args
-        self.callbacks = callbacks or {}
-
-        # Compute derived parameters
-        self.args.batch_size = int(args.num_envs * args.num_steps * args.num_agents)
-        self.args.minibatch_size = int(self.args.batch_size // args.num_minibatches)
-        self.args.total_timesteps = self.args.num_iterations * self.args.num_envs * self.args.num_steps * self.args.num_agents
-
-        self.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
-
-        # Initialize wandb
-        if self.args.track:
-            wandb.init(
-                project=args.wandb_project_name,
-                entity=args.wandb_entity,
-                config=vars(args),
-                name=self.run_name,
-                save_code=True,
-            )
-
-        # Seeding
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        torch.backends.cudnn.deterministic = args.torch_deterministic
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
-        # These will be initialized in setup()
-        self.envs = None
-        self.agent = None
-        self.optimizer = None
+        super().__init__(args, callbacks=callbacks)
         self.obs_dim = None
+        self.num_action_components = None
+        self._episode_agent_wins = None
+        self._episode_bid_sum = None
+        self._episode_bid_count = None
+        self._episode_bid_min = None
+        self._episode_bid_max = None
 
     def setup(self):
         """Setup environments, agent, and optimizer."""
@@ -497,6 +452,7 @@ class PPOTrainer:
         # Observation space is (num_agents, obs_dim), so we need shape[1] for per-agent obs dim
         self.obs_dim = self.envs.per_agent_obs_dim
         num_actions_per_agent = 3 if self.args.window_bidding else 2
+        self.num_action_components = num_actions_per_agent
         self.agent = SharedAgent(
             self.obs_dim,
             num_actions_per_agent=num_actions_per_agent,
@@ -514,6 +470,9 @@ class PPOTrainer:
             self.agent.set_window_head(self.args.action_window)
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
+
+        self.args.batch_size = int(self.args.num_envs * self.args.num_steps * self.args.num_agents)
+        self.args.minibatch_size = int(self.args.batch_size // self.args.num_minibatches)
 
         print(f"🚀 PPO Trainer initialized")
         print(f"   Device: {self.device}")
@@ -535,244 +494,66 @@ class PPOTrainer:
         print(f"   Num iterations: {self.args.num_iterations}")
         print(f"   Run name: {self.run_name}")
 
-    def train(self):
-        """Run the main training loop."""
-        if self.envs is None:
-            raise RuntimeError("Must call setup() before train()")
+    def _on_iteration_start(self, iteration: int):
+        if not self.args.track:
+            return
+        self._episode_agent_wins = torch.zeros(self.args.num_agents, device=self.device, dtype=torch.int64)
+        self._episode_bid_sum = torch.zeros((), device=self.device, dtype=torch.float32)
+        self._episode_bid_count = torch.zeros((), device=self.device, dtype=torch.int64)
+        self._episode_bid_min = None
+        self._episode_bid_max = None
 
-        def format_duration(seconds: float) -> str:
-            seconds = max(0.0, seconds)
-            total = int(seconds)
-            hours = total // 3600
-            minutes = (total % 3600) // 60
-            secs = total % 60
-            if hours > 0:
-                return f"{hours:d}:{minutes:02d}:{secs:02d}"
-            return f"{minutes:d}:{secs:02d}"
-
-        # Storage setup
-        # Observation space is (num_agents, obs_dim), so we need (num_steps, num_envs, num_agents, obs_dim)
-        num_action_components = 3 if self.args.window_bidding else 2
-        obs = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents, self.obs_dim)).to(self.device)
-        actions = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents, num_action_components)).to(self.device)
-        logprobs = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents)).to(self.device)
-        rewards = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents)).to(self.device)
-        dones = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents)).to(self.device)
-        values = torch.zeros((self.args.num_steps, self.args.num_envs, self.args.num_agents)).to(self.device)
-
-        # Start the game
-        global_step = 0
-        start_time = time.time()
-        next_obs, _ = self.envs.reset(seed=self.args.seed)
-        next_done = torch.zeros((self.args.num_envs, self.args.num_agents)).to(self.device)
-
-        # Track bidding-specific statistics (aggregated across rollout)
-        if self.args.track:
-            episode_agent_wins = torch.zeros(self.args.num_agents, device=self.device, dtype=torch.int64)
-            episode_bid_sum = torch.zeros((), device=self.device, dtype=torch.float32)
-            episode_bid_count = torch.zeros((), device=self.device, dtype=torch.int64)
-            episode_bid_min = None
-            episode_bid_max = None
-
-        print(f"\n{'='*60}")
-        print(f"Starting training for {self.args.num_iterations} iterations ({self.args.total_timesteps} timesteps)")
-        print(f"{'='*60}\n")
-
-        for iteration in tqdm(range(1, self.args.num_iterations + 1), desc="PPO iterations"):
-            iteration_start = time.time()
-            # Annealing the learning rate
-            if self.args.anneal_lr:
-                frac = 1.0 - (iteration - 1.0) / self.args.num_iterations
-                lrnow = frac * self.args.learning_rate
-                self.optimizer.param_groups[0]["lr"] = lrnow
-
-            # Rollout phase
-            for step in range(0, self.args.num_steps):
-                global_step += self.args.num_envs * self.args.num_agents
-                obs[step] = next_obs
-                dones[step] = next_done
-
-                # Get actions from shared network
-                with torch.no_grad():
-                    flat_obs = next_obs.reshape(-1, self.obs_dim)
-                    action, logprob, _, value = self.agent.get_action_and_value(flat_obs)
-                    action = action.reshape(self.args.num_envs, self.args.num_agents, num_action_components)
-                    logprob = logprob.reshape(self.args.num_envs, self.args.num_agents)
-                    value = value.reshape(self.args.num_envs, self.args.num_agents)
-                    values[step] = value
-
-                actions[step] = action
-                logprobs[step] = logprob
-
-                # Execute actions in environment
-                next_obs, reward, terminations, truncations, infos = self.envs.step(action)
-                next_done_scalar = terminations | truncations
-                next_done = next_done_scalar.unsqueeze(1).expand(-1, self.args.num_agents)
-                rewards[step] = reward
-                next_done = next_done.to(self.device, dtype=torch.float32)
-
-                # Extract bidding information for logging (vectorized)
-                if self.args.track and isinstance(infos, dict):
-                    winning_agent = infos.get("winning_agent", None)
-                    if torch.is_tensor(winning_agent):
-                        valid = winning_agent >= 0
-                        if torch.any(valid):
-                            counts = torch.bincount(
-                                winning_agent[valid].to(torch.int64),
-                                minlength=self.args.num_agents,
-                            )
-                            episode_agent_wins += counts
-
-                    bids = infos.get("bids", None)
-                    if torch.is_tensor(bids):
-                        bids_f = bids.to(torch.float32)
-                        episode_bid_sum += bids_f.sum()
-                        episode_bid_count += bids_f.numel()
-                        step_min = bids_f.min()
-                        step_max = bids_f.max()
-                        episode_bid_min = step_min if episode_bid_min is None else torch.minimum(episode_bid_min, step_min)
-                        episode_bid_max = step_max if episode_bid_max is None else torch.maximum(episode_bid_max, step_max)
-
-
-            # Bootstrap value and compute advantages using shared utility
-            with torch.no_grad():
-                flat_next_obs = next_obs.reshape(-1, self.obs_dim)
-                next_value = self.agent.get_value(flat_next_obs).reshape(self.args.num_envs, self.args.num_agents)
-
-                advantages, returns = compute_gae(
-                    rewards, values, dones, next_value, next_done,
-                    self.args.gamma, self.args.gae_lambda
+    def _on_rollout_step(self, infos, global_step: int):
+        if not self.args.track or not isinstance(infos, dict):
+            return
+        winning_agent = infos.get('winning_agent', None)
+        if torch.is_tensor(winning_agent):
+            valid = winning_agent >= 0
+            if torch.any(valid):
+                counts = torch.bincount(
+                    winning_agent[valid].to(torch.int64),
+                    minlength=self.args.num_agents,
                 )
+                self._episode_agent_wins += counts
 
-            # Flatten for training
-            # obs shape: (num_steps, num_envs, num_agents, obs_dim) -> (batch_size, obs_dim)
-            b_obs = obs.reshape(-1, self.obs_dim)
-            b_logprobs = logprobs.reshape(-1)
-            b_actions = actions.reshape(-1, num_action_components)
-            b_advantages = advantages.reshape(-1)
-            b_returns = returns.reshape(-1)
-            b_values = values.reshape(-1)
+        bids = infos.get('bids', None)
+        if torch.is_tensor(bids):
+            bids_f = bids.to(torch.float32)
+            self._episode_bid_sum += bids_f.sum()
+            self._episode_bid_count += bids_f.numel()
+            step_min = bids_f.min()
+            step_max = bids_f.max()
+            self._episode_bid_min = step_min if self._episode_bid_min is None else torch.minimum(self._episode_bid_min, step_min)
+            self._episode_bid_max = step_max if self._episode_bid_max is None else torch.maximum(self._episode_bid_max, step_max)
 
-            # Optimize policy and value network using shared utility
-            clipfracs = []
-
-            for epoch in range(self.args.update_epochs):
-                b_inds = torch.randperm(self.args.batch_size, device=self.device)
-
-                for start in range(0, self.args.batch_size, self.args.minibatch_size):
-                    end = start + self.args.minibatch_size
-                    mb_inds = b_inds[start:end]
-
-                    # Use shared PPO update step
-                    metrics = ppo_update_step(
-                        self.agent,
-                        self.optimizer,
-                        b_obs[mb_inds],
-                        b_actions[mb_inds],
-                        b_logprobs[mb_inds],
-                        b_advantages[mb_inds],
-                        b_returns[mb_inds],
-                        b_values[mb_inds],
-                        self.args.clip_coef,
-                        self.args.ent_coef,
-                        self.args.vf_coef,
-                        self.args.max_grad_norm,
-                        self.args.norm_adv,
-                        self.args.clip_vloss
-                    )
-
-                    clipfracs.append(metrics["clipfrac"])
-
-                if self.args.target_kl is not None and metrics["approx_kl"] > self.args.target_kl:
-                    break
-
-            # Store final metrics for logging
-            v_loss = metrics["v_loss"]
-            pg_loss = metrics["pg_loss"]
-            entropy_loss = metrics["entropy_loss"]
-            old_approx_kl = metrics["old_approx_kl"]
-            approx_kl = metrics["approx_kl"]
-
-            # Compute explained variance using shared utility
-            var_y = torch.var(b_returns)
-            if var_y.item() == 0.0:
-                explained_var = float("nan")
-            else:
-                explained_var = (1 - torch.var(b_returns - b_values) / var_y).item()
-
-            # Log training metrics
-            sps = int(global_step / (time.time() - start_time))
-            iter_time = time.time() - iteration_start
-            remaining_iters = self.args.num_iterations - iteration
-            eta = format_duration(remaining_iters * iter_time)
-            iter_time_str = format_duration(iter_time)
-            tqdm.write(
-                f"Iteration {iteration}/{self.args.num_iterations} - SPS: {sps} - "
-                f"Value Loss: {v_loss:.4f} - Policy Loss: {pg_loss:.4f} - "
-                f"Iter Time: {iter_time_str} - ETA: {eta}"
-            )
-
-            if self.args.track:
-                log_dict = {
-                    "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
-                    "losses/value_loss": v_loss,
-                    "losses/policy_loss": pg_loss,
-                    "losses/entropy": entropy_loss,
-                    "losses/old_approx_kl": old_approx_kl,
-                    "losses/approx_kl": approx_kl,
-                    "losses/clipfrac": np.mean(clipfracs),
-                    "losses/explained_variance": explained_var,
-                    "charts/SPS": sps,
-                    "charts/iteration": iteration,
-                    "global_step": global_step,
-                }
-
-                # Add aggregate reward/value statistics
-                log_dict["rewards/avg_step_reward"] = rewards.mean().item()
-                log_dict["rewards/max_step_reward"] = rewards.max().item()
-                log_dict["rewards/min_step_reward"] = rewards.min().item()
-                log_dict["values/mean"] = values.mean().item()
-                log_dict["values/std"] = values.std().item()
-                log_dict["values/max"] = values.max().item()
-                log_dict["values/min"] = values.min().item()
-                log_dict["advantages/mean"] = advantages.mean().item()
-                log_dict["advantages/std"] = advantages.std().item()
-
-                # Add bidding statistics (aggregated over this rollout)
-                if self.args.track and episode_bid_count.item() > 0:
-                    log_dict["bidding/avg_bid_value"] = (episode_bid_sum / episode_bid_count).item()
-                    log_dict["bidding/max_bid_value"] = episode_bid_max.item() if episode_bid_max is not None else 0.0
-                    log_dict["bidding/min_bid_value"] = episode_bid_min.item() if episode_bid_min is not None else 0.0
-
-                # Add per-agent win rates (over this rollout)
-                total_wins = int(episode_agent_wins.sum().item())
-                if total_wins > 0:
-                    for agent_idx in range(self.args.num_agents):
-                        agent_key = f"agent_{agent_idx}"
-                        win_rate = episode_agent_wins[agent_idx].item() / total_wins
-                        log_dict[f"agents/{agent_key}_win_rate"] = win_rate
-
-                wandb.log(log_dict, step=global_step)
-
-                # Reset rollout statistics for next iteration
-                if self.args.track:
-                    episode_agent_wins.zero_()
-                    episode_bid_sum.zero_()
-                    episode_bid_count.zero_()
-                    episode_bid_min = None
-                    episode_bid_max = None
-
-            # Call iteration callback if provided
-            if "on_iteration_end" in self.callbacks:
-                self.callbacks["on_iteration_end"](self, iteration, global_step)
-
-        print(f"\n{'='*60}")
-        print(f"Training completed!")
-        print(f"{'='*60}\n")
-
-        # Call training end callback if provided
-        if "on_training_end" in self.callbacks:
-            self.callbacks["on_training_end"](self, global_step)
+    def _extra_log_dict(self, global_step: int) -> dict:
+        if not self._last_rollout_stats:
+            return {}
+        rewards = self._last_rollout_stats['rewards']
+        values = self._last_rollout_stats['values']
+        advantages = self._last_rollout_stats['advantages']
+        log_dict = {
+            'rewards/avg_step_reward': rewards.mean().item(),
+            'rewards/max_step_reward': rewards.max().item(),
+            'rewards/min_step_reward': rewards.min().item(),
+            'values/mean': values.mean().item(),
+            'values/std': values.std().item(),
+            'values/max': values.max().item(),
+            'values/min': values.min().item(),
+            'advantages/mean': advantages.mean().item(),
+            'advantages/std': advantages.std().item(),
+        }
+        if self.args.track and self._episode_bid_count is not None and self._episode_bid_count.item() > 0:
+            log_dict['bidding/avg_bid_value'] = (self._episode_bid_sum / self._episode_bid_count).item()
+            log_dict['bidding/max_bid_value'] = self._episode_bid_max.item() if self._episode_bid_max is not None else 0.0
+            log_dict['bidding/min_bid_value'] = self._episode_bid_min.item() if self._episode_bid_min is not None else 0.0
+        total_wins = int(self._episode_agent_wins.sum().item()) if self._episode_agent_wins is not None else 0
+        if total_wins > 0:
+            for agent_idx in range(self.args.num_agents):
+                agent_key = f'agent_{agent_idx}'
+                win_rate = self._episode_agent_wins[agent_idx].item() / total_wins
+                log_dict[f'agents/{agent_key}_win_rate'] = win_rate
+        return log_dict
 
     def save_model(self):
         """Save the trained model."""
