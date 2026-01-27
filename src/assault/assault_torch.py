@@ -26,9 +26,9 @@ class AssaultConfig:
     window_bidding: bool = False
     window_penalty: float = 0.0
     enemy_destroy_reward: float = 1.0
-    hit_penalty: float = 1.0
+    hit_penalty: float = 1.0  # Penalty when temperature bar turns red (overheat)
     life_loss_penalty: float = 10.0
-    health_loss_penalty: float = 0.1
+    raw_score_scale: float = 0.0  # Scale for raw Atari score (dense reward signal)
     max_steps: int = 10000
     hud: bool = True
     single_agent_mode: bool = False
@@ -91,6 +91,7 @@ class AssaultEnv:
         self.prev_lives = torch.zeros((num_envs,), dtype=torch.int32)
         self.prev_health_width = torch.zeros((num_envs,), dtype=torch.float32)
         self.prev_health_red = torch.zeros((num_envs,), dtype=torch.int32)
+        self.cumulative_score = torch.zeros((num_envs,), dtype=torch.float32)
 
         self._global_obs_dim = 18
         if config.single_agent_mode:
@@ -117,6 +118,7 @@ class AssaultEnv:
             self.step_count[idx] = 0
             self.window_agent[idx] = -1
             self.window_steps_remaining[idx] = 0
+            self.cumulative_score[idx] = 0.0
 
         obs = torch.stack(obs_list, dim=0).to(self.device)
         info: Dict = {}
@@ -180,13 +182,16 @@ class AssaultEnv:
                 else:
                     chosen_action = int(action_dir[env_idx, winner])
 
-            _, _, terminated, truncated, info = env.step(chosen_action)
+            _, raw_reward, terminated, truncated, info = env.step(chosen_action)
             if terminated or truncated or (cfg.max_steps and self.step_count[env_idx] >= cfg.max_steps):
                 terminated = bool(terminated)
                 truncated = bool(truncated or (cfg.max_steps and self.step_count[env_idx] >= cfg.max_steps))
 
+            # Track cumulative Atari score (raw reward = score delta)
+            self.cumulative_score[env_idx] += float(raw_reward)
+
             state = self._extract_state(env)
-            score_list.append(float(info.get("score", 0.0)))
+            score_list.append(float(self.cumulative_score[env_idx]))
 
             enemy_visible = state["enemy_visible"]
             destroyed = (self.prev_enemy_visible[env_idx] == 1) & (enemy_visible == 0)
@@ -194,25 +199,26 @@ class AssaultEnv:
 
             penalty = 0.0
             life_loss = max(int(self.prev_lives[env_idx]) - int(state["lives_count"]), 0)
-            health_loss = max(float(self.prev_health_width[env_idx]) - float(state["health_width"]), 0.0)
-            hit_event = int(state["health_red"]) == 1 and int(self.prev_health_red[env_idx]) == 0
+            # Temperature bar turning red = overheating warning
+            overheat_event = int(state["health_red"]) == 1 and int(self.prev_health_red[env_idx]) == 0
 
             if life_loss > 0:
                 penalty -= cfg.life_loss_penalty * life_loss
-            if health_loss > 0:
-                penalty -= cfg.health_loss_penalty * health_loss
-            if hit_event:
+            if overheat_event:
                 penalty -= cfg.hit_penalty
 
+            # Raw Atari score as dense reward signal
+            raw_score_reward = cfg.raw_score_scale * float(raw_reward)
+
             if cfg.single_agent_mode:
-                reward = cfg.enemy_destroy_reward * destroyed.to(torch.float32).sum().item() + penalty
+                reward = cfg.enemy_destroy_reward * destroyed.to(torch.float32).sum().item() + penalty + raw_score_reward
                 rewards = torch.tensor(reward, dtype=torch.float32)
             else:
                 rewards = torch.zeros((cfg.num_agents,), dtype=torch.float32)
                 for agent_id in range(cfg.num_agents):
                     if destroyed[agent_id] == 1:
                         rewards[agent_id] += cfg.enemy_destroy_reward
-                rewards += penalty
+                rewards += penalty + raw_score_reward
                 if bids is not None and apply_bid_penalty[env_idx]:
                     rewards -= cfg.bid_penalty * bids[env_idx].to(torch.float32)
                     if cfg.window_bidding and cfg.window_penalty > 0 and current_window_length[env_idx] > 0:
@@ -223,6 +229,7 @@ class AssaultEnv:
                 env.reset()
                 state = self._extract_state(env)
                 self.step_count[env_idx] = 0
+                self.cumulative_score[env_idx] = 0.0
 
             obs_list.append(self._build_obs(state, env_idx=env_idx))
             rewards_list.append(rewards)

@@ -18,13 +18,13 @@ def main():
     # ========================================================================
     # CONFIGURATION
     # ========================================================================
-    SINGLE_AGENT_MODE = False
+    SINGLE_AGENT_MODE = True
 
     # Experiment settings
-    EXPERIMENT_NAME = "assault_ppo_exp1"
-    CHECKPOINT_FREQ = 100
-    EVAL_FREQ = 50
-    VIDEO_FREQ = 50  # Save videos every N iterations (0 = same as EVAL_FREQ)
+    EXPERIMENT_NAME = "assault_ppo_single_agent_exp1"
+    CHECKPOINT_FREQ = 20
+    EVAL_FREQ = 10
+    VIDEO_FREQ = 0  # Save videos every N iterations (0 = same as EVAL_FREQ)
     NUM_EVAL_EPISODES = 5
     NUM_VIDEO_EPISODES = 3  # Number of episodes to save as videos
     LOG_VIDEOS_TO_WANDB = False  # Upload videos to wandb
@@ -33,24 +33,28 @@ def main():
     # Environment settings
     NUM_AGENTS = 3
     MAX_ENEMIES = 3
+    MAX_STEPS = 10000
+    HUD = True
+    ALLOW_VARIABLE_ENEMIES = True
+
+    # Reward coefficients
+    ENEMY_DESTROY_REWARD = 1.0  # Reward for destroying an enemy (based on visibility)
+    OVERHEAT_PENALTY = 0.5      # Penalty when temperature bar turns red (moderate)
+    LIFE_LOSS_PENALTY = 5.0     # Penalty for losing a life
+    RAW_SCORE_SCALE = 0.1       # Scale for raw Atari score (dense reward for hits)
+
+    # Bidding settings (multi-agent mode only)
     BID_UPPER_BOUND = 10
     BID_PENALTY = 0.1
     ACTION_WINDOW = 3
     WINDOW_BIDDING = False
     WINDOW_PENALTY = 0.0
-    ENEMY_DESTROY_REWARD = 1.0
-    HIT_PENALTY = 1.0
-    LIFE_LOSS_PENALTY = 10.0
-    HEALTH_LOSS_PENALTY = 0.1
-    MAX_STEPS = 10000
-    HUD = True
-    ALLOW_VARIABLE_ENEMIES = True
 
     # Training settings
-    NUM_ITERATIONS = 1200
+    NUM_ITERATIONS = 300
     LEARNING_RATE = 2.5e-4
     NUM_ENVS = 64
-    NUM_STEPS = 256
+    NUM_STEPS = 512
     NUM_MINIBATCHES = 8
     UPDATE_EPOCHS = 4
     ANNEAL_LR = True
@@ -87,9 +91,9 @@ def main():
             num_agents=NUM_AGENTS,
             max_enemies=MAX_ENEMIES,
             enemy_destroy_reward=ENEMY_DESTROY_REWARD,
-            hit_penalty=HIT_PENALTY,
+            hit_penalty=OVERHEAT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
-            health_loss_penalty=HEALTH_LOSS_PENALTY,
+            raw_score_scale=RAW_SCORE_SCALE,
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_variable_enemies=ALLOW_VARIABLE_ENEMIES,
@@ -127,9 +131,9 @@ def main():
             window_bidding=WINDOW_BIDDING,
             window_penalty=WINDOW_PENALTY,
             enemy_destroy_reward=ENEMY_DESTROY_REWARD,
-            hit_penalty=HIT_PENALTY,
+            hit_penalty=OVERHEAT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
-            health_loss_penalty=HEALTH_LOSS_PENALTY,
+            raw_score_scale=RAW_SCORE_SCALE,
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_variable_enemies=ALLOW_VARIABLE_ENEMIES,

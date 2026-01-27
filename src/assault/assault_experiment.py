@@ -132,7 +132,7 @@ class AssaultExperiment:
             enemy_destroy_reward=args.enemy_destroy_reward,
             hit_penalty=args.hit_penalty,
             life_loss_penalty=args.life_loss_penalty,
-            health_loss_penalty=args.health_loss_penalty,
+            raw_score_scale=getattr(args, "raw_score_scale", 0.0),
             max_steps=args.max_steps,
             hud=args.hud,
             single_agent_mode=single_agent_mode,
@@ -244,18 +244,9 @@ class AssaultExperiment:
 
             video_path = self.rollouts_dir / f"iter_{iteration}_ep_{ep_idx}.mp4"
 
-            # Get frame dimensions (handle potential shape differences)
+            # Get frame dimensions - OCAtari returns (H, W, C) format
             first_frame = frames[0]
-            if first_frame.ndim == 3:
-                # Could be (H, W, C) or (W, H, C) depending on OCAtari
-                h, w = first_frame.shape[:2]
-                if first_frame.shape[0] < first_frame.shape[1]:
-                    # Likely (H, W, C) - standard format
-                    pass
-                else:
-                    # Might need transpose - OCAtari sometimes returns (W, H, C)
-                    frames = [f.swapaxes(0, 1) if f.shape[0] > f.shape[1] else f for f in frames]
-                    h, w = frames[0].shape[:2]
+            h, w = first_frame.shape[:2]
 
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             out = cv2.VideoWriter(str(video_path), fourcc, 30, (w, h))
