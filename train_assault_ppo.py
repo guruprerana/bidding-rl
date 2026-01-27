@@ -24,7 +24,11 @@ def main():
     EXPERIMENT_NAME = "assault_ppo_exp1"
     CHECKPOINT_FREQ = 100
     EVAL_FREQ = 50
+    VIDEO_FREQ = 50  # Save videos every N iterations (0 = same as EVAL_FREQ)
     NUM_EVAL_EPISODES = 5
+    NUM_VIDEO_EPISODES = 3  # Number of episodes to save as videos
+    LOG_VIDEOS_TO_WANDB = False  # Upload videos to wandb
+    RENDER_OC_OVERLAY = False  # Draw object detection bounding boxes
 
     # Environment settings
     NUM_AGENTS = 3
@@ -153,8 +157,12 @@ def main():
         experiment_name=EXPERIMENT_NAME,
         checkpoint_freq=CHECKPOINT_FREQ,
         eval_freq=EVAL_FREQ,
+        video_freq=VIDEO_FREQ,
         num_eval_episodes=NUM_EVAL_EPISODES,
+        num_video_episodes=NUM_VIDEO_EPISODES,
+        log_videos_to_wandb=LOG_VIDEOS_TO_WANDB,
         single_agent_mode=SINGLE_AGENT_MODE,
+        render_oc_overlay=RENDER_OC_OVERLAY,
     )
     experiment.run(args)
 

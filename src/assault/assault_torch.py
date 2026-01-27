@@ -49,6 +49,8 @@ class AssaultEnv:
         num_envs: int,
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
+        render_mode: Optional[str] = None,
+        render_oc_overlay: bool = False,
     ) -> None:
         if config.num_agents > config.max_enemies:
             raise ValueError("num_agents cannot exceed max_enemies")
@@ -56,12 +58,20 @@ class AssaultEnv:
         self.config = config
         self.num_envs = num_envs
         self.device = device or torch.device("cpu")
+        self.render_mode = render_mode
+        self.render_oc_overlay = render_oc_overlay
         self.gen = torch.Generator(device="cpu")
         if seed is not None:
             self.gen.manual_seed(seed)
 
         self.envs = [
-            OCAtari("ALE/Assault-v5", obs_mode="obj", hud=False, render_mode=None)
+            OCAtari(
+                "ALE/Assault-v5",
+                obs_mode="obj",
+                hud=False,
+                render_mode=render_mode,
+                render_oc_overlay=render_oc_overlay,
+            )
             for _ in range(num_envs)
         ]
         self.action_space_n = int(self.envs[0].action_space.n)
@@ -255,6 +265,20 @@ class AssaultEnv:
     def close(self) -> None:
         for env in self.envs:
             env.close()
+
+    def render(self, env_idx: int = 0) -> Optional[np.ndarray]:
+        """
+        Render the specified environment.
+
+        Args:
+            env_idx: Index of the environment to render (default: 0)
+
+        Returns:
+            RGB array if render_mode="rgb_array", None otherwise
+        """
+        if self.render_mode is None:
+            return None
+        return self.envs[env_idx].render()
 
     def _select_winners(self, bids: torch.Tensor, in_window: torch.Tensor) -> torch.Tensor:
         max_bid = bids.max(dim=1).values
