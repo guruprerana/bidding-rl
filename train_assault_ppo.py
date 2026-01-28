@@ -36,10 +36,11 @@ def main():
     MAX_STEPS = 10000
     HUD = True
     ALLOW_VARIABLE_ENEMIES = True
+    ALLOW_SIDEWARD_FIRE = False  # Disable RIGHTFIRE and LEFTFIRE actions
 
     # Reward coefficients
     ENEMY_DESTROY_REWARD = 1.0  # Reward for destroying an enemy (based on visibility)
-    OVERHEAT_PENALTY = 0.5      # Penalty when temperature bar turns red (moderate)
+    OVERHEAT_PENALTY = 1.0      # Penalty when temperature bar turns red (moderate)
     LIFE_LOSS_PENALTY = 5.0     # Penalty for losing a life
     RAW_SCORE_SCALE = 0.1       # Scale for raw Atari score (dense reward for hits)
 
@@ -53,24 +54,24 @@ def main():
     # Training settings
     NUM_ITERATIONS = 300
     LEARNING_RATE = 2.5e-4
-    NUM_ENVS = 64
+    NUM_ENVS = 128
     NUM_STEPS = 512
     NUM_MINIBATCHES = 8
-    UPDATE_EPOCHS = 4
+    UPDATE_EPOCHS = 8
     ANNEAL_LR = True
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
     NORM_ADV = True
-    CLIP_COEF = 0.2
+    CLIP_COEF = 0.3
     CLIP_VLOSS = True
-    ENT_COEF = 0.01
-    VF_COEF = 0.5
+    ENT_COEF = 0.05  # Increased for more exploration of movement
+    VF_COEF = 1.0  # Increased to improve value function learning
     MAX_GRAD_NORM = 0.5
     TARGET_KL = None
 
     # Network
-    ACTOR_HIDDEN_SIZES = (128, 128, 128)
-    CRITIC_HIDDEN_SIZES = (256, 256, 256)
+    ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)
+    CRITIC_HIDDEN_SIZES = (256, 256, 256, 256)
 
     # Wandb
     WANDB_PROJECT = "bidding-rl"
@@ -97,6 +98,7 @@ def main():
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_variable_enemies=ALLOW_VARIABLE_ENEMIES,
+            allow_sideward_fire=ALLOW_SIDEWARD_FIRE,
             num_iterations=NUM_ITERATIONS,
             learning_rate=LEARNING_RATE,
             num_envs=NUM_ENVS,
@@ -137,6 +139,7 @@ def main():
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_variable_enemies=ALLOW_VARIABLE_ENEMIES,
+            allow_sideward_fire=ALLOW_SIDEWARD_FIRE,
             num_iterations=NUM_ITERATIONS,
             learning_rate=LEARNING_RATE,
             num_envs=NUM_ENVS,

@@ -41,6 +41,7 @@ class AssaultArgs:
     max_steps: int = 10000
     hud: bool = True
     allow_variable_enemies: bool = True
+    allow_sideward_fire: bool = True  # If False, disables RIGHTFIRE and LEFTFIRE
 
     # Network
     actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
@@ -164,6 +165,7 @@ class AssaultPPOTrainer(MultiAgentPPOTrainerBase):
             hud=self.args.hud,
             single_agent_mode=False,
             allow_variable_enemies=self.args.allow_variable_enemies,
+            allow_sideward_fire=self.args.allow_sideward_fire,
         )
         self.envs = AssaultEnv(env_config, num_envs=self.args.num_envs, device=self.device, seed=self.args.seed)
 

@@ -137,6 +137,7 @@ class AssaultExperiment:
             hud=args.hud,
             single_agent_mode=single_agent_mode,
             allow_variable_enemies=args.allow_variable_enemies,
+            allow_sideward_fire=getattr(args, "allow_sideward_fire", True),
         )
         env = AssaultEnv(
             env_config,

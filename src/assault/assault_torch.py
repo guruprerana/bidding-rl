@@ -33,6 +33,7 @@ class AssaultConfig:
     hud: bool = True
     single_agent_mode: bool = False
     allow_variable_enemies: bool = True
+    allow_sideward_fire: bool = True  # If False, disables RIGHTFIRE and LEFTFIRE actions
 
 
 class AssaultEnv:
@@ -66,15 +67,19 @@ class AssaultEnv:
 
         self.envs = [
             OCAtari(
-                "ALE/Assault-v5",
+                "AssaultNoFrameskip-v4",
                 obs_mode="obj",
-                hud=False,
+                hud=True,
                 render_mode=render_mode,
                 render_oc_overlay=render_oc_overlay,
             )
             for _ in range(num_envs)
         ]
-        self.action_space_n = int(self.envs[0].action_space.n)
+        # Action space: 0=NOOP, 1=FIRE, 2=UP, 3=RIGHT, 4=LEFT, [5=RIGHTFIRE, 6=LEFTFIRE]
+        if config.allow_sideward_fire:
+            self.action_space_n = int(self.envs[0].action_space.n)  # Full action space (7)
+        else:
+            self.action_space_n = 5  # Exclude RIGHTFIRE and LEFTFIRE
         self.screen_width, self.screen_height = 160, 210
         self.max_health_width = 64.0
         if seed is not None:
@@ -331,7 +336,6 @@ class AssaultEnv:
         missile_v = slot_obj(idx.get("PlayerMissileVertical", []))
         missile_h = slot_obj(idx.get("PlayerMissileHorizontal", []))
 
-        ram_state = self._get_ram(env)
         lives = slot_list(idx.get("Lives", []))
         health = slot_obj(idx.get("Health", []))
 
@@ -374,14 +378,10 @@ class AssaultEnv:
             enemy_visible.append(0)
             enemy_raw.append((0.0, 0.0))
 
-        if ram_state is not None:
-            lives_count = max(int(ram_state[101]) - 1, 0)
-            health_width = self._health_width_from_ram(ram_state)
-            health_red = 1 if int(ram_state[21]) == 70 else 0
-        else:
-            lives_count = sum(1 for obj in lives if obj.__class__.__name__ == "Lives")
-            health_width = float(health.wh[0]) if health is not None and health.__class__.__name__ != "NoObject" else 0.0
-            health_red = 1 if health is not None and tuple(getattr(health, "rgb", (0, 0, 0))) == (200, 72, 72) else 0
+        # Extract lives and health from detected objects (hud=True)
+        lives_count = sum(1 for obj in lives if obj.__class__.__name__ == "Lives")
+        health_width = float(health.wh[0]) if health is not None and health.__class__.__name__ != "NoObject" else 0.0
+        health_red = 1 if health is not None and tuple(getattr(health, "rgb", (0, 0, 0))) == (200, 72, 72) else 0
         lives_norm = float(lives_count) / float(self.max_lives)
         health_norm = float(health_width) / float(self.max_health_width)
 
@@ -450,48 +450,3 @@ class AssaultEnv:
             per_agent_obs.append(torch.cat([global_features, target_enemy, other_enemies], dim=0))
         return torch.stack(per_agent_obs, dim=0)
 
-    def _get_ram(self, env: OCAtari) -> Optional[np.ndarray]:
-        ale = getattr(env, "_ale", None)
-        if ale is None:
-            return None
-        try:
-            return ale.getRAM()
-        except Exception:
-            return None
-
-    def _health_width_from_ram(self, ram_state: np.ndarray) -> float:
-        if ram_state is None:
-            return 0.0
-        a = int(ram_state[28])
-        b = int(ram_state[29])
-        if a == 192 and b == 0:
-            return 8.0
-        if a == 224 and b == 0:
-            return 12.0
-        if a == 240 and b == 0:
-            return 16.0
-        if a == 248 and b == 0:
-            return 20.0
-        if a == 252 and b == 0:
-            return 24.0
-        if a == 254 and b == 0:
-            return 28.0
-        if a == 255 and b == 0:
-            return 32.0
-        if a == 255 and b == 1:
-            return 36.0
-        if a == 255 and b == 3:
-            return 40.0
-        if a == 255 and b == 7:
-            return 44.0
-        if a == 255 and b == 15:
-            return 48.0
-        if a == 255 and b == 31:
-            return 52.0
-        if a == 255 and b == 63:
-            return 56.0
-        if a == 255 and b == 127:
-            return 60.0
-        if a == 255 and b == 255:
-            return 64.0
-        return 0.0
