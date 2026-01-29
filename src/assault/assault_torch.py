@@ -98,13 +98,17 @@ class AssaultEnv:
         self.prev_health_red = torch.zeros((num_envs,), dtype=torch.int32)
         self.cumulative_score = torch.zeros((num_envs,), dtype=torch.float32)
 
-        self._global_obs_dim = 18
+        # Global obs: player(2) + mothership(3) + enemy_missile(3) + player_missiles(6) +
+        #             window(1) + health/lives(3) + enemy_type_onehot(3) = 21
+        self._global_obs_dim = 21
+        # Per-enemy features: x, y, visible, is_small_or_split, is_doubled = 5
+        self._per_enemy_dim = 5
         if config.single_agent_mode:
-            self.obs_dim = self._global_obs_dim + config.max_enemies * 3
+            self.obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim
             self.obs_shape = (num_envs, self.obs_dim)
             self.per_agent_obs_dim = None
         else:
-            self.per_agent_obs_dim = self._global_obs_dim + config.max_enemies * 3
+            self.per_agent_obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim
             self.obs_dim = None
             self.obs_shape = (num_envs, config.num_agents, self.per_agent_obs_dim)
 
@@ -365,16 +369,45 @@ class AssaultEnv:
         missile_v_raw = to_xy_raw(missile_v)
         missile_h_raw = to_xy_raw(missile_h)
 
+        # Enemy type from RGB: green=(72,160,72), blue=(84,138,210), brown=(105,77,20)
+        # Use first visible enemy to determine type (all enemies same type per wave)
+        enemy_type_onehot = [0.0, 0.0, 0.0]
+        for enemy in enemy_objs:
+            if enemy is not None and enemy.__class__.__name__ != "NoObject":
+                rgb = tuple(getattr(enemy, "rgb", (0, 0, 0)))
+                if rgb == (72, 160, 72):
+                    enemy_type_onehot[0] = 1.0  # green
+                elif rgb == (84, 138, 210):
+                    enemy_type_onehot[1] = 1.0  # blue
+                elif rgb == (105, 77, 20):
+                    enemy_type_onehot[2] = 1.0  # brown
+                break  # All enemies same type, just need first one
+
+        # Enemy features: (x, y, visible, is_small_or_split, is_doubled)
+        # is_small_or_split inferred from wh: normal=(16,8), small/split=(8,8)
+        # is_doubled from RAM: appearance 224 means two targets (OCAtari only tracks one position)
+        # Appearance values: 0=not visible, 192=normal, 160=one small, 224=doubled, 96=other small
+        ram_state = env.ale.getRAM()
+        enemy_appearance = ram_state[54:57]  # Per-enemy appearance
+
         enemy_features = []
         enemy_raw = []
         enemy_visible = []
-        for enemy in enemy_objs[: self.config.max_enemies]:
+        for i, enemy in enumerate(enemy_objs[: self.config.max_enemies]):
             ex, ey, ev = to_xy_vis(enemy)
-            enemy_features.append((ex, ey, ev))
+            # Check if enemy is in small/split form (width 8 instead of 16)
+            if enemy is not None and enemy.__class__.__name__ != "NoObject":
+                wh = getattr(enemy, "wh", (16, 8))
+                is_small_or_split = 1.0 if wh[0] == 8 else 0.0
+            else:
+                is_small_or_split = 0.0
+            # Check if enemy has split into two targets (appearance == 224)
+            is_doubled = 1.0 if (i < len(enemy_appearance) and enemy_appearance[i] == 224) else 0.0
+            enemy_features.append((ex, ey, ev, is_small_or_split, is_doubled))
             enemy_visible.append(ev)
             enemy_raw.append(to_xy_raw(enemy))
         while len(enemy_features) < self.config.max_enemies:
-            enemy_features.append((0.0, 0.0, 0))
+            enemy_features.append((0.0, 0.0, 0, 0.0, 0.0))
             enemy_visible.append(0)
             enemy_raw.append((0.0, 0.0))
 
@@ -399,6 +432,7 @@ class AssaultEnv:
             "enemy_features": torch.tensor(enemy_features, dtype=torch.float32),
             "enemy_raw": torch.tensor(enemy_raw, dtype=torch.float32),
             "enemy_visible": torch.tensor(enemy_visible, dtype=torch.int32),
+            "enemy_type_onehot": torch.tensor(enemy_type_onehot, dtype=torch.float32),
             "lives_count": torch.tensor(lives_count, dtype=torch.int32),
             "lives_norm": torch.tensor(lives_norm, dtype=torch.float32),
             "health_width": torch.tensor(health_width, dtype=torch.float32),
@@ -429,6 +463,7 @@ class AssaultEnv:
                     ],
                     dtype=torch.float32,
                 ),
+                state["enemy_type_onehot"],  # One-hot: green, blue, brown (3 features)
             ],
             dim=0,
         )

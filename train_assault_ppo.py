@@ -36,13 +36,13 @@ def main():
     MAX_STEPS = 10000
     HUD = True
     ALLOW_VARIABLE_ENEMIES = True
-    ALLOW_SIDEWARD_FIRE = False  # Disable RIGHTFIRE and LEFTFIRE actions
+    ALLOW_SIDEWARD_FIRE = True  # Enable RIGHTFIRE and LEFTFIRE to destroy horizontal enemy missiles
 
     # Reward coefficients
     ENEMY_DESTROY_REWARD = 1.0  # Reward for destroying an enemy (based on visibility)
-    OVERHEAT_PENALTY = 1.0      # Penalty when temperature bar turns red (moderate)
-    LIFE_LOSS_PENALTY = 5.0     # Penalty for losing a life
-    RAW_SCORE_SCALE = 0.1       # Scale for raw Atari score (dense reward for hits)
+    OVERHEAT_PENALTY = 3.0      # Penalty when temperature bar turns red (moderate)
+    LIFE_LOSS_PENALTY = 10.0     # Penalty for losing a life
+    RAW_SCORE_SCALE = 0.01       # Scale for raw Atari score (dense reward for hits)
 
     # Bidding settings (multi-agent mode only)
     BID_UPPER_BOUND = 10
@@ -64,7 +64,7 @@ def main():
     NORM_ADV = True
     CLIP_COEF = 0.3
     CLIP_VLOSS = True
-    ENT_COEF = 0.05  # Increased for more exploration of movement
+    ENT_COEF = 0.15  # Higher entropy to explore beyond sideward firing
     VF_COEF = 1.0  # Increased to improve value function learning
     MAX_GRAD_NORM = 0.5
     TARGET_KL = None
