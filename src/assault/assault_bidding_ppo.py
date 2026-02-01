@@ -38,6 +38,7 @@ class AssaultArgs:
     hit_penalty: float = 1.0  # Penalty when temperature bar turns red (overheat)
     life_loss_penalty: float = 10.0
     raw_score_scale: float = 0.0  # Scale for raw Atari score
+    fire_while_hot_penalty: float = 0.0  # Penalty for firing when health bar is red
     max_steps: int = 10000
     hud: bool = True
     allow_variable_enemies: bool = True
@@ -161,6 +162,7 @@ class AssaultPPOTrainer(MultiAgentPPOTrainerBase):
             hit_penalty=self.args.hit_penalty,
             life_loss_penalty=self.args.life_loss_penalty,
             raw_score_scale=self.args.raw_score_scale,
+            fire_while_hot_penalty=self.args.fire_while_hot_penalty,
             max_steps=self.args.max_steps,
             hud=self.args.hud,
             single_agent_mode=False,

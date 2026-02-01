@@ -133,6 +133,7 @@ class AssaultExperiment:
             hit_penalty=args.hit_penalty,
             life_loss_penalty=args.life_loss_penalty,
             raw_score_scale=getattr(args, "raw_score_scale", 0.0),
+            fire_while_hot_penalty=getattr(args, "fire_while_hot_penalty", 0.0),
             max_steps=args.max_steps,
             hud=args.hud,
             single_agent_mode=single_agent_mode,
@@ -152,6 +153,8 @@ class AssaultExperiment:
         scores = []
         lengths = []
         episode_frames: List[List[np.ndarray]] = []
+        # Track reward components across episodes
+        all_episode_components: List[Dict[str, float]] = []
 
         for ep_idx in range(self.num_eval_episodes):
             obs, _ = env.reset()
@@ -160,6 +163,7 @@ class AssaultExperiment:
             ep_len = 0
             last_score = 0.0
             frames: List[np.ndarray] = []
+            ep_components: Dict[str, float] = {}
 
             # Capture initial frame if recording this episode
             should_record = need_render and ep_idx < self.num_video_episodes
@@ -189,6 +193,12 @@ class AssaultExperiment:
                     score_tensor = info.get("score", None)
                     if torch.is_tensor(score_tensor):
                         last_score = float(score_tensor.item())
+                    # Accumulate reward components
+                    rc = info.get("reward_components", {})
+                    for key, val in rc.items():
+                        v = float(val.item()) if torch.is_tensor(val) else float(val)
+                        ep_components[key] = ep_components.get(key, 0.0) + v
+
                 ep_return += reward.sum().item() if not single_agent_mode else reward.item()
                 done = bool(terminated.item() or truncated.item())
                 ep_len += 1
@@ -196,6 +206,7 @@ class AssaultExperiment:
             returns.append(ep_return)
             scores.append(last_score)
             lengths.append(ep_len)
+            all_episode_components.append(ep_components)
 
             if should_record and frames:
                 episode_frames.append(frames)
@@ -206,12 +217,20 @@ class AssaultExperiment:
         if create_videos and episode_frames and iteration is not None:
             self._write_videos(episode_frames, iteration, global_step, trainer.args.track)
 
+        # Compute average reward components across episodes
+        component_keys = all_episode_components[0].keys() if all_episode_components else []
+        avg_components = {
+            f"avg_{key}": float(np.mean([ep.get(key, 0.0) for ep in all_episode_components]))
+            for key in component_keys
+        }
+
         stats = {
             "avg_score": float(np.mean(scores)),
             "avg_length": float(np.mean(lengths)),
             "std_score": float(np.std(scores)),
             "std_length": float(np.std(lengths)),
             "avg_return": float(np.mean(returns)),
+            **avg_components,
         }
         if iteration is not None:
             eval_summary = {

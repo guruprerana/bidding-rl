@@ -43,6 +43,7 @@ def main():
     OVERHEAT_PENALTY = 3.0      # Penalty when temperature bar turns red (moderate)
     LIFE_LOSS_PENALTY = 10.0     # Penalty for losing a life
     RAW_SCORE_SCALE = 0.01       # Scale for raw Atari score (dense reward for hits)
+    FIRE_WHILE_HOT_PENALTY = 2.0  # Penalty for firing when health bar is red
 
     # Bidding settings (multi-agent mode only)
     BID_UPPER_BOUND = 10
@@ -53,7 +54,7 @@ def main():
 
     # Training settings
     NUM_ITERATIONS = 300
-    LEARNING_RATE = 2.5e-4
+    LEARNING_RATE = 1e-4
     NUM_ENVS = 128
     NUM_STEPS = 512
     NUM_MINIBATCHES = 8
@@ -62,12 +63,12 @@ def main():
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
     NORM_ADV = True
-    CLIP_COEF = 0.3
+    CLIP_COEF = 0.2
     CLIP_VLOSS = True
-    ENT_COEF = 0.15  # Higher entropy to explore beyond sideward firing
-    VF_COEF = 1.0  # Increased to improve value function learning
+    ENT_COEF = 0.03
+    VF_COEF = 0.5
     MAX_GRAD_NORM = 0.5
-    TARGET_KL = None
+    TARGET_KL = 0.015
 
     # Network
     ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)
@@ -95,6 +96,7 @@ def main():
             hit_penalty=OVERHEAT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
             raw_score_scale=RAW_SCORE_SCALE,
+            fire_while_hot_penalty=FIRE_WHILE_HOT_PENALTY,
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_variable_enemies=ALLOW_VARIABLE_ENEMIES,
@@ -136,6 +138,7 @@ def main():
             hit_penalty=OVERHEAT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
             raw_score_scale=RAW_SCORE_SCALE,
+            fire_while_hot_penalty=FIRE_WHILE_HOT_PENALTY,
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_variable_enemies=ALLOW_VARIABLE_ENEMIES,

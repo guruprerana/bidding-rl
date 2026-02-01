@@ -29,6 +29,7 @@ class AssaultConfig:
     hit_penalty: float = 1.0  # Penalty when temperature bar turns red (overheat)
     life_loss_penalty: float = 10.0
     raw_score_scale: float = 0.0  # Scale for raw Atari score (dense reward signal)
+    fire_while_hot_penalty: float = 0.0  # Penalty for firing when health bar is red
     max_steps: int = 10000
     hud: bool = True
     single_agent_mode: bool = False
@@ -97,6 +98,10 @@ class AssaultEnv:
         self.prev_health_width = torch.zeros((num_envs,), dtype=torch.float32)
         self.prev_health_red = torch.zeros((num_envs,), dtype=torch.int32)
         self.cumulative_score = torch.zeros((num_envs,), dtype=torch.float32)
+        # Track previous missile Y positions for row-based hit attribution
+        self.prev_missile_v_y = torch.zeros((num_envs,), dtype=torch.float32)
+        # Enemy row Y positions (approximate): Bottom ~103, Middle ~78, Top ~53
+        self._enemy_row_y = torch.tensor([103.0, 78.0, 53.0], dtype=torch.float32)
 
         # Global obs: player(2) + mothership(3) + enemy_missile(3) + player_missiles(6) +
         #             window(1) + health/lives(3) + enemy_type_onehot(3) = 21
@@ -128,6 +133,7 @@ class AssaultEnv:
             self.window_agent[idx] = -1
             self.window_steps_remaining[idx] = 0
             self.cumulative_score[idx] = 0.0
+            self.prev_missile_v_y[idx] = 0.0
 
         obs = torch.stack(obs_list, dim=0).to(self.device)
         info: Dict = {}
@@ -180,6 +186,8 @@ class AssaultEnv:
         enemy_destroyed_list = []
         score_list = []
         state_list = []
+        # Reward component tracking
+        reward_components_list = []
 
         for env_idx, env in enumerate(self.envs):
             if cfg.single_agent_mode:
@@ -206,27 +214,61 @@ class AssaultEnv:
             destroyed = (self.prev_enemy_visible[env_idx] == 1) & (enemy_visible == 0)
             enemy_destroyed_list.append(destroyed.clone())
 
-            penalty = 0.0
+            # Detect enemy destruction via raw score increase (more reliable than visibility)
+            enemy_hit = raw_reward > 0
+
+            # Row-based hit attribution using missile Y position
+            # When score increases, determine which row was hit based on previous missile Y
+            hit_agent = -1
+            if enemy_hit and not cfg.single_agent_mode:
+                missile_v_y = state["player_missile_v_raw"][1].item()
+                prev_y = self.prev_missile_v_y[env_idx].item()
+                # If missile disappeared (y went to 0) and we had a previous position
+                if missile_v_y == 0.0 and prev_y > 0:
+                    # Find closest enemy row to previous missile Y
+                    distances = torch.abs(self._enemy_row_y - prev_y)
+                    hit_agent = int(torch.argmin(distances).item())
+
             life_loss = max(int(self.prev_lives[env_idx]) - int(state["lives_count"]), 0)
             # Temperature bar turning red = overheating warning
             overheat_event = int(state["health_red"]) == 1 and int(self.prev_health_red[env_idx]) == 0
 
-            if life_loss > 0:
-                penalty -= cfg.life_loss_penalty * life_loss
-            if overheat_event:
-                penalty -= cfg.hit_penalty
-
-            # Raw Atari score as dense reward signal
+            # Track individual reward components
+            # For single-agent: use score-based detection
+            # For multi-agent: attribute to agent whose row was hit
+            if cfg.single_agent_mode:
+                enemy_destroy_reward = cfg.enemy_destroy_reward if enemy_hit else 0.0
+            else:
+                enemy_destroy_reward = cfg.enemy_destroy_reward if hit_agent >= 0 else 0.0
             raw_score_reward = cfg.raw_score_scale * float(raw_reward)
+            life_loss_penalty = -cfg.life_loss_penalty * life_loss if life_loss > 0 else 0.0
+            overheat_penalty = -cfg.hit_penalty if overheat_event else 0.0
+            is_fire_action = chosen_action in (1, 5, 6)  # FIRE, RIGHTFIRE, LEFTFIRE
+            fire_while_hot_penalty = -cfg.fire_while_hot_penalty if (
+                cfg.fire_while_hot_penalty > 0 and is_fire_action and int(state["health_red"]) == 1
+            ) else 0.0
+
+            penalty = life_loss_penalty + overheat_penalty + fire_while_hot_penalty
+
+            reward_components_list.append({
+                "enemy_destroy": enemy_destroy_reward,
+                "raw_score": raw_score_reward,
+                "life_loss_penalty": life_loss_penalty,
+                "overheat_penalty": overheat_penalty,
+                "fire_while_hot_penalty": fire_while_hot_penalty,
+                "life_loss_count": float(life_loss),
+                "lives_current": float(state["lives_count"].item()),
+                "death": 1.0 if terminated else 0.0,
+            })
 
             if cfg.single_agent_mode:
-                reward = cfg.enemy_destroy_reward * destroyed.to(torch.float32).sum().item() + penalty + raw_score_reward
+                reward = enemy_destroy_reward + penalty + raw_score_reward
                 rewards = torch.tensor(reward, dtype=torch.float32)
             else:
                 rewards = torch.zeros((cfg.num_agents,), dtype=torch.float32)
-                for agent_id in range(cfg.num_agents):
-                    if destroyed[agent_id] == 1:
-                        rewards[agent_id] += cfg.enemy_destroy_reward
+                # Agent whose row was hit gets the destroy reward
+                if hit_agent >= 0 and hit_agent < cfg.num_agents:
+                    rewards[hit_agent] += cfg.enemy_destroy_reward
                 rewards += penalty + raw_score_reward
                 if bids is not None and apply_bid_penalty[env_idx]:
                     rewards -= cfg.bid_penalty * bids[env_idx].to(torch.float32)
@@ -239,6 +281,7 @@ class AssaultEnv:
                 state = self._extract_state(env)
                 self.step_count[env_idx] = 0
                 self.cumulative_score[env_idx] = 0.0
+                self.prev_missile_v_y[env_idx] = 0.0
 
             obs_list.append(self._build_obs(state, env_idx=env_idx))
             rewards_list.append(rewards)
@@ -248,6 +291,7 @@ class AssaultEnv:
 
             self.prev_enemy_visible[env_idx] = state["enemy_visible"]
             self.prev_lives[env_idx] = state["lives_count"]
+            self.prev_missile_v_y[env_idx] = state["player_missile_v_raw"][1].item()
             self.prev_health_width[env_idx] = state["health_width"]
             self.prev_health_red[env_idx] = state["health_red"]
 
@@ -259,6 +303,12 @@ class AssaultEnv:
             rewards_t = torch.stack(rewards_list, dim=0).to(self.device)
         else:
             rewards_t = torch.stack(rewards_list, dim=0).to(self.device)
+
+        # Aggregate reward components into tensors
+        reward_components = {
+            key: torch.tensor([rc[key] for rc in reward_components_list], dtype=torch.float32, device=self.device)
+            for key in reward_components_list[0].keys()
+        }
 
         info = {
             "winning_agent": winning_agent.to(self.device) if not cfg.single_agent_mode else None,
@@ -275,6 +325,7 @@ class AssaultEnv:
             "player_missile_v_raw": torch.stack([s["player_missile_v_raw"] for s in state_list], dim=0).to(self.device),
             "player_missile_h_raw": torch.stack([s["player_missile_h_raw"] for s in state_list], dim=0).to(self.device),
             "enemy_raw": torch.stack([s["enemy_raw"] for s in state_list], dim=0).to(self.device),
+            "reward_components": reward_components,
         }
         return obs, rewards_t, terminated_t, truncated_t, info
 
