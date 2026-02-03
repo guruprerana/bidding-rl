@@ -18,10 +18,10 @@ def main():
     # ========================================================================
     # CONFIGURATION
     # ========================================================================
-    SINGLE_AGENT_MODE = True
+    SINGLE_AGENT_MODE = False
 
     # Experiment settings
-    EXPERIMENT_NAME = "assault_ppo_single_agent_exp1"
+    EXPERIMENT_NAME = "assault_ppo_bidding_exp1"
     CHECKPOINT_FREQ = 20
     EVAL_FREQ = 10
     VIDEO_FREQ = 0  # Save videos every N iterations (0 = same as EVAL_FREQ)
@@ -39,21 +39,21 @@ def main():
     ALLOW_SIDEWARD_FIRE = True  # Enable RIGHTFIRE and LEFTFIRE to destroy horizontal enemy missiles
 
     # Reward coefficients
-    ENEMY_DESTROY_REWARD = 1.0  # Reward for destroying an enemy (based on visibility)
-    OVERHEAT_PENALTY = 3.0      # Penalty when temperature bar turns red (moderate)
-    LIFE_LOSS_PENALTY = 10.0     # Penalty for losing a life
-    RAW_SCORE_SCALE = 0.01       # Scale for raw Atari score (dense reward for hits)
-    FIRE_WHILE_HOT_PENALTY = 2.0  # Penalty for firing when health bar is red
+    ENEMY_DESTROY_REWARD = 2.0   # Reward for destroying an enemy (based on visibility)
+    OVERHEAT_PENALTY = 8.0       # Penalty when temperature bar turns red (strong warning)
+    LIFE_LOSS_PENALTY = 25.0     # Penalty for losing a life (make death very costly)
+    RAW_SCORE_SCALE = 0.04       # Scale for raw Atari score (21 pts × 0.04 = 0.84)
+    FIRE_WHILE_HOT_PENALTY = 8.0 # Penalty for firing when health bar is red
 
     # Bidding settings (multi-agent mode only)
-    BID_UPPER_BOUND = 10
+    BID_UPPER_BOUND = 2
     BID_PENALTY = 0.1
-    ACTION_WINDOW = 3
+    ACTION_WINDOW = 100
     WINDOW_BIDDING = False
     WINDOW_PENALTY = 0.0
 
     # Training settings
-    NUM_ITERATIONS = 300
+    NUM_ITERATIONS = 1000
     LEARNING_RATE = 1e-4
     NUM_ENVS = 128
     NUM_STEPS = 512
@@ -68,7 +68,7 @@ def main():
     ENT_COEF = 0.03
     VF_COEF = 0.5
     MAX_GRAD_NORM = 0.5
-    TARGET_KL = 0.015
+    TARGET_KL = 0.02
 
     # Network
     ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)

@@ -108,12 +108,15 @@ class AssaultEnv:
         self._global_obs_dim = 21
         # Per-enemy features: x, y, visible, is_small_or_split, is_doubled = 5
         self._per_enemy_dim = 5
+        # Per-agent features (multi-agent only): is_in_control(1) + is_bidding_step(1) = 2
+        self._per_agent_dim = 2
         if config.single_agent_mode:
             self.obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim
             self.obs_shape = (num_envs, self.obs_dim)
             self.per_agent_obs_dim = None
         else:
-            self.per_agent_obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim
+            # Add per-agent control flag to observation
+            self.per_agent_obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim + self._per_agent_dim
             self.obs_dim = None
             self.obs_shape = (num_envs, config.num_agents, self.per_agent_obs_dim)
 
@@ -244,8 +247,10 @@ class AssaultEnv:
             life_loss_penalty = -cfg.life_loss_penalty * life_loss if life_loss > 0 else 0.0
             overheat_penalty = -cfg.hit_penalty if overheat_event else 0.0
             is_fire_action = chosen_action in (1, 5, 6)  # FIRE, RIGHTFIRE, LEFTFIRE
+            # Use prev_health_red (pre-step state) because when life is lost, health resets
+            # and state["health_red"] would be 0, missing the penalty for the fatal shot
             fire_while_hot_penalty = -cfg.fire_while_hot_penalty if (
-                cfg.fire_while_hot_penalty > 0 and is_fire_action and int(state["health_red"]) == 1
+                cfg.fire_while_hot_penalty > 0 and is_fire_action and int(self.prev_health_red[env_idx]) == 1
             ) else 0.0
 
             penalty = life_loss_penalty + overheat_penalty + fire_while_hot_penalty
@@ -259,6 +264,11 @@ class AssaultEnv:
                 "life_loss_count": float(life_loss),
                 "lives_current": float(state["lives_count"].item()),
                 "death": 1.0 if terminated else 0.0,
+                # Debug fields for overheat behavior
+                "health_red_pre": float(self.prev_health_red[env_idx].item()),
+                "health_red_post": float(state["health_red"].item()),
+                "is_fire_action": 1.0 if is_fire_action else 0.0,
+                "fired_while_hot": 1.0 if (is_fire_action and int(self.prev_health_red[env_idx]) == 1) else 0.0,
             })
 
             if cfg.single_agent_mode:
@@ -269,7 +279,12 @@ class AssaultEnv:
                 # Agent whose row was hit gets the destroy reward
                 if hit_agent >= 0 and hit_agent < cfg.num_agents:
                     rewards[hit_agent] += cfg.enemy_destroy_reward
-                rewards += penalty + raw_score_reward
+                # Raw score reward goes to all agents
+                rewards += raw_score_reward
+                # All penalties only apply to the winning agent who took the action
+                winner = int(winning_agent[env_idx].item())
+                if winner >= 0:
+                    rewards[winner] += penalty  # life_loss + overheat + fire_while_hot
                 if bids is not None and apply_bid_penalty[env_idx]:
                     rewards -= cfg.bid_penalty * bids[env_idx].to(torch.float32)
                     if cfg.window_bidding and cfg.window_penalty > 0 and current_window_length[env_idx] > 0:
@@ -524,6 +539,8 @@ class AssaultEnv:
             return torch.cat([global_features, enemies], dim=0)
 
         per_agent_obs = []
+        current_controller = int(self.window_agent[env_idx].item())
+        is_bidding_step = 1.0 if self.window_steps_remaining[env_idx].item() == 0 else 0.0
         for agent_id in range(cfg.num_agents):
             target_enemy = state["enemy_features"][agent_id]
             other_enemies = torch.cat(
@@ -533,6 +550,16 @@ class AssaultEnv:
                 ],
                 dim=0,
             ).reshape(-1)
-            per_agent_obs.append(torch.cat([global_features, target_enemy, other_enemies], dim=0))
+            # Per-agent features:
+            # - is_in_control: is this agent currently controlling the action?
+            # - is_bidding_step: are bids evaluated this step? (shared, but included per-agent for convenience)
+            agent_features = torch.tensor(
+                [
+                    1.0 if agent_id == current_controller else 0.0,  # is_in_control
+                    is_bidding_step,  # is_bidding_step
+                ],
+                dtype=torch.float32,
+            )
+            per_agent_obs.append(torch.cat([global_features, target_enemy, other_enemies, agent_features], dim=0))
         return torch.stack(per_agent_obs, dim=0)
 
