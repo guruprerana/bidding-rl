@@ -269,6 +269,10 @@ class AssaultEnv:
                 "health_red_post": float(state["health_red"].item()),
                 "is_fire_action": 1.0 if is_fire_action else 0.0,
                 "fired_while_hot": 1.0 if (is_fire_action and int(self.prev_health_red[env_idx]) == 1) else 0.0,
+                # Debug: health bar RGB values (to verify red detection)
+                "health_rgb_r": float(state["health_rgb"][0].item()),
+                "health_rgb_g": float(state["health_rgb"][1].item()),
+                "health_rgb_b": float(state["health_rgb"][2].item()),
             })
 
             if cfg.single_agent_mode:
@@ -480,7 +484,9 @@ class AssaultEnv:
         # Extract lives and health from detected objects (hud=True)
         lives_count = sum(1 for obj in lives if obj.__class__.__name__ == "Lives")
         health_width = float(health.wh[0]) if health is not None and health.__class__.__name__ != "NoObject" else 0.0
-        health_red = 1 if health is not None and tuple(getattr(health, "rgb", (0, 0, 0))) == (200, 72, 72) else 0
+        # Health bar turns red when overheating - OCAtari sets RGB to (200, 72, 72)
+        health_rgb = tuple(getattr(health, "rgb", (0, 0, 0))) if health is not None and health.__class__.__name__ != "NoObject" else (0, 0, 0)
+        health_red = 1 if health_rgb == (200, 72, 72) else 0
         lives_norm = float(lives_count) / float(self.max_lives)
         health_norm = float(health_width) / float(self.max_health_width)
 
@@ -504,6 +510,7 @@ class AssaultEnv:
             "health_width": torch.tensor(health_width, dtype=torch.float32),
             "health_norm": torch.tensor(health_norm, dtype=torch.float32),
             "health_red": torch.tensor(health_red, dtype=torch.int32),
+            "health_rgb": torch.tensor(health_rgb, dtype=torch.float32),  # Debug: actual RGB values
         }
 
     def _build_obs(self, state: Dict[str, torch.Tensor], env_idx: int) -> torch.Tensor:
