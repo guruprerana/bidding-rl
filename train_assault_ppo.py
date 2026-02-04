@@ -18,10 +18,10 @@ def main():
     # ========================================================================
     # CONFIGURATION
     # ========================================================================
-    SINGLE_AGENT_MODE = False
+    SINGLE_AGENT_MODE = True
 
     # Experiment settings
-    EXPERIMENT_NAME = "assault_ppo_bidding_exp1"
+    EXPERIMENT_NAME = "assault_ppo_single_agent_exp1"
     CHECKPOINT_FREQ = 20
     EVAL_FREQ = 10
     VIDEO_FREQ = 0  # Save videos every N iterations (0 = same as EVAL_FREQ)
@@ -48,7 +48,7 @@ def main():
     # Bidding settings (multi-agent mode only)
     BID_UPPER_BOUND = 2
     BID_PENALTY = 0.1
-    ACTION_WINDOW = 100
+    ACTION_WINDOW = 30
     WINDOW_BIDDING = False
     WINDOW_PENALTY = 0.0
 

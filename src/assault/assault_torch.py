@@ -284,13 +284,12 @@ class AssaultEnv:
                 rewards = torch.tensor(reward, dtype=torch.float32)
             else:
                 rewards = torch.zeros((cfg.num_agents,), dtype=torch.float32)
-                # Agent whose row was hit gets the destroy reward
-                if hit_agent >= 0 and hit_agent < cfg.num_agents:
-                    rewards[hit_agent] += cfg.enemy_destroy_reward
-                # Raw score reward goes to all agents
-                rewards += raw_score_reward
-                # All penalties only apply to the winning agent who took the action
                 winner = int(winning_agent[env_idx].item())
+                # Agent only gets destroy reward if controlling agent hit their own assigned row
+                if hit_agent >= 0 and hit_agent < cfg.num_agents and hit_agent == winner:
+                    rewards[hit_agent] += cfg.enemy_destroy_reward
+                # No raw score reward in multi-agent (agents should only be rewarded for own targets)
+                # All penalties only apply to the winning agent who took the action
                 if winner >= 0:
                     rewards[winner] += penalty  # life_loss + overheat + fire_while_hot
                 if bids is not None and apply_bid_penalty[env_idx]:
