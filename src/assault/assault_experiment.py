@@ -155,6 +155,8 @@ class AssaultExperiment:
         episode_frames: List[List[np.ndarray]] = []
         # Track reward components across episodes
         all_episode_components: List[Dict[str, float]] = []
+        # Track agent control counts (multi-agent only)
+        all_agent_control_counts: List[List[int]] = []
 
         for ep_idx in range(self.num_eval_episodes):
             obs, _ = env.reset()
@@ -164,11 +166,12 @@ class AssaultExperiment:
             last_score = 0.0
             frames: List[np.ndarray] = []
             ep_components: Dict[str, float] = {}
+            agent_control_counts = [0] * args.num_agents
 
             # Capture initial frame if recording this episode
             should_record = need_render and ep_idx < self.num_video_episodes
             if should_record:
-                frame = env.render(env_idx=0)
+                frame = env.render(env_idx=0, show_agent_overlay=not single_agent_mode)
                 if frame is not None:
                     frames.append(frame)
 
@@ -185,7 +188,7 @@ class AssaultExperiment:
 
                 # Capture frame after step
                 if should_record:
-                    frame = env.render(env_idx=0)
+                    frame = env.render(env_idx=0, show_agent_overlay=not single_agent_mode)
                     if frame is not None:
                         frames.append(frame)
 
@@ -193,6 +196,13 @@ class AssaultExperiment:
                     score_tensor = info.get("score", None)
                     if torch.is_tensor(score_tensor):
                         last_score = float(score_tensor.item())
+                    # Track which agent has control (multi-agent only)
+                    if not single_agent_mode:
+                        winning_agent = info.get("winning_agent")
+                        if winning_agent is not None:
+                            agent_idx = int(winning_agent.item())
+                            if 0 <= agent_idx < len(agent_control_counts):
+                                agent_control_counts[agent_idx] += 1
                     # Accumulate reward components
                     rc = info.get("reward_components", {})
                     for key, val in rc.items():
@@ -207,6 +217,8 @@ class AssaultExperiment:
             scores.append(last_score)
             lengths.append(ep_len)
             all_episode_components.append(ep_components)
+            if not single_agent_mode:
+                all_agent_control_counts.append(agent_control_counts)
 
             if should_record and frames:
                 episode_frames.append(frames)
@@ -224,6 +236,14 @@ class AssaultExperiment:
             for key in component_keys
         }
 
+        # Compute average agent control counts (multi-agent only)
+        avg_agent_control = {}
+        if not single_agent_mode and all_agent_control_counts:
+            for i in range(args.num_agents):
+                avg_agent_control[f"avg_agent_{i}_control_steps"] = float(
+                    np.mean([ep[i] for ep in all_agent_control_counts])
+                )
+
         stats = {
             "avg_score": float(np.mean(scores)),
             "avg_length": float(np.mean(lengths)),
@@ -231,19 +251,24 @@ class AssaultExperiment:
             "std_length": float(np.std(lengths)),
             "avg_return": float(np.mean(returns)),
             **avg_components,
+            **avg_agent_control,
         }
         if iteration is not None:
+            per_episode = {
+                "scores": [float(s) for s in scores],
+                "returns": [float(r) for r in returns],
+                "lengths": [int(l) for l in lengths],
+            }
+            if not single_agent_mode and all_agent_control_counts:
+                per_episode["agent_control_counts"] = all_agent_control_counts
+
             eval_summary = {
                 "iteration": iteration,
                 "global_step": global_step,
                 "num_episodes": self.num_eval_episodes,
                 "timestamp": datetime.now().isoformat(),
                 "statistics": stats,
-                "per_episode": {
-                    "scores": [float(s) for s in scores],
-                    "returns": [float(r) for r in returns],
-                    "lengths": [int(l) for l in lengths],
-                },
+                "per_episode": per_episode,
             }
             eval_file = self.eval_dir / f"iter_{iteration}_eval_stats.json"
             with open(eval_file, "w") as f:
@@ -350,3 +375,231 @@ class AssaultExperiment:
         trainer.cleanup()
 
         print(f"\n✅ Training complete! Results saved to {self.log_dir}")
+
+    @classmethod
+    def evaluate_checkpoint(
+        cls,
+        exp_dir: str | Path,
+        model_filename: str = "assault_agent.pt",
+        num_eval_episodes: int = 5,
+        num_video_episodes: int = 3,
+        output_subdir: str = "eval_videos",
+        render_oc_overlay: bool = False,
+    ) -> Dict[str, float]:
+        """
+        Evaluate a trained model from an experiment directory.
+
+        Args:
+            exp_dir: Path to experiment directory containing config and model
+            model_filename: Name of the model file (default: assault_agent.pt)
+            num_eval_episodes: Number of episodes to evaluate
+            num_video_episodes: Number of episodes to save as videos
+            output_subdir: Subdirectory for output videos and stats
+            render_oc_overlay: Whether to render OCAtari object detection overlay
+
+        Returns:
+            Dictionary of evaluation statistics
+        """
+        from assault.assault_bidding_ppo import AssaultSharedAgent
+        from assault.assault_single_agent_ppo import AssaultSingleAgent
+
+        exp_dir = Path(exp_dir)
+        model_path = exp_dir / model_filename
+        config_path = exp_dir / "config" / "training_config.json"
+        output_dir = exp_dir / output_subdir
+        output_dir.mkdir(exist_ok=True)
+
+        with open(config_path) as f:
+            config = json.load(f)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device: {device}")
+
+        # Determine if single-agent based on model filename or config
+        single_agent_mode = "single_agent" in model_filename
+
+        env_config = AssaultConfig(
+            num_agents=config["num_agents"],
+            max_enemies=config["max_enemies"],
+            bid_upper_bound=config.get("bid_upper_bound", 0),
+            bid_penalty=config.get("bid_penalty", 0.0),
+            action_window=config.get("action_window", 1),
+            window_bidding=config.get("window_bidding", False),
+            window_penalty=config.get("window_penalty", 0.0),
+            enemy_destroy_reward=config["enemy_destroy_reward"],
+            hit_penalty=config["hit_penalty"],
+            life_loss_penalty=config["life_loss_penalty"],
+            raw_score_scale=config.get("raw_score_scale", 0.0),
+            fire_while_hot_penalty=config.get("fire_while_hot_penalty", 0.0),
+            max_steps=config["max_steps"],
+            hud=config["hud"],
+            single_agent_mode=single_agent_mode,
+            allow_variable_enemies=config["allow_variable_enemies"],
+            allow_sideward_fire=config.get("allow_sideward_fire", True),
+        )
+
+        env = AssaultEnv(
+            env_config,
+            num_envs=1,
+            device=device,
+            seed=config["seed"],
+            render_mode="rgb_array",
+            render_oc_overlay=render_oc_overlay,
+        )
+
+        # Create and load agent
+        if single_agent_mode:
+            agent = AssaultSingleAgent(
+                obs_dim=env.obs_dim,
+                action_space_n=env.action_space_n,
+                actor_hidden_sizes=tuple(config["actor_hidden_sizes"]),
+                critic_hidden_sizes=tuple(config["critic_hidden_sizes"]),
+            ).to(device)
+            obs_dim = env.obs_dim
+        else:
+            agent = AssaultSharedAgent(
+                obs_dim=env.per_agent_obs_dim,
+                action_space_n=env.action_space_n,
+                bid_upper_bound=config["bid_upper_bound"],
+                window_bidding=config["window_bidding"],
+                action_window=config["action_window"],
+                actor_hidden_sizes=tuple(config["actor_hidden_sizes"]),
+                critic_hidden_sizes=tuple(config["critic_hidden_sizes"]),
+            ).to(device)
+            obs_dim = env.per_agent_obs_dim
+
+        agent.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        agent.eval()
+        print(f"Loaded model from {model_path}")
+
+        # Run evaluation
+        returns = []
+        scores = []
+        lengths = []
+        episode_frames: List[List[np.ndarray]] = []
+        all_episode_components: List[Dict[str, float]] = []
+        all_agent_control_counts: List[List[int]] = []
+
+        for ep_idx in range(num_eval_episodes):
+            obs, _ = env.reset()
+            done = False
+            ep_return = 0.0
+            ep_len = 0
+            last_score = 0.0
+            frames: List[np.ndarray] = []
+            ep_components: Dict[str, float] = {}
+            agent_control_counts = [0] * config["num_agents"]
+
+            should_record = ep_idx < num_video_episodes
+            if should_record:
+                frame = env.render(env_idx=0, show_agent_overlay=not single_agent_mode)
+                if frame is not None:
+                    frames.append(frame)
+
+            while not done:
+                with torch.no_grad():
+                    if single_agent_mode:
+                        action, _, _, _ = agent.get_action_and_value(obs)
+                    else:
+                        flat_obs = obs.reshape(-1, obs_dim)
+                        action, _, _, _ = agent.get_action_and_value(flat_obs)
+                        action = action.reshape(1, config["num_agents"], -1)
+
+                obs, reward, terminated, truncated, info = env.step(action)
+
+                if should_record:
+                    frame = env.render(env_idx=0, show_agent_overlay=not single_agent_mode)
+                    if frame is not None:
+                        frames.append(frame)
+
+                if isinstance(info, dict):
+                    score_tensor = info.get("score", None)
+                    if torch.is_tensor(score_tensor):
+                        last_score = float(score_tensor.item())
+                    # Track which agent has control (multi-agent only)
+                    if not single_agent_mode:
+                        winning_agent = info.get("winning_agent")
+                        if winning_agent is not None:
+                            agent_idx = int(winning_agent.item())
+                            if 0 <= agent_idx < len(agent_control_counts):
+                                agent_control_counts[agent_idx] += 1
+                    # Accumulate reward components
+                    rc = info.get("reward_components", {})
+                    for key, val in rc.items():
+                        v = float(val.item()) if torch.is_tensor(val) else float(val)
+                        ep_components[key] = ep_components.get(key, 0.0) + v
+
+                ep_return += reward.sum().item() if not single_agent_mode else reward.item()
+                done = bool(terminated.item() or truncated.item())
+                ep_len += 1
+
+            returns.append(ep_return)
+            scores.append(last_score)
+            lengths.append(ep_len)
+            all_episode_components.append(ep_components)
+            if not single_agent_mode:
+                all_agent_control_counts.append(agent_control_counts)
+
+            print(f"Episode {ep_idx}: score={last_score:.0f}, return={ep_return:.2f}, length={ep_len}")
+
+            # Write video
+            if should_record and frames:
+                video_path = output_dir / f"episode_{ep_idx}.mp4"
+                h, w = frames[0].shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out = cv2.VideoWriter(str(video_path), fourcc, 30, (w, h))
+                for frame in frames:
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    out.write(frame_bgr)
+                out.release()
+                print(f"  Saved: {video_path} ({len(frames)} frames)")
+
+        env.close()
+
+        # Compute statistics
+        component_keys = all_episode_components[0].keys() if all_episode_components else []
+        avg_components = {
+            f"avg_{key}": float(np.mean([ep.get(key, 0.0) for ep in all_episode_components]))
+            for key in component_keys
+        }
+
+        avg_agent_control = {}
+        if not single_agent_mode and all_agent_control_counts:
+            for i in range(config["num_agents"]):
+                avg_agent_control[f"avg_agent_{i}_control_steps"] = float(
+                    np.mean([ep[i] for ep in all_agent_control_counts])
+                )
+
+        stats = {
+            "avg_score": float(np.mean(scores)),
+            "avg_length": float(np.mean(lengths)),
+            "std_score": float(np.std(scores)),
+            "std_length": float(np.std(lengths)),
+            "avg_return": float(np.mean(returns)),
+            **avg_components,
+            **avg_agent_control,
+        }
+
+        per_episode = {
+            "scores": [float(s) for s in scores],
+            "returns": [float(r) for r in returns],
+            "lengths": [int(l) for l in lengths],
+        }
+        if not single_agent_mode and all_agent_control_counts:
+            per_episode["agent_control_counts"] = all_agent_control_counts
+
+        eval_summary = {
+            "model_path": str(model_path),
+            "num_episodes": num_eval_episodes,
+            "timestamp": datetime.now().isoformat(),
+            "statistics": stats,
+            "per_episode": per_episode,
+        }
+
+        stats_path = output_dir / "eval_stats.json"
+        with open(stats_path, "w") as f:
+            json.dump(eval_summary, f, indent=2)
+        print(f"\nStats saved to {stats_path}")
+        print(f"Videos saved to {output_dir}")
+
+        return stats

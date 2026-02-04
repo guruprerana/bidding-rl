@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+import cv2
 from ocatari.core import OCAtari
 
 
@@ -100,12 +101,14 @@ class AssaultEnv:
         self.cumulative_score = torch.zeros((num_envs,), dtype=torch.float32)
         # Track previous missile Y positions for row-based hit attribution
         self.prev_missile_v_y = torch.zeros((num_envs,), dtype=torch.float32)
+        # Track previous enemy missile Y position for velocity calculation
+        self.prev_enemy_missile_y = torch.zeros((num_envs,), dtype=torch.float32)
         # Enemy row Y positions (approximate): Bottom ~103, Middle ~78, Top ~53
         self._enemy_row_y = torch.tensor([103.0, 78.0, 53.0], dtype=torch.float32)
 
-        # Global obs: player(2) + mothership(3) + enemy_missile(3) + player_missiles(6) +
-        #             window(1) + health/lives(3) + enemy_type_onehot(3) = 21
-        self._global_obs_dim = 21
+        # Global obs: player(2) + mothership(3) + enemy_missile(3) + enemy_missile_vy(1) + player_missiles(6) +
+        #             window(1) + health/lives(3) + enemy_type_onehot(3) = 22
+        self._global_obs_dim = 22
         # Per-enemy features: x, y, visible, is_small_or_split, is_doubled = 5
         self._per_enemy_dim = 5
         # Per-agent features (multi-agent only): is_in_control(1) + is_bidding_step(1) = 2
@@ -137,6 +140,7 @@ class AssaultEnv:
             self.window_steps_remaining[idx] = 0
             self.cumulative_score[idx] = 0.0
             self.prev_missile_v_y[idx] = 0.0
+            self.prev_enemy_missile_y[idx] = state["enemy_missile_raw"][1].item()
 
         obs = torch.stack(obs_list, dim=0).to(self.device)
         info: Dict = {}
@@ -301,6 +305,7 @@ class AssaultEnv:
                 self.step_count[env_idx] = 0
                 self.cumulative_score[env_idx] = 0.0
                 self.prev_missile_v_y[env_idx] = 0.0
+                self.prev_enemy_missile_y[env_idx] = 0.0
 
             obs_list.append(self._build_obs(state, env_idx=env_idx))
             rewards_list.append(rewards)
@@ -313,6 +318,7 @@ class AssaultEnv:
             self.prev_missile_v_y[env_idx] = state["player_missile_v_raw"][1].item()
             self.prev_health_width[env_idx] = state["health_width"]
             self.prev_health_red[env_idx] = state["health_red"]
+            self.prev_enemy_missile_y[env_idx] = state["enemy_missile_raw"][1].item()
 
         obs = torch.stack(obs_list, dim=0).to(self.device)
         terminated_t = torch.tensor(terminated_list, dtype=torch.bool, device=self.device)
@@ -352,19 +358,47 @@ class AssaultEnv:
         for env in self.envs:
             env.close()
 
-    def render(self, env_idx: int = 0) -> Optional[np.ndarray]:
+    def render(self, env_idx: int = 0, show_agent_overlay: bool = True) -> Optional[np.ndarray]:
         """
-        Render the specified environment.
+        Render the specified environment with optional agent control overlay.
 
         Args:
             env_idx: Index of the environment to render (default: 0)
+            show_agent_overlay: If True, draw overlay showing controlling agent and target
 
         Returns:
             RGB array if render_mode="rgb_array", None otherwise
         """
         if self.render_mode is None:
             return None
-        return self.envs[env_idx].render()
+        frame = self.envs[env_idx].render()
+        if frame is None or not show_agent_overlay or self.config.single_agent_mode:
+            return frame
+
+        frame = frame.copy()
+        controlling_agent = int(self.window_agent[env_idx].item())
+
+        # Agent colors: Agent 0 = Red, Agent 1 = Green, Agent 2 = Blue
+        agent_colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255)]
+
+        # Draw agent control indicator in top-left
+        if controlling_agent >= 0:
+            color = agent_colors[controlling_agent % len(agent_colors)]
+            text = f"Agent {controlling_agent}"
+            cv2.putText(frame, text, (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+            # Draw circle around the targeted enemy (only if visible)
+            state = self._extract_state(self.envs[env_idx])
+            enemy_raw = state["enemy_raw"]
+            enemy_visible = state["enemy_visible"]
+            if controlling_agent < len(enemy_raw) and enemy_visible[controlling_agent]:
+                ex, ey = enemy_raw[controlling_agent]
+                ex, ey = int(ex.item()), int(ey.item())
+                cv2.circle(frame, (ex, ey), 12, color, 2)
+        else:
+            cv2.putText(frame, "No control", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+
+        return frame
 
     def _select_winners(self, bids: torch.Tensor, in_window: torch.Tensor) -> torch.Tensor:
         max_bid = bids.max(dim=1).values
@@ -515,11 +549,17 @@ class AssaultEnv:
 
     def _build_obs(self, state: Dict[str, torch.Tensor], env_idx: int) -> torch.Tensor:
         cfg = self.config
+        # Calculate enemy missile y velocity (normalized)
+        curr_em_y = state["enemy_missile_raw"][1].item()
+        prev_em_y = self.prev_enemy_missile_y[env_idx].item()
+        enemy_missile_vy = (curr_em_y - prev_em_y) / float(self.screen_height)
+
         global_features = torch.cat(
             [
                 state["player_xy"],
                 state["mothership"],
                 state["enemy_missile"],
+                torch.tensor([enemy_missile_vy], dtype=torch.float32),  # Enemy missile y velocity
                 state["player_missile_v"],
                 state["player_missile_h"],
                 torch.tensor(
