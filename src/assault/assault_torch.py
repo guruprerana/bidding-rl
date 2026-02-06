@@ -251,10 +251,12 @@ class AssaultEnv:
             life_loss_penalty = -cfg.life_loss_penalty * life_loss if life_loss > 0 else 0.0
             overheat_penalty = -cfg.hit_penalty if overheat_event else 0.0
             is_fire_action = chosen_action in (1, 5, 6)  # FIRE, RIGHTFIRE, LEFTFIRE
-            # Use prev_health_red (pre-step state) because when life is lost, health resets
-            # and state["health_red"] would be 0, missing the penalty for the fatal shot
+            # Penalize firing if health bar is red either before OR after the action
+            # (pre-step catches the decision to fire while hot, post-step catches firing that causes overheat)
+            health_red_pre = int(self.prev_health_red[env_idx]) == 1
+            health_red_post = int(state["health_red"]) == 1
             fire_while_hot_penalty = -cfg.fire_while_hot_penalty if (
-                cfg.fire_while_hot_penalty > 0 and is_fire_action and int(self.prev_health_red[env_idx]) == 1
+                cfg.fire_while_hot_penalty > 0 and is_fire_action and (health_red_pre or health_red_post)
             ) else 0.0
 
             penalty = life_loss_penalty + overheat_penalty + fire_while_hot_penalty
@@ -272,7 +274,7 @@ class AssaultEnv:
                 "health_red_pre": float(self.prev_health_red[env_idx].item()),
                 "health_red_post": float(state["health_red"].item()),
                 "is_fire_action": 1.0 if is_fire_action else 0.0,
-                "fired_while_hot": 1.0 if (is_fire_action and int(self.prev_health_red[env_idx]) == 1) else 0.0,
+                "fired_while_hot": 1.0 if (is_fire_action and (health_red_pre or health_red_post)) else 0.0,
                 # Debug: health bar RGB values (to verify red detection)
                 "health_rgb_r": float(state["health_rgb"][0].item()),
                 "health_rgb_g": float(state["health_rgb"][1].item()),

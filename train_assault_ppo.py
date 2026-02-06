@@ -18,10 +18,10 @@ def main():
     # ========================================================================
     # CONFIGURATION
     # ========================================================================
-    SINGLE_AGENT_MODE = True
+    SINGLE_AGENT_MODE = False
 
     # Experiment settings
-    EXPERIMENT_NAME = "assault_ppo_single_agent_exp1"
+    EXPERIMENT_NAME = "assault_ppo_bidding_exp1"
     CHECKPOINT_FREQ = 20
     EVAL_FREQ = 10
     VIDEO_FREQ = 0  # Save videos every N iterations (0 = same as EVAL_FREQ)
@@ -39,15 +39,15 @@ def main():
     ALLOW_SIDEWARD_FIRE = True  # Enable RIGHTFIRE and LEFTFIRE to destroy horizontal enemy missiles
 
     # Reward coefficients
-    ENEMY_DESTROY_REWARD = 2.0   # Reward for destroying an enemy (based on visibility)
-    OVERHEAT_PENALTY = 8.0       # Penalty when temperature bar turns red (strong warning)
-    LIFE_LOSS_PENALTY = 25.0     # Penalty for losing a life (make death very costly)
-    RAW_SCORE_SCALE = 0.04       # Scale for raw Atari score (21 pts × 0.04 = 0.84)
+    ENEMY_DESTROY_REWARD = 5.0   # Reward for destroying an enemy (based on visibility)
+    OVERHEAT_PENALTY = 0.0       # Penalty when temperature bar turns red (strong warning)
+    LIFE_LOSS_PENALTY = 10.0     # Penalty for losing a life (make death very costly)
+    RAW_SCORE_SCALE = 0.0 # 4       # Scale for raw Atari score (21 pts × 0.04 = 0.84) --- only for single-agent mode
     FIRE_WHILE_HOT_PENALTY = 8.0 # Penalty for firing when health bar is red
 
     # Bidding settings (multi-agent mode only)
     BID_UPPER_BOUND = 2
-    BID_PENALTY = 0.1
+    BID_PENALTY = 0.05
     ACTION_WINDOW = 30
     WINDOW_BIDDING = False
     WINDOW_PENALTY = 0.0
