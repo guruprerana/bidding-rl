@@ -298,6 +298,22 @@ class BiddingGridworld:
             if cfg.target_expiry_penalty > 0:
                 rewards = rewards - cfg.target_expiry_penalty * targets_expired.to(torch.float32)
 
+        # Per-objective (per-target) rewards for DWN and similar multi-objective methods
+        if cfg.single_agent_mode:
+            per_obj = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.float32)
+            if cfg.distance_reward_scale > 0:
+                dist_improve = (self.previous_distances - current_distances).to(torch.float32)
+                per_obj = per_obj + cfg.distance_reward_scale * dist_improve * (self.targets_reached == 0).to(torch.float32)
+            if cfg.reward_decay_factor > 0:
+                min_count = self.targets_reached_count.min(dim=1).values
+                relative_count = (self.targets_reached_count - min_count.unsqueeze(1)).to(torch.float32)
+                decay = torch.exp(-cfg.reward_decay_factor * relative_count)
+                per_obj = per_obj + targets_just_reached.to(torch.float32) * (cfg.target_reward * decay)
+            else:
+                per_obj = per_obj + targets_just_reached.to(torch.float32) * cfg.target_reward
+            if cfg.target_expiry_penalty > 0:
+                per_obj = per_obj - cfg.target_expiry_penalty * targets_expired.to(torch.float32)
+
         self.previous_distances = current_distances
 
         if cfg.moving_targets:
@@ -318,6 +334,8 @@ class BiddingGridworld:
             "bid_penalty_applied": apply_bid_penalty,
             "targets_just_reached": targets_just_reached,
         }
+        if cfg.single_agent_mode:
+            info["per_objective_rewards"] = per_obj
         return obs, rewards, terminated, truncated, info
 
     def _get_centralized_observation_tensor(self) -> torch.Tensor:
