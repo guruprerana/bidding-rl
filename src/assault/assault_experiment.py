@@ -157,6 +157,8 @@ class AssaultExperiment:
         all_episode_components: List[Dict[str, float]] = []
         # Track agent control counts (multi-agent only)
         all_agent_control_counts: List[List[int]] = []
+        # Track per-agent returns (multi-agent only)
+        all_agent_returns: List[List[float]] = []
 
         for ep_idx in range(self.num_eval_episodes):
             obs, _ = env.reset()
@@ -167,6 +169,7 @@ class AssaultExperiment:
             frames: List[np.ndarray] = []
             ep_components: Dict[str, float] = {}
             agent_control_counts = [0] * args.num_agents
+            agent_returns = [0.0] * args.num_agents
 
             # Capture initial frame if recording this episode
             should_record = need_render and ep_idx < self.num_video_episodes
@@ -209,6 +212,9 @@ class AssaultExperiment:
                         v = float(val.item()) if torch.is_tensor(val) else float(val)
                         ep_components[key] = ep_components.get(key, 0.0) + v
 
+                if not single_agent_mode:
+                    for i in range(args.num_agents):
+                        agent_returns[i] += reward[0, i].item()
                 ep_return += reward.sum().item() if not single_agent_mode else reward.item()
                 done = bool(terminated.item() or truncated.item())
                 ep_len += 1
@@ -219,6 +225,7 @@ class AssaultExperiment:
             all_episode_components.append(ep_components)
             if not single_agent_mode:
                 all_agent_control_counts.append(agent_control_counts)
+                all_agent_returns.append(agent_returns)
 
             if should_record and frames:
                 episode_frames.append(frames)
@@ -244,6 +251,14 @@ class AssaultExperiment:
                     np.mean([ep[i] for ep in all_agent_control_counts])
                 )
 
+        # Compute per-agent return stats (multi-agent only)
+        per_agent_return_stats = {}
+        if not single_agent_mode and all_agent_returns:
+            for i in range(args.num_agents):
+                agent_rets = [ep[i] for ep in all_agent_returns]
+                per_agent_return_stats[f"avg_agent_{i}_return"] = float(np.mean(agent_rets))
+                per_agent_return_stats[f"std_agent_{i}_return"] = float(np.std(agent_rets))
+
         stats = {
             "avg_score": float(np.mean(scores)),
             "avg_length": float(np.mean(lengths)),
@@ -252,6 +267,7 @@ class AssaultExperiment:
             "avg_return": float(np.mean(returns)),
             **avg_components,
             **avg_agent_control,
+            **per_agent_return_stats,
         }
         if iteration is not None:
             per_episode = {
@@ -261,6 +277,8 @@ class AssaultExperiment:
             }
             if not single_agent_mode and all_agent_control_counts:
                 per_episode["agent_control_counts"] = all_agent_control_counts
+            if not single_agent_mode and all_agent_returns:
+                per_episode["agent_returns"] = all_agent_returns
 
             eval_summary = {
                 "iteration": iteration,

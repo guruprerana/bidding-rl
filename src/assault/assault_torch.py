@@ -168,6 +168,15 @@ class AssaultEnv:
                     in_window, self.window_steps_remaining - 1, self.window_steps_remaining
                 )
 
+            # If the controlling agent's assigned enemy has disappeared, force a new bidding round
+            for env_idx in range(self.num_envs):
+                if in_window[env_idx]:
+                    ctrl = int(self.window_agent[env_idx].item())
+                    if ctrl >= 0 and ctrl < cfg.num_agents and self.prev_enemy_visible[env_idx, ctrl] == 0:
+                        in_window[env_idx] = False
+                        self.window_steps_remaining[env_idx] = 0
+                        self.window_agent[env_idx] = -1
+
             winning_agent = self._select_winners(bids, in_window)
             apply_bid_penalty = (winning_agent >= 0) & (~in_window)
             current_window_length = torch.zeros((self.num_envs,), dtype=torch.int32)
@@ -287,8 +296,8 @@ class AssaultEnv:
             else:
                 rewards = torch.zeros((cfg.num_agents,), dtype=torch.float32)
                 winner = int(winning_agent[env_idx].item())
-                # Agent only gets destroy reward if controlling agent hit their own assigned row
-                if hit_agent >= 0 and hit_agent < cfg.num_agents and hit_agent == winner:
+                # Agent assigned to the hit row gets destroy reward regardless of who is controlling
+                if hit_agent >= 0 and hit_agent < cfg.num_agents:
                     rewards[hit_agent] += cfg.enemy_destroy_reward
                 # No raw score reward in multi-agent (agents should only be rewarded for own targets)
                 # All penalties only apply to the winning agent who took the action
