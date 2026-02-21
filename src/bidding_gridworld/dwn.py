@@ -211,6 +211,8 @@ class GridworldDWNTrainer:
         self.q_optimizer: Optional[optim.Optimizer] = None
         self.w_optimizer: Optional[optim.Optimizer] = None
         self.replay_buffer: Optional[ReplayBuffer] = None
+        # Separate buffer for W-updates: only stores non-winning agent transitions
+        self.w_replay_buffer: Optional[ReplayBuffer] = None
 
         # Epsilon state
         self.q_epsilon = args.q_epsilon_start
@@ -267,8 +269,12 @@ class GridworldDWNTrainer:
         self.q_optimizer = optim.Adam(self.q_network.parameters(), lr=args.q_learning_rate)
         self.w_optimizer = optim.Adam(self.w_network.parameters(), lr=args.w_learning_rate)
 
-        # Replay buffer with scalar rewards
+        # Replay buffer with scalar rewards (all agent transitions, used for Q-updates)
         self.replay_buffer = ReplayBuffer(
+            args.buffer_size, self.per_agent_obs_dim, self.device
+        )
+        # W-buffer: only non-winning agent transitions, per the DWN paper
+        self.w_replay_buffer = ReplayBuffer(
             args.buffer_size, self.per_agent_obs_dim, self.device
         )
 
@@ -359,9 +365,15 @@ class GridworldDWNTrainer:
         """Update shared W-network with DWN priority targets.
 
         W_target = Q(s, a_executed) - [r + gamma * max_a Q_target(s', a)]
+
+        Only samples from transitions where the agent did NOT win (per the DWN
+        paper: W-networks are updated only for objectives that did not play).
+        Returns None if the W-buffer has too few transitions to sample a batch.
         """
         args = self.args
-        obs, actions, rewards, next_obs, dones = self.replay_buffer.sample(args.batch_size)
+        if self.w_replay_buffer.size < args.batch_size:
+            return None
+        obs, actions, rewards, next_obs, dones = self.w_replay_buffer.sample(args.batch_size)
 
         with torch.no_grad():
             current_q = self.q_network(obs).gather(1, actions.unsqueeze(1)).squeeze(1)
@@ -439,6 +451,21 @@ class GridworldDWNTrainer:
 
             self.replay_buffer.add(flat_obs, flat_actions, flat_rewards, flat_next_obs, flat_dones)
 
+            # W-buffer: only store transitions for agents that did NOT win.
+            # Per the DWN paper, W-networks are updated only for objectives that
+            # did not get to execute their action.
+            loser_mask = torch.ones(args.num_envs, num_agents, dtype=torch.bool, device=self.device)
+            loser_mask.scatter_(1, winners.unsqueeze(1), False)
+            loser_flat = loser_mask.reshape(-1)
+            if loser_flat.any():
+                self.w_replay_buffer.add(
+                    flat_obs[loser_flat],
+                    flat_actions[loser_flat],
+                    flat_rewards[loser_flat],
+                    flat_next_obs[loser_flat],
+                    flat_dones[loser_flat],
+                )
+
             # Track episode stats
             episode_returns += rewards.sum(dim=1)
             episode_lengths += 1
@@ -475,6 +502,12 @@ class GridworldDWNTrainer:
                     done_mask, torch.zeros_like(episode_lengths), episode_lengths
                 )
                 self._decay_epsilon()
+
+                # Reset done envs so the next episode starts fresh.
+                # obs_new for done envs already holds the terminal obs (stored in
+                # the replay buffer above), so it is safe to overwrite it here.
+                reset_obs = self.envs.partial_reset(done_mask)
+                obs_new = torch.where(done_mask.view(-1, 1, 1), reset_obs, obs_new)
 
             next_obs = obs_new
             global_step += args.num_envs

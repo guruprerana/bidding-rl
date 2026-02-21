@@ -956,6 +956,53 @@ class BiddingGridworld:
                 print(f"Warning: Could not save video {output_path_mp4}: {e}")
                 out.release()
 
+    def partial_reset(self, mask: torch.Tensor) -> torch.Tensor:
+        """Reset only the envs indicated by mask (bool, shape (num_envs,)).
+
+        Resets all per-env state tensors for done envs in-place, then returns
+        a fresh observation tensor (num_envs, ...) with reset obs spliced in
+        for the masked envs.
+        """
+        cfg = self.config
+        device = self.device
+
+        self.agent_pos = torch.where(
+            mask.unsqueeze(-1),
+            torch.zeros_like(self.agent_pos),
+            self.agent_pos,
+        )
+
+        rand = torch.rand(
+            (self.num_envs, self._reset_positions.shape[0]), generator=self.gen, device=device
+        )
+        idx = torch.topk(rand, k=cfg.num_agents, dim=1, largest=True).indices
+        new_target_pos = self._reset_positions[idx].to(torch.int32)
+        self.target_pos = torch.where(mask.view(-1, 1, 1), new_target_pos, self.target_pos)
+
+        zeros2d = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.int32)
+        self.targets_reached = torch.where(mask.unsqueeze(-1), zeros2d, self.targets_reached)
+        self.targets_reached_count = torch.where(mask.unsqueeze(-1), zeros2d, self.targets_reached_count)
+        self.target_counters = torch.where(mask.unsqueeze(-1), zeros2d, self.target_counters)
+        self.window_agent = torch.where(mask, torch.full_like(self.window_agent, -1), self.window_agent)
+        self.window_steps_remaining = torch.where(
+            mask, torch.zeros_like(self.window_steps_remaining), self.window_steps_remaining
+        )
+        self.step_count = torch.where(mask, torch.zeros_like(self.step_count), self.step_count)
+
+        if cfg.moving_targets:
+            new_dirs = torch.randint(
+                0, 4, self.target_directions.shape, generator=self.gen, device=device, dtype=torch.int32
+            )
+            self.target_directions = torch.where(mask.unsqueeze(-1), new_dirs, self.target_directions)
+            self.target_move_counters = torch.where(
+                mask.unsqueeze(-1), torch.zeros_like(self.target_move_counters), self.target_move_counters
+            )
+
+        new_distances = self._compute_distances()
+        self.previous_distances = torch.where(mask.unsqueeze(-1), new_distances, self.previous_distances)
+
+        return self._get_observation()
+
     def close(self) -> None:
         """No-op close for API compatibility."""
         return None
