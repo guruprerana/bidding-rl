@@ -37,6 +37,8 @@ class BiddingGridworldConfig:
     visible_targets: Optional[int]
     single_agent_mode: bool = False
     reward_decay_factor: float = 0.0
+    bidding_mechanism: str = "all_pay"
+    # "all_pay" | "winner_pays" | "winner_pays_others_reward"
 
 
 class BiddingGridworld:
@@ -282,7 +284,27 @@ class BiddingGridworld:
         else:
             rewards = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.float32)
             if torch.any(apply_bid_penalty) and bids is not None:
-                rewards = rewards - apply_bid_penalty.unsqueeze(1).to(torch.float32) * cfg.bid_penalty * bids.to(torch.float32)
+                bids_f = bids.to(torch.float32)
+                mask = apply_bid_penalty.unsqueeze(1).to(torch.float32)
+
+                if cfg.bidding_mechanism == "all_pay":
+                    rewards = rewards - mask * cfg.bid_penalty * bids_f
+                else:
+                    # Build winner mask: (num_envs, num_agents), 1.0 only at winning agent index
+                    winner_mask = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.float32)
+                    valid_win = winning_agent >= 0
+                    if torch.any(valid_win):
+                        idx = winning_agent.clamp(min=0).long().view(-1, 1)
+                        winner_mask.scatter_(1, idx, 1.0)
+                        winner_mask = winner_mask * valid_win.float().unsqueeze(1)
+
+                    if cfg.bidding_mechanism == "winner_pays":
+                        rewards = rewards - mask * cfg.bid_penalty * winner_mask * bids_f
+                    elif cfg.bidding_mechanism == "winner_pays_others_reward":
+                        others_mask = 1.0 - winner_mask
+                        rewards = rewards - mask * cfg.bid_penalty * winner_mask * bids_f
+                        rewards = rewards + mask * cfg.bid_penalty * others_mask * bids_f
+
                 if cfg.window_bidding and cfg.window_penalty > 0:
                     penalty = cfg.window_penalty * current_window_length.to(torch.float32)
                     valid_win = winning_agent >= 0
@@ -336,6 +358,8 @@ class BiddingGridworld:
         }
         if cfg.single_agent_mode:
             info["per_objective_rewards"] = per_obj
+        else:
+            info["is_bidding_round"] = ~in_window
         return obs, rewards, terminated, truncated, info
 
     def _get_centralized_observation_tensor(self) -> torch.Tensor:
@@ -1040,6 +1064,8 @@ def evaluate_multi_agent_policy(
         "min_targets_reached_per_episode": [],
         "targets_reached_count_per_episode": [],
         "episode_data_list": [],
+        "bid_counts_per_episode": [],
+        "control_steps_per_agent_per_episode": [],
     }
 
     for episode_idx in range(num_episodes):
@@ -1056,6 +1082,8 @@ def evaluate_multi_agent_policy(
 
         episode_expired_count = 0
         targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)
+        bid_counts: dict = {}
+        control_steps = np.zeros(env.num_agents, dtype=np.int32)
 
         while not (terminated or truncated):
             episode_states.append(env._get_centralized_observation()[0].copy())
@@ -1107,6 +1135,17 @@ def evaluate_multi_agent_policy(
             if isinstance(bids, torch.Tensor):
                 bids = bids[0].detach().cpu().tolist()
 
+            is_bidding_round = info.get("is_bidding_round", None)
+            if isinstance(is_bidding_round, torch.Tensor):
+                is_bidding_round = bool(is_bidding_round[0].item())
+
+            if is_bidding_round and bids is not None:
+                for bid_val in bids:
+                    bid_counts[int(bid_val)] = bid_counts.get(int(bid_val), 0) + 1
+
+            if winning_agent >= 0:
+                control_steps[winning_agent] += 1
+
             episode_step_details.append({
                 "winning_agent": winning_agent,
                 "bids": bids,
@@ -1126,6 +1165,8 @@ def evaluate_multi_agent_policy(
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
         eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
         eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
+        eval_stats["bid_counts_per_episode"].append(bid_counts)
+        eval_stats["control_steps_per_agent_per_episode"].append(control_steps.tolist())
 
         eval_stats["episode_data_list"].append({
             "states": episode_states,

@@ -70,6 +70,7 @@ def main():
     WINDOW_BIDDING = False  # Set to True to let agents choose their window length
     WINDOW_PENALTY = 0.05  # Penalty per window step (only applies when WINDOW_BIDDING = True)
     VISIBLE_TARGETS = None  # Set to None for centralized (all targets visible), or N for decentralized (each agent sees own target + N nearest others)
+    BIDDING_MECHANISM = "all_pay"  # "all_pay" | "winner_pays" | "winner_pays_others_reward"
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
     DIRECTION_CHANGE_PROB = 0.1
@@ -180,6 +181,7 @@ def main():
             window_bidding=WINDOW_BIDDING,
             window_penalty=WINDOW_PENALTY,
             visible_targets=VISIBLE_TARGETS,
+            bidding_mechanism=BIDDING_MECHANISM,
 
             # Training config
             num_iterations=NUM_ITERATIONS,

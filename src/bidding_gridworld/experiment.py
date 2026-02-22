@@ -194,6 +194,7 @@ class PPOMovingTargetsExperiment:
             window_penalty=trainer.args.window_penalty,
             visible_targets=trainer.args.visible_targets,
             single_agent_mode=False,
+            bidding_mechanism=trainer.args.bidding_mechanism,
         )
         eval_env = BiddingGridworld(
             env_config,
@@ -249,6 +250,20 @@ class PPOMovingTargetsExperiment:
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
                            if t == eval_num_agents) / self.num_eval_episodes
 
+        # Average bid counts across episodes
+        all_bid_counts = eval_stats.get("bid_counts_per_episode", [])
+        bid_upper_bound = trainer.args.bid_upper_bound
+        avg_bid_counts = {}
+        for bid_val in range(bid_upper_bound + 1):
+            avg_bid_counts[bid_val] = float(np.mean([bc.get(bid_val, 0) for bc in all_bid_counts]))
+
+        # Average control timesteps per agent across episodes
+        all_control_steps = eval_stats.get("control_steps_per_agent_per_episode", [])
+        avg_control_steps_per_agent = (
+            np.array(all_control_steps).mean(axis=0).tolist()
+            if all_control_steps else []
+        )
+
         # Log to wandb
         if trainer.args.track:
             wandb.log({
@@ -278,6 +293,8 @@ class PPOMovingTargetsExperiment:
                 "std_return": float(np.std(eval_stats["episode_returns"])),
                 "std_length": float(np.std(eval_stats["episode_lengths"])),
                 "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
+                "avg_bid_counts": avg_bid_counts,
+                "avg_control_timesteps_per_agent": avg_control_steps_per_agent,
             },
             "per_episode_data": {
                 "returns": [float(r) for r in eval_stats["episode_returns"]],
@@ -285,6 +302,8 @@ class PPOMovingTargetsExperiment:
                 "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
                 "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
+                "bid_counts": [dict(sorted(bc.items())) for bc in all_bid_counts],
+                "control_steps_per_agent": all_control_steps,
             }
         }
 

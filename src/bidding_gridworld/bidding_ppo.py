@@ -70,6 +70,8 @@ class Args:
     """penalty multiplier for chosen window length (only applies when window_bidding=True)"""
     visible_targets: Optional[int] = None
     """number of nearest other targets visible to each agent (None = all targets visible, centralized)"""
+    bidding_mechanism: str = "all_pay"
+    """bidding penalty mechanism: 'all_pay', 'winner_pays', or 'winner_pays_others_reward'"""
 
     # Target attention pooling
     use_target_attention_pooling: bool = False
@@ -440,6 +442,7 @@ class PPOTrainer(MultiAgentPPOTrainerBase):
             window_penalty=self.args.window_penalty,
             visible_targets=self.args.visible_targets,
             single_agent_mode=False,
+            bidding_mechanism=self.args.bidding_mechanism,
         )
         self.envs = BiddingGridworld(
             env_config,
