@@ -139,6 +139,7 @@ class AssaultExperiment:
             single_agent_mode=single_agent_mode,
             allow_variable_enemies=args.allow_variable_enemies,
             allow_sideward_fire=getattr(args, "allow_sideward_fire", True),
+            bidding_mechanism=getattr(args, "bidding_mechanism", "all_pay"),
         )
         env = AssaultEnv(
             env_config,
@@ -157,6 +158,8 @@ class AssaultExperiment:
         all_episode_components: List[Dict[str, float]] = []
         # Track agent control counts (multi-agent only)
         all_agent_control_counts: List[List[int]] = []
+        # Track per-agent bid counts (multi-agent only)
+        all_agent_bid_counts: List[List[Dict[int, int]]] = []
         # Track per-agent returns (multi-agent only)
         all_agent_returns: List[List[float]] = []
 
@@ -169,6 +172,7 @@ class AssaultExperiment:
             frames: List[np.ndarray] = []
             ep_components: Dict[str, float] = {}
             agent_control_counts = [0] * args.num_agents
+            agent_bid_counts: List[Dict[int, int]] = [{} for _ in range(args.num_agents)]
             agent_returns = [0.0] * args.num_agents
 
             # Capture initial frame if recording this episode
@@ -206,6 +210,14 @@ class AssaultExperiment:
                             agent_idx = int(winning_agent.item())
                             if 0 <= agent_idx < len(agent_control_counts):
                                 agent_control_counts[agent_idx] += 1
+                        bids_tensor = info.get("bids")
+                        is_bidding_round_info = info.get("is_bidding_round")
+                        if bids_tensor is not None and is_bidding_round_info is not None:
+                            if bool(is_bidding_round_info[0].item()):
+                                bids_list = bids_tensor[0].cpu().tolist()
+                                for agent_i, bid_val in enumerate(bids_list):
+                                    bc = agent_bid_counts[agent_i]
+                                    bc[int(bid_val)] = bc.get(int(bid_val), 0) + 1
                     # Accumulate reward components
                     rc = info.get("reward_components", {})
                     for key, val in rc.items():
@@ -225,6 +237,7 @@ class AssaultExperiment:
             all_episode_components.append(ep_components)
             if not single_agent_mode:
                 all_agent_control_counts.append(agent_control_counts)
+                all_agent_bid_counts.append([dict(bc) for bc in agent_bid_counts])
                 all_agent_returns.append(agent_returns)
 
             if should_record and frames:
@@ -251,6 +264,23 @@ class AssaultExperiment:
                     np.mean([ep[i] for ep in all_agent_control_counts])
                 )
 
+        avg_bid_counts_per_agent: List[Dict[int, float]] = []
+        if not single_agent_mode and all_agent_bid_counts:
+            bid_upper_bound = getattr(args, "bid_upper_bound", 0)
+            for agent_i in range(args.num_agents):
+                avg_bc: Dict[int, float] = {}
+                for bid_val in range(bid_upper_bound + 1):
+                    avg_bc[bid_val] = float(
+                        np.mean([ep[agent_i].get(bid_val, 0) for ep in all_agent_bid_counts])
+                    )
+                avg_bid_counts_per_agent.append(avg_bc)
+
+        avg_control_timesteps_per_agent: List[float] = []
+        if not single_agent_mode and all_agent_control_counts:
+            avg_control_timesteps_per_agent = (
+                np.array(all_agent_control_counts).mean(axis=0).tolist()
+            )
+
         # Compute per-agent return stats (multi-agent only)
         per_agent_return_stats = {}
         if not single_agent_mode and all_agent_returns:
@@ -268,6 +298,8 @@ class AssaultExperiment:
             **avg_components,
             **avg_agent_control,
             **per_agent_return_stats,
+            "avg_bid_counts_per_agent": avg_bid_counts_per_agent,
+            "avg_control_timesteps_per_agent": avg_control_timesteps_per_agent,
         }
         if iteration is not None:
             per_episode = {
@@ -279,6 +311,12 @@ class AssaultExperiment:
                 per_episode["agent_control_counts"] = all_agent_control_counts
             if not single_agent_mode and all_agent_returns:
                 per_episode["agent_returns"] = all_agent_returns
+            if not single_agent_mode and all_agent_bid_counts:
+                per_episode["bid_counts_per_agent"] = [
+                    [dict(sorted(bc.items())) for bc in ep] for ep in all_agent_bid_counts
+                ]
+            if not single_agent_mode and all_agent_control_counts:
+                per_episode["control_steps_per_agent"] = all_agent_control_counts
 
             eval_summary = {
                 "iteration": iteration,
@@ -454,6 +492,7 @@ class AssaultExperiment:
             single_agent_mode=single_agent_mode,
             allow_variable_enemies=config["allow_variable_enemies"],
             allow_sideward_fire=config.get("allow_sideward_fire", True),
+            bidding_mechanism=config.get("bidding_mechanism", "all_pay"),
         )
 
         env = AssaultEnv(

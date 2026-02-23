@@ -51,6 +51,7 @@ def main():
     ACTION_WINDOW = 15
     WINDOW_BIDDING = False
     WINDOW_PENALTY = 0.0
+    BIDDING_MECHANISM = "all_pay"  # "all_pay" | "winner_pays" | "winner_pays_others_reward"
 
     # Training settings
     NUM_ITERATIONS = 80
@@ -134,6 +135,7 @@ def main():
             action_window=ACTION_WINDOW,
             window_bidding=WINDOW_BIDDING,
             window_penalty=WINDOW_PENALTY,
+            bidding_mechanism=BIDDING_MECHANISM,
             enemy_destroy_reward=ENEMY_DESTROY_REWARD,
             hit_penalty=OVERHEAT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
