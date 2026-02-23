@@ -428,6 +428,64 @@ class AssaultEnv:
 
         return frame
 
+    def _reset_env(self, env_idx: int) -> torch.Tensor:
+        """Re-sync state trackers for env_idx and return a fresh observation.
+
+        Assumes ``self.envs[env_idx]`` is already in a reset state (e.g. after
+        the auto-reset that ``step()`` performs on episode termination).  Only
+        re-synchronises per-env bookkeeping variables and rebuilds the initial
+        observation — it does **not** call ``env.reset()`` again.
+
+        Returns:
+            obs tensor shaped ``(num_agents, per_agent_obs_dim)`` or
+            ``(obs_dim,)`` on ``self.device``.
+        """
+        state = self._extract_state(self.envs[env_idx])
+
+        self.step_count[env_idx] = 0
+        self.window_agent[env_idx] = -1
+        self.window_steps_remaining[env_idx] = 0
+        self.prev_enemy_visible[env_idx] = state["enemy_visible"]
+        self.prev_lives[env_idx] = state["lives_count"]
+        self.prev_health_width[env_idx] = state["health_width"]
+        self.prev_health_red[env_idx] = state["health_red"]
+        self.cumulative_score[env_idx] = 0.0
+        self.prev_missile_v_y[env_idx] = 0.0
+        # Set prev position equal to current so that velocity = 0 on initial obs
+        self.prev_enemy_missile_y[env_idx] = state["enemy_missile_raw"][1].item()
+
+        return self._build_obs(state, env_idx=env_idx).to(self.device)
+
+    def partial_reset(self, done_mask: torch.Tensor) -> torch.Tensor:
+        """Reset done envs and return a full obs tensor with reset obs spliced in.
+
+        For use **after** ``step()`` has already auto-reset done environments.
+        Fixes up state variables that ``step()`` does not reset (e.g.
+        ``window_agent``) and returns clean initial observations.
+        Non-done env slots in the returned tensor contain zeros and are
+        intended to be ignored by callers via ``torch.where``.
+
+        Args:
+            done_mask: ``(num_envs,)`` bool tensor (may be on any device).
+
+        Returns:
+            obs: ``(num_envs, num_agents, per_agent_obs_dim)`` or
+                 ``(num_envs, obs_dim)`` on ``self.device``.
+        """
+        if self.config.single_agent_mode:
+            result = torch.zeros(self.num_envs, self.obs_dim, device=self.device)
+        else:
+            result = torch.zeros(
+                self.num_envs,
+                self.config.num_agents,
+                self.per_agent_obs_dim,
+                device=self.device,
+            )
+        for env_idx in range(self.num_envs):
+            if done_mask[env_idx].item():
+                result[env_idx] = self._reset_env(env_idx)
+        return result
+
     def _select_winners(self, bids: torch.Tensor, in_window: torch.Tensor) -> torch.Tensor:
         max_bid = bids.max(dim=1).values
         winners = torch.full((self.num_envs,), -1, dtype=torch.int32)
