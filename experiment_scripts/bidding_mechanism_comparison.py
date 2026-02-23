@@ -2,7 +2,7 @@
 """
 Bidding Mechanism Comparison Experiment
 
-Runs 5 sequential experiments to compare bidding mechanisms and baselines:
+Runs 5 experiments in parallel to compare bidding mechanisms and baselines:
   1. Multi-agent PPO — all_pay
   2. Multi-agent PPO — winner_pays
   3. Multi-agent PPO — winner_pays_others_reward
@@ -10,8 +10,12 @@ Runs 5 sequential experiments to compare bidding mechanisms and baselines:
   5. DWN baseline
 
 All config is defined at the top of this file.
+Each experiment runs in its own subprocess (required for separate CUDA contexts).
+Per-experiment output is written to BASE_LOG_DIR/<exp_name>.log.
 """
 
+import functools
+import multiprocessing
 import os
 import sys
 
@@ -59,7 +63,7 @@ WINDOW_PENALTY = 0.05
 VISIBLE_TARGETS = None
 
 # Training
-NUM_ITERATIONS = 200
+NUM_ITERATIONS = 400
 LEARNING_RATE = 2.5e-4
 NUM_ENVS = 4096
 NUM_STEPS = 256
@@ -87,7 +91,7 @@ TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 # Eval / logging
 EVAL_NUM_AGENTS = None  # None = use NUM_AGENTS (keeps PPO eval comparable to DWN, which has no variable-agent support)
 CHECKPOINT_FREQ = 100  # Save every 100 iterations
-EVAL_FREQ = 10         # Eval every 10 iterations (5% of 200)
+EVAL_FREQ = 10         # Eval every 10 iterations (2.5% of 400)
 NUM_EVAL_EPISODES = 20
 NUM_VIDEO_EPISODES = 0
 VIDEO_FREQ = 0
@@ -101,11 +105,11 @@ TRACK = True
 # SINGLE-AGENT BASELINE CONFIG
 # ============================================================================
 
-# 200 iters × 8 agents = 1600 single-agent iterations to match env steps
-NUM_SINGLE_AGENT_ITERATIONS = 1600
+# 400 iters × 8 agents = 3200 single-agent iterations to match env steps
+NUM_SINGLE_AGENT_ITERATIONS = 3200
 REWARD_DECAY_FACTOR = 0.0
-# Eval every 80 iters → same 5% cadence as multi-agent (80/1600 = 10/200)
-SINGLE_AGENT_EVAL_FREQ = 80
+# Eval every 160 iters → same 5% cadence as multi-agent (160/3200 = 10/400)
+SINGLE_AGENT_EVAL_FREQ = 160
 
 # ============================================================================
 # DWN BASELINE CONFIG
@@ -352,30 +356,79 @@ def run_dwn_baseline() -> None:
 
 
 # ============================================================================
+# PARALLEL EXECUTION
+# ============================================================================
+
+def _run_worker(label: str, run_fn, log_path: str) -> None:
+    """Subprocess entry point: redirects stdout/stderr to a log file and runs the experiment."""
+    import traceback
+    os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+    with open(log_path, "w", buffering=1) as f:
+        sys.stdout = f
+        sys.stderr = f
+        print(f"{'=' * 72}")
+        print(f"  {label}")
+        print(f"{'=' * 72}")
+        try:
+            run_fn()
+            print(f"\nEXPERIMENT COMPLETED: {label}")
+        except Exception as e:
+            print(f"\nEXPERIMENT FAILED: {label}")
+            print(f"Error: {e}")
+            traceback.print_exc()
+            raise
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
 def main():
     experiments = [
-        ("Multi-agent PPO — all_pay",                  lambda: run_ppo_experiment("all_pay",                    "bidding_cmp_all_pay")),
-        ("Multi-agent PPO — winner_pays",               lambda: run_ppo_experiment("winner_pays",                "bidding_cmp_winner_pays")),
-        ("Multi-agent PPO — winner_pays_others_reward", lambda: run_ppo_experiment("winner_pays_others_reward",  "bidding_cmp_winner_pays_others_reward")),
-        ("Single-agent PPO baseline",                   run_single_agent_baseline),
-        ("DWN baseline",                                run_dwn_baseline),
+        ("Multi-agent PPO — all_pay",                  "bidding_cmp_all_pay",                   functools.partial(run_ppo_experiment, "all_pay",                   "bidding_cmp_all_pay")),
+        ("Multi-agent PPO — winner_pays",               "bidding_cmp_winner_pays",               functools.partial(run_ppo_experiment, "winner_pays",               "bidding_cmp_winner_pays")),
+        ("Multi-agent PPO — winner_pays_others_reward", "bidding_cmp_winner_pays_others_reward", functools.partial(run_ppo_experiment, "winner_pays_others_reward",  "bidding_cmp_winner_pays_others_reward")),
+        ("Single-agent PPO baseline",                   "bidding_cmp_single_agent",              run_single_agent_baseline),
+        ("DWN baseline",                                "bidding_cmp_dwn",                       run_dwn_baseline),
     ]
 
-    total = len(experiments)
-    for idx, (label, run_fn) in enumerate(experiments, start=1):
-        print()
-        print("=" * 72)
-        print(f"  EXPERIMENT {idx}/{total}: {label}")
-        print("=" * 72)
-        run_fn()
+    os.makedirs(BASE_LOG_DIR, exist_ok=True)
+    ctx = multiprocessing.get_context("spawn")
+
+    procs = []
+    for label, exp_name, run_fn in experiments:
+        log_path = os.path.join(BASE_LOG_DIR, f"{exp_name}.log")
+        p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path), name=exp_name)
+        procs.append((label, log_path, p))
 
     print()
     print("=" * 72)
-    print("  All experiments complete.")
+    print(f"  Launching {len(procs)} experiments in parallel")
     print("=" * 72)
+    for label, log_path, p in procs:
+        p.start()
+        print(f"  [PID {p.pid:>6}]  {label}")
+        print(f"              log → {log_path}")
+    print()
+
+    for label, log_path, p in procs:
+        p.join()
+
+    print()
+    print("=" * 72)
+    print("  Results")
+    print("=" * 72)
+    any_failed = False
+    for label, log_path, p in procs:
+        status = "COMPLETED" if p.exitcode == 0 else f"FAILED (exit {p.exitcode})"
+        if p.exitcode != 0:
+            any_failed = True
+        print(f"  {status:<30}  {label}")
+        print(f"  {'':30}  log → {log_path}")
+    print()
+
+    if any_failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

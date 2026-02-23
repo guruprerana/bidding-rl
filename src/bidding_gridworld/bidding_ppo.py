@@ -16,7 +16,7 @@ from bidding_gridworld.bidding_gridworld_torch import (
     BiddingGridworld,
     BiddingGridworldConfig,
 )
-from ppo_utils import build_mlp, layer_init
+from ppo_utils import build_mlp, layer_init, MaskedAttentionPooling
 from ppo_trainer_base import MultiAgentPPOTrainerBase
 
 
@@ -128,26 +128,6 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     total_timesteps: int = 0
     """total timesteps of the experiments (computed in runtime)"""
-
-
-class MaskedAttentionPooling(nn.Module):
-    """Masked attention pooling with a learned query over per-target embeddings."""
-
-    def __init__(self, input_dim: int, embed_dim: int, hidden_sizes: Tuple[int, ...]):
-        super().__init__()
-        self.encoder = build_mlp(input_dim, hidden_sizes, embed_dim)
-        self.query = nn.Parameter(torch.randn(embed_dim))
-
-    def forward(self, target_feats: torch.Tensor, target_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        batch_size, num_targets, feat_dim = target_feats.shape
-        flat = target_feats.reshape(batch_size * num_targets, feat_dim)
-        embeddings = self.encoder(flat).reshape(batch_size, num_targets, -1)
-        scores = torch.einsum("bnd,d->bn", embeddings, self.query)
-        if target_mask is not None:
-            scores = scores.masked_fill(~target_mask, -1e9)
-        weights = torch.softmax(scores, dim=-1)
-        pooled = torch.einsum("bnd,bn->bd", embeddings, weights)
-        return pooled
 
 
 class SharedAgent(nn.Module):

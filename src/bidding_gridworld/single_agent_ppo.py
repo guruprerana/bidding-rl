@@ -15,7 +15,7 @@ from bidding_gridworld.bidding_gridworld_torch import (
     BiddingGridworld,
     BiddingGridworldConfig,
 )
-from ppo_utils import layer_init
+from ppo_utils import layer_init, MaskedAttentionPooling
 from ppo_trainer_base import SingleAgentPPOTrainerBase
 
 
@@ -65,6 +65,12 @@ class SingleAgentArgs:
     """hidden layer sizes for the actor network"""
     critic_hidden_sizes: Tuple[int, ...] = (256, 256, 256)
     """hidden layer sizes for the critic network"""
+    use_target_attention_pooling: bool = False
+    """whether to use masked attention pooling over target observations"""
+    target_embed_dim: int = 64
+    """embedding dimension for target attention pooling"""
+    target_encoder_hidden_sizes: Optional[Tuple[int, ...]] = None
+    """hidden sizes for the target encoder MLP (defaults to (64, 64))"""
 
     # Algorithm specific arguments
     num_iterations: int = 1000
@@ -111,26 +117,54 @@ class SingleAgentArgs:
 
 class SingleAgent(nn.Module):
     """
-    Simple actor-critic network for single-agent navigation.
+    Actor-critic network for single-agent navigation.
 
-    Only outputs direction actions (no bidding).
+    Only outputs direction actions (no bidding). Optionally uses masked
+    attention pooling over per-target features for variable target counts.
+
+    Single-agent observation layout (with include_target_reached):
+      [agent_pos(2), target_pos(2*T), targets_reached(T),
+       target_counters(T), window_steps(1), relative_counts(T)]
+    Without include_target_reached (moving targets):
+      [agent_pos(2), target_pos(2*T), target_counters(T),
+       window_steps(1), relative_counts(T)]
     """
 
-    def __init__(self, obs_dim, actor_hidden_sizes=None, critic_hidden_sizes=None):
-        """
-        Initialize single-agent actor-critic network.
-
-        Args:
-            obs_dim: Dimension of observation
-        """
+    def __init__(
+        self,
+        obs_dim,
+        num_targets,
+        actor_hidden_sizes=None,
+        critic_hidden_sizes=None,
+        use_target_attention_pooling: bool = False,
+        target_embed_dim: int = 64,
+        target_encoder_hidden_sizes=None,
+        include_target_reached: bool = True,
+    ):
         super().__init__()
+        self.use_target_attention_pooling = use_target_attention_pooling
+        self.include_target_reached = include_target_reached
+        self.num_targets = num_targets
 
         actor_sizes = list(actor_hidden_sizes) if actor_hidden_sizes is not None else [128, 128, 128]
         critic_sizes = list(critic_hidden_sizes) if critic_hidden_sizes is not None else [256, 256, 256]
 
+        if self.use_target_attention_pooling:
+            encoder_sizes = target_encoder_hidden_sizes if target_encoder_hidden_sizes is not None else (64, 64)
+            # Single-agent has an extra relative_count feature compared to multi-agent
+            target_feat_dim = 7 if self.include_target_reached else 6
+            self.target_pool = MaskedAttentionPooling(
+                input_dim=target_feat_dim,
+                embed_dim=target_embed_dim,
+                hidden_sizes=encoder_sizes,
+            )
+            self.encoded_obs_dim = 3 + target_feat_dim + target_embed_dim  # agent_pos + window + own + pooled
+        else:
+            self.encoded_obs_dim = obs_dim
+
         # Critic network: outputs single value estimate
         critic_layers = []
-        critic_in_dim = obs_dim
+        critic_in_dim = self.encoded_obs_dim
         for hidden_size in critic_sizes:
             critic_layers.append(layer_init(nn.Linear(critic_in_dim, hidden_size)))
             critic_layers.append(nn.ELU())
@@ -140,7 +174,7 @@ class SingleAgent(nn.Module):
 
         # Actor network: outputs logits for direction (4 actions)
         actor_layers = []
-        actor_in_dim = obs_dim
+        actor_in_dim = self.encoded_obs_dim
         for hidden_size in actor_sizes:
             actor_layers.append(layer_init(nn.Linear(actor_in_dim, hidden_size)))
             actor_layers.append(nn.ELU())
@@ -148,9 +182,41 @@ class SingleAgent(nn.Module):
         actor_layers.append(layer_init(nn.Linear(actor_in_dim, 4), std=0.01))  # 4 directions
         self.actor = nn.Sequential(*actor_layers)
 
+    def _encode_obs(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.use_target_attention_pooling:
+            return x
+
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+
+        T = self.num_targets
+        agent_pos = x[:, :2]  # (B, 2)
+
+        if self.include_target_reached:
+            # [agent_pos(2), target_pos(2*T), targets_reached(T), target_counters(T), window_steps(1), relative_counts(T)]
+            target_pos = x[:, 2:2 + 2 * T].reshape(-1, T, 2)
+            targets_reached = x[:, 2 + 2 * T:2 + 3 * T].reshape(-1, T, 1)
+            target_counters = x[:, 2 + 3 * T:2 + 4 * T].reshape(-1, T, 1)
+            window_steps = x[:, 2 + 4 * T:2 + 4 * T + 1]
+            relative_counts = x[:, 2 + 4 * T + 1:2 + 5 * T + 1].reshape(-1, T, 1)
+            rel_pos = target_pos - agent_pos.unsqueeze(1)
+            target_feats = torch.cat([target_pos, rel_pos, targets_reached, target_counters, relative_counts], dim=-1)
+        else:
+            # [agent_pos(2), target_pos(2*T), target_counters(T), window_steps(1), relative_counts(T)]
+            target_pos = x[:, 2:2 + 2 * T].reshape(-1, T, 2)
+            target_counters = x[:, 2 + 2 * T:2 + 3 * T].reshape(-1, T, 1)
+            window_steps = x[:, 2 + 3 * T:2 + 3 * T + 1]
+            relative_counts = x[:, 2 + 3 * T + 1:2 + 4 * T + 1].reshape(-1, T, 1)
+            rel_pos = target_pos - agent_pos.unsqueeze(1)
+            target_feats = torch.cat([target_pos, rel_pos, target_counters, relative_counts], dim=-1)
+
+        pooled = self.target_pool(target_feats)          # (B, embed_dim)
+        own_feats = target_feats[:, 0, :]               # (B, target_feat_dim)
+        return torch.cat([agent_pos, window_steps, own_feats, pooled], dim=-1)
+
     def get_value(self, x):
         """Get value estimate for given observation."""
-        return self.critic(x)
+        return self.critic(self._encode_obs(x))
 
     def get_action_and_value(self, x, action=None):
         """
@@ -166,23 +232,14 @@ class SingleAgent(nn.Module):
             entropy: Entropy of the action distribution
             value: Value estimate
         """
-        # Get action logits
+        x = self._encode_obs(x)
         logits = self.actor(x)
-
-        # Create categorical distribution
         probs = Categorical(logits=logits)
-
-        # Sample or use provided action
         if action is None:
             action = probs.sample()
-
-        # Compute log probability and entropy
         log_prob = probs.log_prob(action)
         entropy = probs.entropy()
-
-        # Get value estimate
         value = self.critic(x)
-
         return action, log_prob, entropy, value
 
 
@@ -234,10 +291,16 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
 
         # Create agent
         self.obs_dim = self.envs.obs_dim
+        include_reached = not self.args.moving_targets
         self.agent = SingleAgent(
             self.obs_dim,
+            num_targets=self.args.num_targets,
             actor_hidden_sizes=self.args.actor_hidden_sizes,
             critic_hidden_sizes=self.args.critic_hidden_sizes,
+            use_target_attention_pooling=self.args.use_target_attention_pooling,
+            target_embed_dim=self.args.target_embed_dim,
+            target_encoder_hidden_sizes=self.args.target_encoder_hidden_sizes,
+            include_target_reached=include_reached,
         ).to(self.device)
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
@@ -257,6 +320,10 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
         print(f"   Device: {self.device}")
         print(f"   Observation dim: {self.obs_dim} (expected: {expected_dim})")
         print(f"   Includes relative target counts (count - min_count) for fair pursuit")
+        print(f"   Target attention pooling: {self.args.use_target_attention_pooling}")
+        if self.args.use_target_attention_pooling:
+            print(f"   Target embed dim: {self.args.target_embed_dim}")
+            print(f"   Encoded obs dim: {self.agent.encoded_obs_dim}")
         print(f"   Batch size: {self.args.batch_size}")
         print(f"   Num iterations: {self.args.num_iterations}")
         print(f"   Run name: {self.run_name}")
