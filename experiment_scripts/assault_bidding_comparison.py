@@ -338,21 +338,32 @@ def run_dwn_baseline() -> None:
 # MAIN
 # ============================================================================
 
+def experiment_exists(exp_name: str) -> bool:
+    """Return True if a folder starting with exp_name already exists in BASE_LOG_DIR."""
+    base = os.path.join(os.path.dirname(__file__), '..', BASE_LOG_DIR)
+    if not os.path.isdir(base):
+        return False
+    return any(entry.startswith(exp_name) for entry in os.listdir(base))
+
+
 def main():
     experiments = [
-        ("Multi-agent PPO — all_pay",                  lambda: run_ppo_experiment("all_pay",                   "assault_cmp_all_pay")),
-        ("Multi-agent PPO — winner_pays",               lambda: run_ppo_experiment("winner_pays",               "assault_cmp_winner_pays")),
-        ("Multi-agent PPO — winner_pays_others_reward", lambda: run_ppo_experiment("winner_pays_others_reward", "assault_cmp_winner_pays_others_reward")),
-        ("Single-agent PPO baseline",                   run_single_agent_baseline),
-        ("DWN baseline",                                run_dwn_baseline),
+        ("Multi-agent PPO — all_pay",                  "assault_cmp_all_pay",                   lambda: run_ppo_experiment("all_pay",                   "assault_cmp_all_pay")),
+        ("Multi-agent PPO — winner_pays",               "assault_cmp_winner_pays",               lambda: run_ppo_experiment("winner_pays",               "assault_cmp_winner_pays")),
+        ("Multi-agent PPO — winner_pays_others_reward", "assault_cmp_winner_pays_others_reward", lambda: run_ppo_experiment("winner_pays_others_reward", "assault_cmp_winner_pays_others_reward")),
+        ("Single-agent PPO baseline",                   "assault_cmp_single_agent",              run_single_agent_baseline),
+        ("DWN baseline",                                "assault_cmp_dwn",                       run_dwn_baseline),
     ]
 
     total = len(experiments)
-    for idx, (label, run_fn) in enumerate(experiments, start=1):
+    for idx, (label, exp_name, run_fn) in enumerate(experiments, start=1):
         print()
         print("=" * 72)
         print(f"  EXPERIMENT {idx}/{total}: {label}")
         print("=" * 72)
+        if experiment_exists(exp_name):
+            print(f"  SKIPPING — folder for '{exp_name}' already exists in {BASE_LOG_DIR}")
+            continue
         run_fn()
 
     print()
