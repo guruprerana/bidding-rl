@@ -208,6 +208,7 @@ class AssaultEnv:
         state_list = []
         # Reward component tracking
         reward_components_list = []
+        bid_effect_list = []
 
         for env_idx, env in enumerate(self.envs):
             if cfg.single_agent_mode:
@@ -299,6 +300,7 @@ class AssaultEnv:
                 rewards = torch.tensor(reward, dtype=torch.float32)
             else:
                 rewards = torch.zeros((cfg.num_agents,), dtype=torch.float32)
+                bid_effect = torch.zeros((cfg.num_agents,), dtype=torch.float32)
                 winner = int(winning_agent[env_idx].item())
                 # Agent assigned to the hit row gets destroy reward regardless of who is controlling
                 if hit_agent >= 0 and hit_agent < cfg.num_agents:
@@ -311,18 +313,29 @@ class AssaultEnv:
                     bids_f = bids[env_idx].to(torch.float32)
 
                     if cfg.bidding_mechanism == "all_pay":
-                        rewards -= cfg.bid_penalty * bids_f
+                        eff = cfg.bid_penalty * bids_f
+                        rewards -= eff
+                        bid_effect -= eff
                     elif winner >= 0:
                         if cfg.bidding_mechanism == "winner_pays":
-                            rewards[winner] -= cfg.bid_penalty * float(bids_f[winner].item())
+                            eff = cfg.bid_penalty * float(bids_f[winner].item())
+                            rewards[winner] -= eff
+                            bid_effect[winner] -= eff
                         elif cfg.bidding_mechanism == "winner_pays_others_reward":
-                            rewards[winner] -= cfg.bid_penalty * float(bids_f[winner].item())
+                            win_eff = cfg.bid_penalty * float(bids_f[winner].item())
+                            rewards[winner] -= win_eff
+                            bid_effect[winner] -= win_eff
                             for agent_idx in range(cfg.num_agents):
                                 if agent_idx != winner:
-                                    rewards[agent_idx] += cfg.bid_penalty * float(bids_f[agent_idx].item())
+                                    other_eff = cfg.bid_penalty * float(bids_f[agent_idx].item())
+                                    rewards[agent_idx] += other_eff
+                                    bid_effect[agent_idx] += other_eff
 
                     if cfg.window_bidding and cfg.window_penalty > 0 and current_window_length[env_idx] > 0:
-                        rewards[winner] -= cfg.window_penalty * float(current_window_length[env_idx].item())
+                        win_pen = cfg.window_penalty * float(current_window_length[env_idx].item())
+                        rewards[winner] -= win_pen
+                        bid_effect[winner] -= win_pen
+                bid_effect_list.append(bid_effect)
 
             if terminated or truncated:
                 env.reset()
@@ -380,6 +393,8 @@ class AssaultEnv:
         if not cfg.single_agent_mode:
             info["bids"] = bids                                         # Tensor (num_envs, num_agents), CPU
             info["is_bidding_round"] = is_bidding_round.to(self.device)
+            bid_effects = torch.stack(bid_effect_list, dim=0).to(self.device)
+            info["reward_no_bid_sum"] = (rewards_t - bid_effects).sum(dim=1)
         return obs, rewards_t, terminated_t, truncated_t, info
 
     def close(self) -> None:
@@ -493,7 +508,7 @@ class AssaultEnv:
             if in_window[env_idx]:
                 winners[env_idx] = self.window_agent[env_idx]
                 continue
-            if max_bid[env_idx] <= 0:
+            if max_bid[env_idx] <= 0 and cfg.bid_upper_bound > 0:
                 continue
             candidates = torch.where(bids[env_idx] == max_bid[env_idx])[0]
             if candidates.numel() == 1:

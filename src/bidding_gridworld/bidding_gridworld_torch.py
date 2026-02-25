@@ -186,7 +186,7 @@ class BiddingGridworld:
                 )
 
             max_bid = bids.max(dim=1).values
-            has_bid = max_bid > 0
+            has_bid = (max_bid > 0) | (cfg.bid_upper_bound == 0)
             winners_mask = bids == max_bid.unsqueeze(1)
             rand = torch.rand(bids.shape, device=device, generator=self.gen)
             rand = torch.where(winners_mask, rand, torch.full_like(rand, -1.0))
@@ -283,12 +283,15 @@ class BiddingGridworld:
                 rewards = rewards - cfg.target_expiry_penalty * targets_expired.to(torch.float32).sum(dim=1)
         else:
             rewards = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.float32)
+            bid_net_effect = torch.zeros_like(rewards)
             if torch.any(apply_bid_penalty) and bids is not None:
                 bids_f = bids.to(torch.float32)
                 mask = apply_bid_penalty.unsqueeze(1).to(torch.float32)
 
                 if cfg.bidding_mechanism == "all_pay":
-                    rewards = rewards - mask * cfg.bid_penalty * bids_f
+                    effect = mask * cfg.bid_penalty * bids_f
+                    rewards = rewards - effect
+                    bid_net_effect = bid_net_effect - effect
                 else:
                     # Build winner mask: (num_envs, num_agents), 1.0 only at winning agent index
                     winner_mask = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.float32)
@@ -299,18 +302,24 @@ class BiddingGridworld:
                         winner_mask = winner_mask * valid_win.float().unsqueeze(1)
 
                     if cfg.bidding_mechanism == "winner_pays":
-                        rewards = rewards - mask * cfg.bid_penalty * winner_mask * bids_f
+                        effect = mask * cfg.bid_penalty * winner_mask * bids_f
+                        rewards = rewards - effect
+                        bid_net_effect = bid_net_effect - effect
                     elif cfg.bidding_mechanism == "winner_pays_others_reward":
                         others_mask = 1.0 - winner_mask
-                        rewards = rewards - mask * cfg.bid_penalty * winner_mask * bids_f
-                        rewards = rewards + mask * cfg.bid_penalty * others_mask * bids_f
+                        win_effect = mask * cfg.bid_penalty * winner_mask * bids_f
+                        other_effect = mask * cfg.bid_penalty * others_mask * bids_f
+                        rewards = rewards - win_effect + other_effect
+                        bid_net_effect = bid_net_effect - win_effect + other_effect
 
                 if cfg.window_bidding and cfg.window_penalty > 0:
                     penalty = cfg.window_penalty * current_window_length.to(torch.float32)
                     valid_win = winning_agent >= 0
                     if torch.any(valid_win):
                         idx = winning_agent.clamp(min=0).to(torch.int64).view(-1, 1)
-                        rewards = rewards.scatter_add(1, idx, (-penalty * valid_win.to(torch.float32)).view(-1, 1))
+                        pen_vec = (-penalty * valid_win.to(torch.float32)).view(-1, 1)
+                        rewards = rewards.scatter_add(1, idx, pen_vec)
+                        bid_net_effect = bid_net_effect.scatter_add(1, idx, pen_vec)
 
             if cfg.distance_reward_scale > 0:
                 dist_improve = (self.previous_distances - current_distances).to(torch.float32)
@@ -360,6 +369,7 @@ class BiddingGridworld:
             info["per_objective_rewards"] = per_obj
         else:
             info["is_bidding_round"] = ~in_window
+            info["reward_no_bid_sum"] = (rewards - bid_net_effect).sum(dim=1)
         return obs, rewards, terminated, truncated, info
 
     def _get_centralized_observation_tensor(self) -> torch.Tensor:

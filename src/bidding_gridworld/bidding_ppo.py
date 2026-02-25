@@ -485,6 +485,7 @@ class PPOTrainer(MultiAgentPPOTrainerBase):
         self._episode_bid_count = torch.zeros((), device=self.device, dtype=torch.int64)
         self._episode_bid_min = None
         self._episode_bid_max = None
+        self._episode_reward_no_bid_sum = torch.zeros((), device=self.device, dtype=torch.float32)
 
     def _on_rollout_step(self, infos, global_step: int):
         if not self.args.track or not isinstance(infos, dict):
@@ -509,6 +510,10 @@ class PPOTrainer(MultiAgentPPOTrainerBase):
             self._episode_bid_min = step_min if self._episode_bid_min is None else torch.minimum(self._episode_bid_min, step_min)
             self._episode_bid_max = step_max if self._episode_bid_max is None else torch.maximum(self._episode_bid_max, step_max)
 
+        reward_no_bid_sum = infos.get('reward_no_bid_sum', None)
+        if torch.is_tensor(reward_no_bid_sum):
+            self._episode_reward_no_bid_sum += reward_no_bid_sum.sum()
+
     def _extra_log_dict(self, global_step: int) -> dict:
         if not self._last_rollout_stats:
             return {}
@@ -530,6 +535,9 @@ class PPOTrainer(MultiAgentPPOTrainerBase):
             log_dict['bidding/avg_bid_value'] = (self._episode_bid_sum / self._episode_bid_count).item()
             log_dict['bidding/max_bid_value'] = self._episode_bid_max.item() if self._episode_bid_max is not None else 0.0
             log_dict['bidding/min_bid_value'] = self._episode_bid_min.item() if self._episode_bid_min is not None else 0.0
+        if self.args.track and hasattr(self, '_episode_reward_no_bid_sum'):
+            n = self.args.num_envs * self.args.num_steps * self.args.num_agents
+            log_dict['rewards/avg_step_reward_no_bid'] = (self._episode_reward_no_bid_sum / n).item()
         total_wins = int(self._episode_agent_wins.sum().item()) if self._episode_agent_wins is not None else 0
         if total_wins > 0:
             for agent_idx in range(self.args.num_agents):

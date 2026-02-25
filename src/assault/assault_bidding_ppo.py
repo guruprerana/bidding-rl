@@ -197,6 +197,30 @@ class AssaultPPOTrainer(MultiAgentPPOTrainerBase):
         else:
             print("   Actions per agent: 2 (direction + bid)")
 
+    def _on_iteration_start(self, iteration: int):
+        if not self.args.track:
+            return
+        self._episode_reward_no_bid_sum = torch.zeros((), device=self.device, dtype=torch.float32)
+
+    def _on_rollout_step(self, infos, global_step: int):
+        if not self.args.track or not isinstance(infos, dict):
+            return
+        reward_no_bid_sum = infos.get('reward_no_bid_sum', None)
+        if torch.is_tensor(reward_no_bid_sum):
+            self._episode_reward_no_bid_sum += reward_no_bid_sum.sum()
+
+    def _extra_log_dict(self, global_step: int) -> dict:
+        if not self._last_rollout_stats:
+            return {}
+        rewards = self._last_rollout_stats['rewards']
+        log_dict = {
+            'rewards/avg_step_reward': rewards.mean().item(),
+        }
+        if self.args.track and hasattr(self, '_episode_reward_no_bid_sum'):
+            n = self.args.num_envs * self.args.num_steps * self.args.num_agents
+            log_dict['rewards/avg_step_reward_no_bid'] = (self._episode_reward_no_bid_sum / n).item()
+        return log_dict
+
     def save_model(self, path: str | None = None):
         if path is None:
             path = "assault_agent.pt"
