@@ -180,9 +180,10 @@ def run_ppo_experiment(bid_penalty: float, exp_name: str) -> None:
 # PARALLEL EXECUTION
 # ============================================================================
 
-def _run_worker(label: str, run_fn, log_path: str) -> None:
+def _run_worker(label: str, run_fn, log_path: str, gpu_id: int = 0) -> None:
     """Subprocess entry point: redirects stdout/stderr to a log file and runs the experiment."""
     import traceback
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
     with open(log_path, "w", buffering=1) as f:
         sys.stdout = f
@@ -219,26 +220,29 @@ def main():
         for p in BID_PENALTIES
     ]
 
+    num_gpus = int(os.popen("nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l").read().strip() or 1)
+
     os.makedirs(BASE_LOG_DIR, exist_ok=True)
     ctx = multiprocessing.get_context("spawn")
 
     procs = []
-    for label, exp_name, run_fn in experiments:
+    for i, (label, exp_name, run_fn) in enumerate(experiments):
         log_path = os.path.join(BASE_LOG_DIR, f"{exp_name}.log")
-        p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path), name=exp_name)
-        procs.append((label, log_path, p))
+        gpu_id = i % num_gpus
+        p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path, gpu_id), name=exp_name)
+        procs.append((label, log_path, p, gpu_id))
 
     print()
     print("=" * 72)
-    print(f"  Launching {len(procs)} experiments in parallel")
+    print(f"  Launching {len(procs)} experiments in parallel across {num_gpus} GPU(s)")
     print("=" * 72)
-    for label, log_path, p in procs:
+    for label, log_path, p, gpu_id in procs:
         p.start()
-        print(f"  [PID {p.pid:>6}]  {label}")
+        print(f"  [PID {p.pid:>6}]  [GPU {gpu_id}]  {label}")
         print(f"              log → {log_path}")
     print()
 
-    for label, log_path, p in procs:
+    for label, log_path, p, gpu_id in procs:
         p.join()
 
     print()
@@ -246,7 +250,7 @@ def main():
     print("  Results")
     print("=" * 72)
     any_failed = False
-    for label, log_path, p in procs:
+    for label, log_path, p, gpu_id in procs:
         status = "COMPLETED" if p.exitcode == 0 else f"FAILED (exit {p.exitcode})"
         if p.exitcode != 0:
             any_failed = True
