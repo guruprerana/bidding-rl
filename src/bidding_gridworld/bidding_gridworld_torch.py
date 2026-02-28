@@ -1068,6 +1068,7 @@ def evaluate_multi_agent_policy(
 
     eval_stats = {
         "episode_returns": [],
+        "episode_returns_no_bid": [],
         "episode_lengths": [],
         "targets_reached_per_episode": [],
         "expired_targets_per_episode": [],
@@ -1086,6 +1087,7 @@ def evaluate_multi_agent_policy(
         episode_rewards = []
         episode_step_details = []
         episode_return = 0.0
+        episode_return_no_bid = 0.0
         step_count = 0
         terminated = False
         truncated = False
@@ -1124,6 +1126,10 @@ def evaluate_multi_agent_policy(
             rewards_dict = {f"agent_{i}": float(rewards_cpu[i]) for i in range(env.num_agents)}
             episode_return += float(rewards_cpu.sum())
             episode_rewards.append(rewards_dict)
+
+            reward_no_bid_sum = info.get("reward_no_bid_sum")
+            if isinstance(reward_no_bid_sum, torch.Tensor):
+                episode_return_no_bid += float(reward_no_bid_sum[0].item())
 
             if target_expiry_penalty > 0:
                 for reward in rewards_cpu:
@@ -1170,6 +1176,7 @@ def evaluate_multi_agent_policy(
         min_targets_reached = int(np.min(targets_reached_count))
 
         eval_stats["episode_returns"].append(episode_return)
+        eval_stats["episode_returns_no_bid"].append(episode_return_no_bid)
         eval_stats["episode_lengths"].append(step_count)
         eval_stats["targets_reached_per_episode"].append(targets_reached)
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
@@ -1192,6 +1199,7 @@ def evaluate_multi_agent_policy(
 
     if verbose:
         avg_return = np.mean(eval_stats["episode_returns"])
+        avg_return_no_bid = np.mean(eval_stats["episode_returns_no_bid"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
@@ -1201,6 +1209,7 @@ def evaluate_multi_agent_policy(
 
         print("\nEvaluation Summary:")
         print(f"  Average Return: {avg_return:.2f}")
+        print(f"  Average Return (no bid penalty): {avg_return_no_bid:.2f}")
         print(f"  Average Length: {avg_length:.1f}")
         print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
         print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")

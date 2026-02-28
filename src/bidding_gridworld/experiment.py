@@ -243,6 +243,7 @@ class PPOMovingTargetsExperiment:
 
         # Compute aggregate statistics
         avg_return = np.mean(eval_stats["episode_returns"])
+        avg_return_no_bid = np.mean(eval_stats["episode_returns_no_bid"]) if eval_stats.get("episode_returns_no_bid") else float("nan")
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
@@ -268,6 +269,7 @@ class PPOMovingTargetsExperiment:
         if trainer.args.track:
             wandb.log({
                 "eval/avg_return": avg_return,
+                "eval/avg_return_no_bid": avg_return_no_bid,
                 "eval/avg_length": avg_length,
                 "eval/avg_targets_reached": avg_targets,
                 "eval/avg_expired_targets": avg_expired,
@@ -285,6 +287,7 @@ class PPOMovingTargetsExperiment:
             "timestamp": datetime.now().isoformat(),
             "statistics": {
                 "avg_return": float(avg_return),
+                "avg_return_no_bid": float(avg_return_no_bid),
                 "avg_length": float(avg_length),
                 "avg_targets_reached": float(avg_targets),
                 "avg_expired_targets": float(avg_expired),
@@ -298,6 +301,7 @@ class PPOMovingTargetsExperiment:
             },
             "per_episode_data": {
                 "returns": [float(r) for r in eval_stats["episode_returns"]],
+                "returns_no_bid": [float(r) for r in eval_stats.get("episode_returns_no_bid", [])],
                 "lengths": [int(l) for l in eval_stats["episode_lengths"]],
                 "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],

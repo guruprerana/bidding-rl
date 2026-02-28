@@ -83,6 +83,8 @@ class SingleAgentArgs:
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
+    lr_min: float = 0.0
+    """Minimum learning rate floor when annealing (0.0 = anneal all the way to zero)"""
     gamma: float = 0.99
     """the discount factor gamma"""
     gae_lambda: float = 0.95

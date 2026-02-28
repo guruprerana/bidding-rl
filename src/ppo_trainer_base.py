@@ -103,8 +103,9 @@ class SingleAgentPPOTrainerBase(PPOTrainerBase):
             iteration_start = time.time()
             self._on_iteration_start(iteration)
             if args.anneal_lr:
+                lr_min = getattr(args, "lr_min", 0.0)
                 frac = 1.0 - (iteration - 1.0) / args.num_iterations
-                lrnow = frac * args.learning_rate
+                lrnow = lr_min + frac * (args.learning_rate - lr_min)
                 self.optimizer.param_groups[0]["lr"] = lrnow
 
             for step in range(args.num_steps):
@@ -231,8 +232,9 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
             iteration_start = time.time()
             self._on_iteration_start(iteration)
             if args.anneal_lr:
+                lr_min = getattr(args, "lr_min", 0.0)
                 frac = 1.0 - (iteration - 1.0) / args.num_iterations
-                lrnow = frac * args.learning_rate
+                lrnow = lr_min + frac * (args.learning_rate - lr_min)
                 self.optimizer.param_groups[0]["lr"] = lrnow
 
             for step in range(args.num_steps):
