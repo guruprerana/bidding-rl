@@ -508,7 +508,7 @@ class AssaultEnv:
             if in_window[env_idx]:
                 winners[env_idx] = self.window_agent[env_idx]
                 continue
-            if max_bid[env_idx] <= 0 and cfg.bid_upper_bound > 0:
+            if max_bid[env_idx] <= 0 and self.config.bid_upper_bound > 0:
                 continue
             candidates = torch.where(bids[env_idx] == max_bid[env_idx])[0]
             if candidates.numel() == 1:

@@ -278,6 +278,9 @@ class PPOMovingTargetsExperiment:
             }, step=global_step)
 
         # Save eval stats to local JSON file
+        reached_arr = np.array(eval_stats["targets_reached_count_per_episode"], dtype=float)
+        expired_arr = np.array(eval_stats["expired_count_per_target_per_episode"], dtype=float)
+        perf_arr    = reached_arr - expired_arr
         eval_summary = {
             "iteration": iteration,
             "global_step": global_step,
@@ -296,6 +299,11 @@ class PPOMovingTargetsExperiment:
                 "std_return": float(np.std(eval_stats["episode_returns"])),
                 "std_length": float(np.std(eval_stats["episode_lengths"])),
                 "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
+                "avg_avg_performance": float(np.mean(eval_stats["avg_performance_per_episode"])),
+                "avg_min_performance": float(np.mean(eval_stats["min_performance_per_episode"])),
+                "avg_reached_per_target": reached_arr.mean(axis=0).tolist(),
+                "avg_expired_per_target": expired_arr.mean(axis=0).tolist(),
+                "avg_performance_per_target": perf_arr.mean(axis=0).tolist(),
                 "avg_bid_counts": avg_bid_counts,
                 "avg_control_timesteps_per_agent": avg_control_steps_per_agent,
             },
@@ -306,6 +314,10 @@ class PPOMovingTargetsExperiment:
                 "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
                 "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
+                "avg_performance": [float(p) for p in eval_stats["avg_performance_per_episode"]],
+                "min_performance": [float(p) for p in eval_stats["min_performance_per_episode"]],
+                "expired_count_per_target": eval_stats["expired_count_per_target_per_episode"],
+                "targets_reached_count": eval_stats["targets_reached_count_per_episode"],
                 "bid_counts": [dict(sorted(bc.items())) for bc in all_bid_counts],
                 "control_steps_per_agent": all_control_steps,
             }
@@ -426,6 +438,9 @@ class PPOMovingTargetsExperiment:
             }, step=global_step)
 
         # Save eval stats to local JSON file
+        reached_arr = np.array(eval_stats["targets_reached_count_per_episode"], dtype=float)
+        expired_arr = np.array(eval_stats["expired_count_per_target_per_episode"], dtype=float)
+        perf_arr    = reached_arr - expired_arr
         eval_summary = {
             "iteration": iteration,
             "global_step": global_step,
@@ -443,6 +458,11 @@ class PPOMovingTargetsExperiment:
                 "std_return": float(np.std(eval_stats["episode_returns"])),
                 "std_length": float(np.std(eval_stats["episode_lengths"])),
                 "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
+                "avg_avg_performance": float(np.mean(eval_stats["avg_performance_per_episode"])),
+                "avg_min_performance": float(np.mean(eval_stats["min_performance_per_episode"])),
+                "avg_reached_per_target": reached_arr.mean(axis=0).tolist(),
+                "avg_expired_per_target": expired_arr.mean(axis=0).tolist(),
+                "avg_performance_per_target": perf_arr.mean(axis=0).tolist(),
             },
             "per_episode_data": {
                 "returns": [float(r) for r in eval_stats["episode_returns"]],
@@ -450,6 +470,10 @@ class PPOMovingTargetsExperiment:
                 "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
                 "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
+                "avg_performance": [float(p) for p in eval_stats["avg_performance_per_episode"]],
+                "min_performance": [float(p) for p in eval_stats["min_performance_per_episode"]],
+                "expired_count_per_target": eval_stats["expired_count_per_target_per_episode"],
+                "targets_reached_count": eval_stats["targets_reached_count_per_episode"],
             }
         }
 

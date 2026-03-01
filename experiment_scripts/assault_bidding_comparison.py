@@ -2,7 +2,7 @@
 """
 Assault Bidding Mechanism Comparison Experiment
 
-Runs 5 sequential experiments to compare bidding mechanisms and baselines
+Runs 5 experiments in parallel to compare bidding mechanisms and baselines
 in the OCAtari Assault environment:
   1. Multi-agent PPO — all_pay
   2. Multi-agent PPO — winner_pays
@@ -11,8 +11,12 @@ in the OCAtari Assault environment:
   5. DWN baseline
 
 All configuration is at the top of this file.
+Each experiment runs in its own subprocess (required for separate CUDA contexts).
+Per-experiment output is written to BASE_LOG_DIR/<exp_name>.log.
 """
 
+import functools
+import multiprocessing
 import os
 import sys
 
@@ -79,7 +83,7 @@ ANNEAL_LR = True
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 NORM_ADV = True
-CLIP_COEF = 0.2
+CLIP_COEF = 0.05
 CLIP_VLOSS = True
 ENT_COEF = 0.05
 VF_COEF = 0.5
@@ -93,11 +97,14 @@ CRITIC_HIDDEN_SIZES = (256, 256, 256, 256)
 
 # Eval / logging
 EVAL_FREQ = 10         # eval every 10 iterations (~6.7% of 150)
-CHECKPOINT_FREQ = 50   # save every 50 iterations
+CHECKPOINT_FREQ = 10   # save every 50 iterations
 NUM_EVAL_EPISODES = 5
 NUM_VIDEO_EPISODES = 0
 VIDEO_FREQ = 0
 LOG_VIDEOS_TO_WANDB = False
+
+# Set to True to skip single-agent PPO and DWN baselines
+MULTI_AGENT_ONLY = True
 
 # ============================================================================
 # SINGLE-AGENT BASELINE CONFIG
@@ -106,6 +113,15 @@ LOG_VIDEOS_TO_WANDB = False
 # 150 × 128 × 512 × 3 = 450 × 128 × 512 → same total env steps
 SINGLE_AGENT_ITERATIONS = 450
 SINGLE_AGENT_EVAL_FREQ = 30  # 450 * ~6.7% ≈ 30 iterations
+
+# These differ from the multi-agent PPO config above
+SINGLE_AGENT_LEARNING_RATE = 2.5e-4
+SINGLE_AGENT_NUM_STEPS = 128
+SINGLE_AGENT_NUM_MINIBATCHES = 4
+SINGLE_AGENT_UPDATE_EPOCHS = 4
+SINGLE_AGENT_CLIP_COEF = 0.1
+SINGLE_AGENT_ENT_COEF = 0.01
+SINGLE_AGENT_TARGET_KL = None
 
 # ============================================================================
 # DWN BASELINE CONFIG  (matches train_assault_dwn.py exactly)
@@ -239,21 +255,21 @@ def run_single_agent_baseline() -> None:
 
         # Training
         num_iterations=SINGLE_AGENT_ITERATIONS,
-        learning_rate=LEARNING_RATE,
+        learning_rate=SINGLE_AGENT_LEARNING_RATE,
         num_envs=NUM_ENVS,
-        num_steps=NUM_STEPS,
-        num_minibatches=NUM_MINIBATCHES,
-        update_epochs=UPDATE_EPOCHS,
+        num_steps=SINGLE_AGENT_NUM_STEPS,
+        num_minibatches=SINGLE_AGENT_NUM_MINIBATCHES,
+        update_epochs=SINGLE_AGENT_UPDATE_EPOCHS,
         anneal_lr=ANNEAL_LR,
         gamma=GAMMA,
         gae_lambda=GAE_LAMBDA,
         norm_adv=NORM_ADV,
-        clip_coef=CLIP_COEF,
+        clip_coef=SINGLE_AGENT_CLIP_COEF,
         clip_vloss=CLIP_VLOSS,
-        ent_coef=ENT_COEF,
+        ent_coef=SINGLE_AGENT_ENT_COEF,
         vf_coef=VF_COEF,
         max_grad_norm=MAX_GRAD_NORM,
-        target_kl=TARGET_KL,
+        target_kl=SINGLE_AGENT_TARGET_KL,
     )
     experiment = AssaultExperiment(
         base_log_dir=BASE_LOG_DIR,
@@ -335,6 +351,31 @@ def run_dwn_baseline() -> None:
 
 
 # ============================================================================
+# PARALLEL EXECUTION
+# ============================================================================
+
+def _run_worker(label: str, run_fn, log_path: str, gpu_id: int) -> None:
+    """Subprocess entry point: pins to a GPU, redirects stdout/stderr, and runs the experiment."""
+    import traceback
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+    with open(log_path, "w", buffering=1) as f:
+        sys.stdout = f
+        sys.stderr = f
+        print(f"{'=' * 72}")
+        print(f"  {label}")
+        print(f"{'=' * 72}")
+        try:
+            run_fn()
+            print(f"\nEXPERIMENT COMPLETED: {label}")
+        except Exception as e:
+            print(f"\nEXPERIMENT FAILED: {label}")
+            print(f"Error: {e}")
+            traceback.print_exc()
+            raise
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -347,29 +388,64 @@ def experiment_exists(exp_name: str) -> bool:
 
 
 def main():
-    experiments = [
-        ("Multi-agent PPO — all_pay",                  "assault_cmp_all_pay",                   lambda: run_ppo_experiment("all_pay",                   "assault_cmp_all_pay")),
-        ("Multi-agent PPO — winner_pays",               "assault_cmp_winner_pays",               lambda: run_ppo_experiment("winner_pays",               "assault_cmp_winner_pays")),
-        ("Multi-agent PPO — winner_pays_others_reward", "assault_cmp_winner_pays_others_reward", lambda: run_ppo_experiment("winner_pays_others_reward", "assault_cmp_winner_pays_others_reward")),
+    multi_agent_experiments = [
+        ("Multi-agent PPO — all_pay",                  "assault_cmp_all_pay",                   functools.partial(run_ppo_experiment, "all_pay",                   "assault_cmp_all_pay")),
+        ("Multi-agent PPO — winner_pays",               "assault_cmp_winner_pays",               functools.partial(run_ppo_experiment, "winner_pays",               "assault_cmp_winner_pays")),
+        ("Multi-agent PPO — winner_pays_others_reward", "assault_cmp_winner_pays_others_reward", functools.partial(run_ppo_experiment, "winner_pays_others_reward",  "assault_cmp_winner_pays_others_reward")),
+    ]
+    baseline_experiments = [
         ("Single-agent PPO baseline",                   "assault_cmp_single_agent",              run_single_agent_baseline),
         ("DWN baseline",                                "assault_cmp_dwn",                       run_dwn_baseline),
     ]
 
-    total = len(experiments)
-    for idx, (label, exp_name, run_fn) in enumerate(experiments, start=1):
-        print()
-        print("=" * 72)
-        print(f"  EXPERIMENT {idx}/{total}: {label}")
-        print("=" * 72)
-        if experiment_exists(exp_name):
-            print(f"  SKIPPING — folder for '{exp_name}' already exists in {BASE_LOG_DIR}")
-            continue
-        run_fn()
+    experiments = multi_agent_experiments if MULTI_AGENT_ONLY else multi_agent_experiments + baseline_experiments
+
+    # Skip experiments whose output folder already exists
+    experiments = [(label, exp_name, run_fn) for label, exp_name, run_fn in experiments if not experiment_exists(exp_name)]
+
+    if not experiments:
+        print("All experiments already exist — nothing to run.")
+        return
+
+    os.makedirs(BASE_LOG_DIR, exist_ok=True)
+    ctx = multiprocessing.get_context("spawn")
+
+    procs = []
+    for gpu_id, (label, exp_name, run_fn) in enumerate(experiments):
+        log_path = os.path.join(BASE_LOG_DIR, f"{exp_name}.log")
+        p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path, gpu_id), name=exp_name)
+        procs.append((label, log_path, p, gpu_id))
 
     print()
     print("=" * 72)
-    print("  All experiments complete.")
+    print(f"  Launching {len(procs)} experiments in parallel (one per GPU)")
+    if MULTI_AGENT_ONLY:
+        print("  (baselines skipped — MULTI_AGENT_ONLY=True)")
     print("=" * 72)
+    for label, log_path, p, gpu_id in procs:
+        p.start()
+        print(f"  [PID {p.pid:>6}]  GPU {gpu_id}  {label}")
+        print(f"              log → {log_path}")
+    print()
+
+    for label, log_path, p, gpu_id in procs:
+        p.join()
+
+    print()
+    print("=" * 72)
+    print("  Results")
+    print("=" * 72)
+    any_failed = False
+    for label, log_path, p, gpu_id in procs:
+        status = "COMPLETED" if p.exitcode == 0 else f"FAILED (exit {p.exitcode})"
+        if p.exitcode != 0:
+            any_failed = True
+        print(f"  {status:<30}  {label}")
+        print(f"  {'':30}  log → {log_path}")
+    print()
+
+    if any_failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

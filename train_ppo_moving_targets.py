@@ -39,22 +39,22 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_10moving_targets_emb_exp1"  # Leave empty for default name with timestamp
-    CHECKPOINT_FREQ = 100  # Save checkpoint every N iterations
-    EVAL_FREQ = 20  # Evaluate every N iterations
+    EXPERIMENT_NAME = "ppo_8moving_targets_singleppo_defaults"  # Leave empty for default name with timestamp
+    CHECKPOINT_FREQ = 80  # Save checkpoint every N iterations
+    EVAL_FREQ = 40  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
-    NUM_VIDEO_EPISODES = 1  # Number of episodes to save as MP4s
-    VIDEO_FREQ = 100  # Save video rollouts every N iterations (0 = use eval freq)
+    NUM_VIDEO_EPISODES = 0  # Number of episodes to save as MP4s
+    VIDEO_FREQ = 0  # Save video rollouts every N iterations (0 = use eval freq)
     EVAL_NUM_AGENTS = 10  # Multi-agent only: override number of agents/targets during eval (requires attention pooling)
     EVAL_NUM_TARGETS = None  # Single-agent only: override number of targets during eval (fixed obs; keep None)
 
     # Environment parameters
     GRID_SIZE = 30
-    NUM_AGENTS = 6  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    NUM_AGENTS = 8  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 50.0
     MAX_STEPS = 2000  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
@@ -77,7 +77,7 @@ def main():
     TARGET_MOVE_INTERVAL = 5
 
     # Training parameters
-    NUM_ITERATIONS = 400
+    NUM_ITERATIONS = 3200
     LEARNING_RATE = 2.5e-4
     NUM_ENVS = 4096
     NUM_STEPS = 256
@@ -87,10 +87,10 @@ def main():
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
     NORM_ADV = True
-    CLIP_COEF = 0.3
-    CLIP_VLOSS = False
+    CLIP_COEF = 0.1
+    CLIP_VLOSS = True
     ENT_COEF = 0.03
-    VF_COEF = 1.0
+    VF_COEF = 0.5
     MAX_GRAD_NORM = 0.5
     TARGET_KL = None
     SEED = 1

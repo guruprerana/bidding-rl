@@ -364,6 +364,7 @@ class BiddingGridworld:
             "window_steps_remaining": self.window_steps_remaining,
             "bid_penalty_applied": apply_bid_penalty,
             "targets_just_reached": targets_just_reached,
+            "targets_just_expired": targets_expired,
         }
         if cfg.single_agent_mode:
             info["per_objective_rewards"] = per_obj
@@ -1077,6 +1078,13 @@ def evaluate_multi_agent_policy(
         "episode_data_list": [],
         "bid_counts_per_episode": [],
         "control_steps_per_agent_per_episode": [],
+        "expired_count_per_target_per_episode": [],
+        "avg_expired_per_episode": [],
+        "max_expired_per_episode": [],
+        "avg_reached_per_episode": [],
+        "performance_per_episode": [],
+        "avg_performance_per_episode": [],
+        "min_performance_per_episode": [],
     }
 
     for episode_idx in range(num_episodes):
@@ -1092,8 +1100,8 @@ def evaluate_multi_agent_policy(
         terminated = False
         truncated = False
 
-        episode_expired_count = 0
         targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)
+        expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
         bid_counts: dict = {}
         control_steps = np.zeros(env.num_agents, dtype=np.int32)
 
@@ -1131,10 +1139,10 @@ def evaluate_multi_agent_policy(
             if isinstance(reward_no_bid_sum, torch.Tensor):
                 episode_return_no_bid += float(reward_no_bid_sum[0].item())
 
-            if target_expiry_penalty > 0:
-                for reward in rewards_cpu:
-                    if reward <= -target_expiry_penalty:
-                        episode_expired_count += 1
+            tje = info.get("targets_just_expired")
+            if isinstance(tje, torch.Tensor):
+                just_expired = tje[0].detach().cpu().numpy().astype(bool)
+                expired_targets_count += just_expired.astype(int)
 
             targets_just_reached = info.get("targets_just_reached")
             if isinstance(targets_just_reached, torch.Tensor):
@@ -1174,6 +1182,8 @@ def evaluate_multi_agent_policy(
 
         targets_reached = sum(1 for count in targets_reached_count if count > 0)
         min_targets_reached = int(np.min(targets_reached_count))
+        episode_expired_count = int(expired_targets_count.sum())
+        performance = targets_reached_count - expired_targets_count
 
         eval_stats["episode_returns"].append(episode_return)
         eval_stats["episode_returns_no_bid"].append(episode_return_no_bid)
@@ -1184,6 +1194,13 @@ def evaluate_multi_agent_policy(
         eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
         eval_stats["bid_counts_per_episode"].append(bid_counts)
         eval_stats["control_steps_per_agent_per_episode"].append(control_steps.tolist())
+        eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
+        eval_stats["avg_expired_per_episode"].append(float(np.mean(expired_targets_count)))
+        eval_stats["max_expired_per_episode"].append(float(np.max(expired_targets_count)))
+        eval_stats["avg_reached_per_episode"].append(float(np.mean(targets_reached_count)))
+        eval_stats["performance_per_episode"].append(performance.tolist())
+        eval_stats["avg_performance_per_episode"].append(float(np.mean(performance)))
+        eval_stats["min_performance_per_episode"].append(float(np.min(performance)))
 
         eval_stats["episode_data_list"].append({
             "states": episode_states,
@@ -1195,7 +1212,8 @@ def evaluate_multi_agent_policy(
         if verbose:
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
                   f"Length={step_count}, Targets={targets_reached}/{env.num_agents}, "
-                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
+                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}, "
+                  f"AvgPerf={float(np.mean(performance)):.2f}")
 
     if verbose:
         avg_return = np.mean(eval_stats["episode_returns"])
@@ -1204,6 +1222,8 @@ def evaluate_multi_agent_policy(
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
+        avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
+        avg_min_perf = np.mean(eval_stats["min_performance_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
                           if t == env.num_agents) / num_episodes
 
@@ -1214,6 +1234,8 @@ def evaluate_multi_agent_policy(
         print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
         print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
+        print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
+        print(f"  Avg Min Performance: {avg_min_perf:.2f}")
         print(f"  Success Rate: {success_rate*100:.1f}%\n")
 
     return eval_stats
@@ -1250,6 +1272,13 @@ def evaluate_single_agent_policy(
         "min_targets_reached_per_episode": [],
         "targets_reached_count_per_episode": [],
         "episode_data_list": [],
+        "expired_count_per_target_per_episode": [],
+        "avg_expired_per_episode": [],
+        "max_expired_per_episode": [],
+        "avg_reached_per_episode": [],
+        "performance_per_episode": [],
+        "avg_performance_per_episode": [],
+        "min_performance_per_episode": [],
     }
 
     for episode_idx in range(num_episodes):
@@ -1263,8 +1292,8 @@ def evaluate_single_agent_policy(
         terminated = False
         truncated = False
 
-        episode_expired_count = 0
         targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)
+        expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
 
         while not (terminated or truncated):
             episode_states.append(env._get_centralized_observation()[0].copy())
@@ -1288,8 +1317,10 @@ def evaluate_single_agent_policy(
             episode_return += reward_val
             episode_rewards.append(reward_val)
 
-            if target_expiry_penalty > 0 and reward_val <= -target_expiry_penalty:
-                episode_expired_count += 1
+            tje = info.get("targets_just_expired")
+            if isinstance(tje, torch.Tensor):
+                just_expired = tje[0].detach().cpu().numpy().astype(bool)
+                expired_targets_count += just_expired.astype(int)
 
             targets_just_reached = info.get("targets_just_reached")
             if isinstance(targets_just_reached, torch.Tensor):
@@ -1302,6 +1333,8 @@ def evaluate_single_agent_policy(
 
         targets_reached = sum(1 for count in targets_reached_count if count > 0)
         min_targets_reached = int(np.min(targets_reached_count))
+        episode_expired_count = int(expired_targets_count.sum())
+        performance = targets_reached_count - expired_targets_count
 
         eval_stats["episode_returns"].append(episode_return)
         eval_stats["episode_lengths"].append(step_count)
@@ -1309,6 +1342,13 @@ def evaluate_single_agent_policy(
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
         eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
         eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
+        eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
+        eval_stats["avg_expired_per_episode"].append(float(np.mean(expired_targets_count)))
+        eval_stats["max_expired_per_episode"].append(float(np.max(expired_targets_count)))
+        eval_stats["avg_reached_per_episode"].append(float(np.mean(targets_reached_count)))
+        eval_stats["performance_per_episode"].append(performance.tolist())
+        eval_stats["avg_performance_per_episode"].append(float(np.mean(performance)))
+        eval_stats["min_performance_per_episode"].append(float(np.min(performance)))
 
         eval_stats["episode_data_list"].append({
             "states": episode_states,
@@ -1319,7 +1359,8 @@ def evaluate_single_agent_policy(
         if verbose:
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
                   f"Length={step_count}, Targets={targets_reached}/{env.num_agents}, "
-                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}")
+                  f"Expired={episode_expired_count}, MinReached={min_targets_reached}, "
+                  f"AvgPerf={float(np.mean(performance)):.2f}")
 
     if verbose:
         avg_return = np.mean(eval_stats["episode_returns"])
@@ -1327,6 +1368,8 @@ def evaluate_single_agent_policy(
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
+        avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
+        avg_min_perf = np.mean(eval_stats["min_performance_per_episode"])
         success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
                           if t == env.num_agents) / num_episodes
 
@@ -1336,6 +1379,8 @@ def evaluate_single_agent_policy(
         print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
         print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
+        print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
+        print(f"  Avg Min Performance: {avg_min_perf:.2f}")
         print(f"  Success Rate: {success_rate*100:.1f}%\n")
 
     return eval_stats

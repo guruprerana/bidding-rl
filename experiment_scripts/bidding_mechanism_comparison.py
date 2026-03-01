@@ -73,7 +73,7 @@ ANNEAL_LR = True
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 NORM_ADV = True
-CLIP_COEF = 0.3
+CLIP_COEF = 0.05
 CLIP_VLOSS = False
 ENT_COEF = 0.03
 VF_COEF = 1.0
@@ -90,7 +90,7 @@ TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 
 # Eval / logging
 EVAL_NUM_AGENTS = None  # None = use NUM_AGENTS (keeps PPO eval comparable to DWN, which has no variable-agent support)
-CHECKPOINT_FREQ = 100  # Save every 100 iterations
+CHECKPOINT_FREQ = 10  # Save every 10 iterations
 EVAL_FREQ = 10         # Eval every 10 iterations (2.5% of 400)
 NUM_EVAL_EPISODES = 20
 NUM_VIDEO_EPISODES = 0
@@ -101,6 +101,9 @@ WANDB_PROJECT = "bidding-rl"
 WANDB_ENTITY = None
 TRACK = True
 
+# Set to True to skip single-agent PPO and DWN baselines
+MULTI_AGENT_ONLY = True
+
 # ============================================================================
 # SINGLE-AGENT BASELINE CONFIG
 # ============================================================================
@@ -110,6 +113,11 @@ NUM_SINGLE_AGENT_ITERATIONS = 3200
 REWARD_DECAY_FACTOR = 0.0
 # Eval every 160 iters → same 5% cadence as multi-agent (160/3200 = 10/400)
 SINGLE_AGENT_EVAL_FREQ = 160
+
+# These differ from the multi-agent PPO config above
+SINGLE_AGENT_CLIP_COEF = 0.1
+SINGLE_AGENT_CLIP_VLOSS = True
+SINGLE_AGENT_VF_COEF = 0.5
 
 # ============================================================================
 # DWN BASELINE CONFIG
@@ -260,10 +268,10 @@ def run_single_agent_baseline() -> None:
         gamma=GAMMA,
         gae_lambda=GAE_LAMBDA,
         norm_adv=NORM_ADV,
-        clip_coef=CLIP_COEF,
-        clip_vloss=CLIP_VLOSS,
+        clip_coef=SINGLE_AGENT_CLIP_COEF,
+        clip_vloss=SINGLE_AGENT_CLIP_VLOSS,
         ent_coef=ENT_COEF,
-        vf_coef=VF_COEF,
+        vf_coef=SINGLE_AGENT_VF_COEF,
         max_grad_norm=MAX_GRAD_NORM,
         target_kl=TARGET_KL,
 
@@ -359,9 +367,10 @@ def run_dwn_baseline() -> None:
 # PARALLEL EXECUTION
 # ============================================================================
 
-def _run_worker(label: str, run_fn, log_path: str) -> None:
-    """Subprocess entry point: redirects stdout/stderr to a log file and runs the experiment."""
+def _run_worker(label: str, run_fn, log_path: str, gpu_id: int) -> None:
+    """Subprocess entry point: pins to a GPU, redirects stdout/stderr, and runs the experiment."""
     import traceback
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
     with open(log_path, "w", buffering=1) as f:
         sys.stdout = f
@@ -384,34 +393,40 @@ def _run_worker(label: str, run_fn, log_path: str) -> None:
 # ============================================================================
 
 def main():
-    experiments = [
+    multi_agent_experiments = [
         ("Multi-agent PPO — all_pay",                  "bidding_cmp_all_pay",                   functools.partial(run_ppo_experiment, "all_pay",                   "bidding_cmp_all_pay")),
         ("Multi-agent PPO — winner_pays",               "bidding_cmp_winner_pays",               functools.partial(run_ppo_experiment, "winner_pays",               "bidding_cmp_winner_pays")),
         ("Multi-agent PPO — winner_pays_others_reward", "bidding_cmp_winner_pays_others_reward", functools.partial(run_ppo_experiment, "winner_pays_others_reward",  "bidding_cmp_winner_pays_others_reward")),
+    ]
+    baseline_experiments = [
         ("Single-agent PPO baseline",                   "bidding_cmp_single_agent",              run_single_agent_baseline),
         ("DWN baseline",                                "bidding_cmp_dwn",                       run_dwn_baseline),
     ]
+
+    experiments = multi_agent_experiments if MULTI_AGENT_ONLY else multi_agent_experiments + baseline_experiments
 
     os.makedirs(BASE_LOG_DIR, exist_ok=True)
     ctx = multiprocessing.get_context("spawn")
 
     procs = []
-    for label, exp_name, run_fn in experiments:
+    for gpu_id, (label, exp_name, run_fn) in enumerate(experiments):
         log_path = os.path.join(BASE_LOG_DIR, f"{exp_name}.log")
-        p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path), name=exp_name)
-        procs.append((label, log_path, p))
+        p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path, gpu_id), name=exp_name)
+        procs.append((label, log_path, p, gpu_id))
 
     print()
     print("=" * 72)
-    print(f"  Launching {len(procs)} experiments in parallel")
+    print(f"  Launching {len(procs)} experiments in parallel (one per GPU)")
+    if MULTI_AGENT_ONLY:
+        print("  (baselines skipped — MULTI_AGENT_ONLY=True)")
     print("=" * 72)
-    for label, log_path, p in procs:
+    for label, log_path, p, gpu_id in procs:
         p.start()
-        print(f"  [PID {p.pid:>6}]  {label}")
+        print(f"  [PID {p.pid:>6}]  GPU {gpu_id}  {label}")
         print(f"              log → {log_path}")
     print()
 
-    for label, log_path, p in procs:
+    for label, log_path, p, gpu_id in procs:
         p.join()
 
     print()
@@ -419,7 +434,7 @@ def main():
     print("  Results")
     print("=" * 72)
     any_failed = False
-    for label, log_path, p in procs:
+    for label, log_path, p, gpu_id in procs:
         status = "COMPLETED" if p.exitcode == 0 else f"FAILED (exit {p.exitcode})"
         if p.exitcode != 0:
             any_failed = True

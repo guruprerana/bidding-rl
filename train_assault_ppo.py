@@ -21,12 +21,12 @@ def main():
     SINGLE_AGENT_MODE = True
 
     # Experiment settings
-    EXPERIMENT_NAME = "assault_ppo_single_agent_exp1"
-    CHECKPOINT_FREQ = 20
-    EVAL_FREQ = 10
+    EXPERIMENT_NAME = "assault_ppo_single_agent_ppo_default_params"
+    CHECKPOINT_FREQ = 60
+    EVAL_FREQ = 30
     VIDEO_FREQ = 0  # Save videos every N iterations (0 = same as EVAL_FREQ)
     NUM_EVAL_EPISODES = 5
-    NUM_VIDEO_EPISODES = 3  # Number of episodes to save as videos
+    NUM_VIDEO_EPISODES = 0  # Number of episodes to save as videos
     LOG_VIDEOS_TO_WANDB = False  # Upload videos to wandb
     RENDER_OC_OVERLAY = False  # Draw object detection bounding boxes
 
@@ -39,10 +39,10 @@ def main():
     ALLOW_SIDEWARD_FIRE = True  # Enable RIGHTFIRE and LEFTFIRE to destroy horizontal enemy missiles
 
     # Reward coefficients
-    ENEMY_DESTROY_REWARD = 0.0   # Reward for destroying an enemy (based on visibility)
+    ENEMY_DESTROY_REWARD = 10.0  # Reward for destroying an enemy (based on visibility)
     OVERHEAT_PENALTY = 0.0       # Penalty when temperature bar turns red (strong warning)
     LIFE_LOSS_PENALTY = 10.0     # Penalty for losing a life (make death very costly)
-    RAW_SCORE_SCALE = 0.5 # 4       # Scale for raw Atari score (21 pts × 0.04 = 0.84) --- only for single-agent mode
+    RAW_SCORE_SCALE = 0.0        # Scale for raw Atari score --- only for single-agent mode
     FIRE_WHILE_HOT_PENALTY = 8.0 # Penalty for firing when health bar is red
 
     # Bidding settings (multi-agent mode only)
@@ -54,22 +54,22 @@ def main():
     BIDDING_MECHANISM = "all_pay"  # "all_pay" | "winner_pays" | "winner_pays_others_reward"
 
     # Training settings
-    NUM_ITERATIONS = 80
-    LEARNING_RATE = 1e-4
-    NUM_ENVS = 128
-    NUM_STEPS = 512
-    NUM_MINIBATCHES = 8
-    UPDATE_EPOCHS = 8
+    NUM_ITERATIONS = 7200
+    LEARNING_RATE = 2.5e-4
+    NUM_ENVS = 8
+    NUM_STEPS = 128
+    NUM_MINIBATCHES = 4
+    UPDATE_EPOCHS = 4
     ANNEAL_LR = True
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
     NORM_ADV = True
-    CLIP_COEF = 0.2
+    CLIP_COEF = 0.1
     CLIP_VLOSS = True
-    ENT_COEF = 0.05
+    ENT_COEF = 0.01
     VF_COEF = 0.5
     MAX_GRAD_NORM = 0.5
-    TARGET_KL = 0.02
+    TARGET_KL = None
 
     # Network
     ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)
