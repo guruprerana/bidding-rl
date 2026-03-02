@@ -43,7 +43,7 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_8moving_targets_singleppo_defaults"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_8moving_targets_singleppo_defaults_noattention"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 80  # Save checkpoint every N iterations
     EVAL_FREQ = 40  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
@@ -58,7 +58,7 @@ def main():
     TARGET_REWARD = 50.0
     MAX_STEPS = 2000  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
-    DISTANCE_REWARD_SCALE = 0.6
+    DISTANCE_REWARD_SCALE = 0.0
     TARGET_EXPIRY_STEPS = 200
     TARGET_EXPIRY_PENALTY = 50.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
@@ -97,7 +97,7 @@ def main():
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
-    USE_TARGET_ATTENTION_POOLING = True
+    USE_TARGET_ATTENTION_POOLING = False
     TARGET_EMBED_DIM = 64
     TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 
