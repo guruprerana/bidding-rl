@@ -38,6 +38,7 @@ class AssaultConfig:
     allow_sideward_fire: bool = True  # If False, disables RIGHTFIRE and LEFTFIRE actions
     bidding_mechanism: str = "all_pay"
     # "all_pay" | "winner_pays" | "winner_pays_others_reward"
+    only_own_enemy: bool = False
 
 
 class AssaultEnv:
@@ -121,7 +122,12 @@ class AssaultEnv:
             self.per_agent_obs_dim = None
         else:
             # Add per-agent control flag to observation
-            self.per_agent_obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim + self._per_agent_dim
+            visible_enemy_count = 1 if config.only_own_enemy else config.max_enemies
+            self.per_agent_obs_dim = (
+                self._global_obs_dim
+                + visible_enemy_count * self._per_enemy_dim
+                + self._per_agent_dim
+            )
             self.obs_dim = None
             self.obs_shape = (num_envs, config.num_agents, self.per_agent_obs_dim)
 
@@ -691,13 +697,6 @@ class AssaultEnv:
         is_bidding_step = 1.0 if self.window_steps_remaining[env_idx].item() == 0 else 0.0
         for agent_id in range(cfg.num_agents):
             target_enemy = state["enemy_features"][agent_id]
-            other_enemies = torch.cat(
-                [
-                    state["enemy_features"][:agent_id],
-                    state["enemy_features"][agent_id + 1:],
-                ],
-                dim=0,
-            ).reshape(-1)
             # Per-agent features:
             # - is_in_control: is this agent currently controlling the action?
             # - is_bidding_step: are bids evaluated this step? (shared, but included per-agent for convenience)
@@ -708,6 +707,16 @@ class AssaultEnv:
                 ],
                 dtype=torch.float32,
             )
-            per_agent_obs.append(torch.cat([global_features, target_enemy, other_enemies, agent_features], dim=0))
+            if cfg.only_own_enemy:
+                per_agent_obs.append(torch.cat([global_features, target_enemy, agent_features], dim=0))
+            else:
+                other_enemies = torch.cat(
+                    [
+                        state["enemy_features"][:agent_id],
+                        state["enemy_features"][agent_id + 1:],
+                    ],
+                    dim=0,
+                ).reshape(-1)
+                per_agent_obs.append(torch.cat([global_features, target_enemy, other_enemies, agent_features], dim=0))
         return torch.stack(per_agent_obs, dim=0)
 

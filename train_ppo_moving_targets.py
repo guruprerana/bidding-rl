@@ -39,17 +39,17 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_8moving_targets_singleppo_defaults_noattention"  # Leave empty for default name with timestamp
-    CHECKPOINT_FREQ = 80  # Save checkpoint every N iterations
-    EVAL_FREQ = 40  # Evaluate every N iterations
+    EXPERIMENT_NAME = "ppo_multiagentppo_onlyselfvisible"  # Leave empty for default name with timestamp
+    CHECKPOINT_FREQ = 10  # Save checkpoint every N iterations
+    EVAL_FREQ = 10  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
     NUM_VIDEO_EPISODES = 0  # Number of episodes to save as MP4s
     VIDEO_FREQ = 0  # Save video rollouts every N iterations (0 = use eval freq)
-    EVAL_NUM_AGENTS = 10  # Multi-agent only: override number of agents/targets during eval (requires attention pooling)
+    EVAL_NUM_AGENTS = None  # Multi-agent only: override number of agents/targets during eval (requires attention pooling)
     EVAL_NUM_TARGETS = None  # Single-agent only: override number of targets during eval (fixed obs; keep None)
 
     # Environment parameters
@@ -58,7 +58,7 @@ def main():
     TARGET_REWARD = 50.0
     MAX_STEPS = 2000  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
-    DISTANCE_REWARD_SCALE = 0.0
+    DISTANCE_REWARD_SCALE = 0.6
     TARGET_EXPIRY_STEPS = 200
     TARGET_EXPIRY_PENALTY = 50.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
@@ -69,7 +69,7 @@ def main():
     ACTION_WINDOW = 5
     WINDOW_BIDDING = False  # Set to True to let agents choose their window length
     WINDOW_PENALTY = 0.05  # Penalty per window step (only applies when WINDOW_BIDDING = True)
-    VISIBLE_TARGETS = None  # Set to None for centralized (all targets visible), or N for decentralized (each agent sees own target + N nearest others)
+    VISIBLE_TARGETS = None  # None = centralized (all targets visible); 0 = only own target; N = own target + N nearest others
     BIDDING_MECHANISM = "all_pay"  # "all_pay" | "winner_pays" | "winner_pays_others_reward"
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
@@ -77,7 +77,7 @@ def main():
     TARGET_MOVE_INTERVAL = 5
 
     # Training parameters
-    NUM_ITERATIONS = 3200
+    NUM_ITERATIONS = 400
     LEARNING_RATE = 2.5e-4
     NUM_ENVS = 4096
     NUM_STEPS = 256
@@ -87,17 +87,17 @@ def main():
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
     NORM_ADV = True
-    CLIP_COEF = 0.1
-    CLIP_VLOSS = True
+    CLIP_COEF = 0.05
+    CLIP_VLOSS = False
     ENT_COEF = 0.03
-    VF_COEF = 0.5
+    VF_COEF = 1.0
     MAX_GRAD_NORM = 0.5
     TARGET_KL = None
     SEED = 1
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
-    USE_TARGET_ATTENTION_POOLING = False
+    USE_TARGET_ATTENTION_POOLING = True
     TARGET_EMBED_DIM = 64
     TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 

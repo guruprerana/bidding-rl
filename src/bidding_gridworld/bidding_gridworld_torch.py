@@ -503,6 +503,31 @@ class BiddingGridworld:
                 dim=-1,
             )
 
+        if cfg.visible_targets == 0:
+            own_pos = target_pos  # (num_envs, num_agents, 2) — each agent reads its own slice
+            own_counter = target_counters.unsqueeze(-1)  # (num_envs, num_agents, 1)
+            if include_reached:
+                own_reached = targets_reached.unsqueeze(-1)  # (num_envs, num_agents, 1)
+                return torch.cat(
+                    [
+                        agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                        own_pos,
+                        own_reached,
+                        own_counter,
+                        window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                    ],
+                    dim=-1,
+                )
+            return torch.cat(
+                [
+                    agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                    own_pos,
+                    own_counter,
+                    window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                ],
+                dim=-1,
+            )
+
         # Per-agent observations with visible nearest targets
         distances = self._compute_distances().to(torch.float32)
         dist_all = distances.unsqueeze(1).expand(-1, cfg.num_agents, -1)

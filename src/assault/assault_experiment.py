@@ -140,6 +140,7 @@ class AssaultExperiment:
             allow_variable_enemies=args.allow_variable_enemies,
             allow_sideward_fire=getattr(args, "allow_sideward_fire", True),
             bidding_mechanism=getattr(args, "bidding_mechanism", "all_pay"),
+            only_own_enemy=getattr(args, "only_own_enemy", False),
         )
         env = AssaultEnv(
             env_config,

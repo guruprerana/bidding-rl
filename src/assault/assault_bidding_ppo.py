@@ -45,6 +45,7 @@ class AssaultArgs:
     allow_sideward_fire: bool = True  # If False, disables RIGHTFIRE and LEFTFIRE
     bidding_mechanism: str = "all_pay"
     """bidding penalty mechanism: 'all_pay', 'winner_pays', or 'winner_pays_others_reward'"""
+    only_own_enemy: bool = False
 
     # Network
     actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
@@ -171,6 +172,7 @@ class AssaultPPOTrainer(MultiAgentPPOTrainerBase):
             allow_variable_enemies=self.args.allow_variable_enemies,
             allow_sideward_fire=self.args.allow_sideward_fire,
             bidding_mechanism=self.args.bidding_mechanism,
+            only_own_enemy=self.args.only_own_enemy,
         )
         self.envs = AssaultEnv(env_config, num_envs=self.args.num_envs, device=self.device, seed=self.args.seed)
 

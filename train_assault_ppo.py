@@ -21,9 +21,9 @@ def main():
     SINGLE_AGENT_MODE = True
 
     # Experiment settings
-    EXPERIMENT_NAME = "assault_ppo_single_agent_ppo_default_params"
-    CHECKPOINT_FREQ = 60
-    EVAL_FREQ = 30
+    EXPERIMENT_NAME = "assault_ppo_multiagent_onlyselfvisible"
+    CHECKPOINT_FREQ = 10
+    EVAL_FREQ = 10
     VIDEO_FREQ = 0  # Save videos every N iterations (0 = same as EVAL_FREQ)
     NUM_EVAL_EPISODES = 5
     NUM_VIDEO_EPISODES = 0  # Number of episodes to save as videos
@@ -52,24 +52,25 @@ def main():
     WINDOW_BIDDING = False
     WINDOW_PENALTY = 0.0
     BIDDING_MECHANISM = "all_pay"  # "all_pay" | "winner_pays" | "winner_pays_others_reward"
+    ONLY_OWN_ENEMY = True  # True = each agent sees only its own enemy; False = all enemies visible
 
     # Training settings
-    NUM_ITERATIONS = 7200
-    LEARNING_RATE = 2.5e-4
-    NUM_ENVS = 8
-    NUM_STEPS = 128
-    NUM_MINIBATCHES = 4
-    UPDATE_EPOCHS = 4
+    NUM_ITERATIONS = 150
+    LEARNING_RATE = 1e-4
+    NUM_ENVS = 128
+    NUM_STEPS = 512
+    NUM_MINIBATCHES = 8
+    UPDATE_EPOCHS = 8
     ANNEAL_LR = True
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
     NORM_ADV = True
-    CLIP_COEF = 0.1
+    CLIP_COEF = 0.05
     CLIP_VLOSS = True
-    ENT_COEF = 0.01
+    ENT_COEF = 0.05
     VF_COEF = 0.5
     MAX_GRAD_NORM = 0.5
-    TARGET_KL = None
+    TARGET_KL = 0.02
 
     # Network
     ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)
@@ -136,6 +137,7 @@ def main():
             window_bidding=WINDOW_BIDDING,
             window_penalty=WINDOW_PENALTY,
             bidding_mechanism=BIDDING_MECHANISM,
+            only_own_enemy=ONLY_OWN_ENEMY,
             enemy_destroy_reward=ENEMY_DESTROY_REWARD,
             hit_penalty=OVERHEAT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
