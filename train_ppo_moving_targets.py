@@ -39,27 +39,27 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_8moving_singleagent_optunait21"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "gridw_smalldem"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 10  # Save checkpoint every N iterations
     EVAL_FREQ = 10  # Evaluate every N iterations
-    NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
-    NUM_VIDEO_EPISODES = 0  # Number of episodes to save as MP4s
+    NUM_EVAL_EPISODES = 3  # Number of episodes per evaluation
+    NUM_VIDEO_EPISODES = 1  # Number of episodes to save as MP4s
     VIDEO_FREQ = 0  # Save video rollouts every N iterations (0 = use eval freq)
     EVAL_NUM_AGENTS = None  # Multi-agent only: override number of agents/targets during eval (requires attention pooling)
     EVAL_NUM_TARGETS = None  # Single-agent only: override number of targets during eval (fixed obs; keep None)
 
     # Environment parameters
-    GRID_SIZE = 30
-    NUM_AGENTS = 8  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    GRID_SIZE = 10
+    NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 50.0
-    MAX_STEPS = 2000  # Maximum steps per episode during training
-    EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
-    DISTANCE_REWARD_SCALE = 0.0
-    TARGET_EXPIRY_STEPS = 200
+    MAX_STEPS = 500  # Maximum steps per episode during training
+    EVAL_MAX_STEPS = 500  # Maximum steps per episode during evaluation (typically longer than training)
+    DISTANCE_REWARD_SCALE = 0.6
+    TARGET_EXPIRY_STEPS = 50
     TARGET_EXPIRY_PENALTY = 50.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
 
@@ -74,31 +74,31 @@ def main():
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
     DIRECTION_CHANGE_PROB = 0.1
-    TARGET_MOVE_INTERVAL = 5
+    TARGET_MOVE_INTERVAL = 2
 
     # Training parameters
     NUM_ITERATIONS = 400
-    LEARNING_RATE = 0.00017424327114990362
+    LEARNING_RATE = 0.00025
     LR_MIN = 0.0
     NUM_ENVS = 4096
     NUM_STEPS = 256
-    NUM_MINIBATCHES = 512
-    UPDATE_EPOCHS = 8
+    NUM_MINIBATCHES = 256
+    UPDATE_EPOCHS = 4
     ANNEAL_LR = True
-    GAMMA = 0.9628273653645039
-    GAE_LAMBDA = 0.9700939890919841
+    GAMMA = 0.99
+    GAE_LAMBDA = 0.95
     NORM_ADV = True
-    CLIP_COEF = 0.3274570814373295
+    CLIP_COEF = 0.05
     CLIP_VLOSS = False
-    ENT_COEF = 0.00010345747934992622
-    VF_COEF = 1.075641688670566
-    MAX_GRAD_NORM = 0.8399003639311579
+    ENT_COEF = 0.03
+    VF_COEF = 1.0
+    MAX_GRAD_NORM = 0.5
     TARGET_KL = None
     SEED = 1
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
-    USE_TARGET_ATTENTION_POOLING = False
+    USE_TARGET_ATTENTION_POOLING = True
     TARGET_EMBED_DIM = 64
     TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 

@@ -38,7 +38,7 @@ BASE_LOG_DIR = "logs/gridworld_num_targets_scaling"
 # (mechanism name, exact run directory)
 MECHANISMS = [
     ("all_pay",               "logs/gridworld_all_methods_comparison/bidding_cmp_all_pay_20260228_232515"),
-    ("multiagentppo_localobs","logs/gridworld_all_methods_comparison/multiagentppo_localobs_20260303_115001"),
+    ("multiagentppo_localobs","logs/gridworld_all_methods_comparison/multiagentppo_localobs_20260303_194548"),
 ]
 
 # Numbers of eval agents/targets to sweep over
@@ -225,6 +225,7 @@ def evaluate_for_num_agents(
             "avg_min_targets_reached": float(
                 np.mean(eval_stats["min_targets_reached_per_episode"])
             ),
+            "avg_avg_performance": float(np.mean(eval_stats["avg_performance_per_episode"])),
             "success_rate": float(success_rate),
             "avg_bid_counts": avg_bid_counts,
             "avg_control_timesteps_per_agent": avg_control_steps,
@@ -239,6 +240,9 @@ def evaluate_for_num_agents(
             "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
             "min_targets_reached": [
                 int(m) for m in eval_stats["min_targets_reached_per_episode"]
+            ],
+            "avg_performance": [
+                float(p) for p in eval_stats["avg_performance_per_episode"]
             ],
             "bid_counts": [dict(sorted(bc.items())) for bc in all_bid_counts],
             "control_steps_per_agent": all_control_steps,

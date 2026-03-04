@@ -35,8 +35,8 @@ EXPERIMENTS = [
     ("assault_cmp_all_pay",                   "All-Pay",                      True),
     ("assault_cmp_winner_pays",               "Winner-Pays",                  True),
     ("assault_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
-    ("assault_ppo_multiagent_localobs",       "Multi-Agent PPO (Local Obs)",   True),
-    ("assault_ppo_single_agent_ppo_default_params", "Single-Agent PPO",       False),
+    ("assault_ppo_multiagent_localobs",       "All-Pay (Local Obs)",   True),
+    ("assault_ppo_single_agent_ppo_default_params", "Single-Policy PPO",       False),
 ]
 
 
@@ -116,21 +116,54 @@ def main():
     if not os.path.isdir(log_dir):
         raise SystemExit(f"Log directory not found: {log_dir}")
 
-    output_path = args.output or os.path.join(log_dir, "learning_curves.png")
+    output_path = args.output or os.path.join(log_dir, "assault_bidding_mechanisms_learning_curves.png")
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    any_data = False
+    # Collect all series first so we can match single-agent freq to multi-agent
+    all_series = []
     for exp_prefix, label, multi_agent in EXPERIMENTS:
         run_dir = find_latest_run(log_dir, exp_prefix)
         if run_dir is None:
             print(f"  [skip] no run found for '{exp_prefix}'")
             continue
-
         steps, means, ci_lo, ci_hi = load_eval_series(run_dir, multi_agent)
         if not steps:
             print(f"  [skip] no eval data in {run_dir}")
             continue
+        all_series.append((label, multi_agent, steps, means, ci_lo, ci_hi))
+
+    # Target step gap = median step gap of multi-agent series
+    def step_gap(steps):
+        if len(steps) < 2:
+            return None
+        return np.median(np.diff(steps))
+
+    ma_gaps = [step_gap(s[2]) for s in all_series if s[1] and step_gap(s[2]) is not None]
+    target_gap = np.median(ma_gaps) if ma_gaps else None
+
+    # Align all series to start at the same step (max of all first steps)
+    start_step = max(s[2][0] for s in all_series if s[2])
+
+    any_data = False
+    for label, multi_agent, steps, means, ci_lo, ci_hi in all_series:
+        # Trim to common start
+        start_idx = next((i for i, s in enumerate(steps) if s >= start_step), 0)
+        steps = steps[start_idx:]
+        means = means[start_idx:]
+        ci_lo = ci_lo[start_idx:]
+        ci_hi = ci_hi[start_idx:]
+
+        if not multi_agent and target_gap:
+            # Keep only points at least target_gap apart
+            keep = [0]
+            for i in range(1, len(steps)):
+                if steps[i] - steps[keep[-1]] >= target_gap:
+                    keep.append(i)
+            steps = [steps[i] for i in keep]
+            means = [means[i] for i in keep]
+            ci_lo = [ci_lo[i] for i in keep]
+            ci_hi = [ci_hi[i] for i in keep]
 
         s_steps = smooth(steps,  args.smooth)
         s_means = smooth(means,  args.smooth)
@@ -148,10 +181,10 @@ def main():
     if not any_data:
         raise SystemExit("No data found — check --log-dir.")
 
-    ax.set_xlabel("Env Steps (per agent)", fontsize=14)
-    ax.set_ylabel("Score", fontsize=14)
-    ax.tick_params(axis="both", labelsize=11)
-    ax.legend(loc="lower right", fontsize=11)
+    ax.set_xlabel("Env. Steps", fontsize=18)
+    ax.set_ylabel("Score", fontsize=18)
+    ax.tick_params(axis="both", labelsize=13)
+    ax.legend(loc="lower right", fontsize=14)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()

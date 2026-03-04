@@ -33,8 +33,8 @@ EXPERIMENTS = [
     ("bidding_cmp_all_pay",                   "All-Pay",                      True),
     ("bidding_cmp_winner_pays",               "Winner-Pays",                  True),
     ("bidding_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
-    ("multiagentppo_localobs",                "Multi-Agent PPO (Local Obs)",   True),
-    ("ppo_singleagent_optunait21",            "Single-Agent PPO",              True),
+    ("multiagentppo_localobs",                "All-Pay (Local Obs)",   True),
+    ("ppo_singleagent_optunait21",            "Single-Policy PPO",              False),
 ]
 
 
@@ -115,7 +115,7 @@ def main():
     if not os.path.isdir(log_dir):
         raise SystemExit(f"Log directory not found: {log_dir}")
 
-    output_path = args.output or os.path.join(log_dir, "learning_curves.png")
+    output_path = args.output or os.path.join(log_dir, "gridworld_bidding_mechanisms_learning_curves.png")
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
@@ -147,10 +147,10 @@ def main():
     if not any_data:
         raise SystemExit("No data found — check --log-dir.")
 
-    ax.set_xlabel("Env Steps (per agent)", fontsize=14)
-    ax.set_ylabel(f"{NUM_AGENTS} × Avg Performance", fontsize=14)
-    ax.tick_params(axis="both", labelsize=11)
-    ax.legend(loc="lower right", fontsize=11)
+    ax.set_xlabel("Env. Steps", fontsize=18)
+    ax.set_ylabel("Avg. Performance", fontsize=18)
+    ax.tick_params(axis="both", labelsize=13)
+    ax.legend(loc="lower right", fontsize=14)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()

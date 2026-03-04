@@ -23,8 +23,7 @@ from scipy import stats
 
 MECHANISMS = [
     ("all_pay",                   "All-Pay"),
-    ("winner_pays",               "Winner-Pays"),
-    ("winner_pays_others_reward", "Winner-Pays + Others Reward"),
+    ("multiagentppo_localobs",               "All-Pay (Local Obs)"),
 ]
 
 EVAL_NUM_AGENTS_LIST = [8, 10, 12, 14]
@@ -69,7 +68,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--log-dir",
-        default="logs/eval_bidding_mechanism_scaling",
+        default="logs/gridworld_num_targets_scaling",
         help="Path to the eval log directory (parent or specific timestamped run)",
     )
     parser.add_argument("--output", default=None, help="Override output path for the plot")
@@ -115,12 +114,12 @@ def main():
                 means.append(0.0)
                 errors.append(0.0)
                 continue
-            per_ep = entry.get("per_episode_data", {}).get("min_targets_reached", [])
+            per_ep = [p * 8 for p in entry.get("per_episode_data", {}).get("avg_performance", [])]
             if per_ep:
                 means.append(float(np.mean(per_ep)))
                 errors.append(ci(per_ep))
             else:
-                means.append(entry["statistics"]["avg_min_targets_reached"])
+                means.append(entry["statistics"].get("avg_avg_performance", 0.0) * 8)
                 errors.append(0.0)
 
         x = group_positions + offsets[bar_idx]
@@ -138,7 +137,7 @@ def main():
     ax.set_xticks(group_positions)
     ax.set_xticklabels([str(n) for n in EVAL_NUM_AGENTS_LIST], fontsize=12)
     ax.set_xlabel("Number of Eval Targets", fontsize=16)
-    ax.set_ylabel("Min Targets Reached", fontsize=16)
+    ax.set_ylabel("Avg. Performance", fontsize=16)
     ax.tick_params(axis="y", labelsize=12)
     ax.legend(loc="upper right", fontsize=14)
     ax.grid(True, axis="y", alpha=0.3)

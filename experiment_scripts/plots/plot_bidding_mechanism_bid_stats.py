@@ -33,6 +33,7 @@ EXPERIMENTS = [
     ("bidding_cmp_all_pay",                   "All-Pay"),
     ("bidding_cmp_winner_pays",               "Winner-Pays"),
     ("bidding_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)"),
+    ("multiagentppo_localobs",                "All-Pay (Local Obs)"),
 ]
 
 CONFIDENCE = 0.95
@@ -56,7 +57,7 @@ def find_eval_stats(run_dir: str, iteration: int | None = None) -> dict | None:
     Return the eval-stats dict from rollouts/.
 
     If iteration is given, load iter_<iteration>_eval_stats.json exactly.
-    Otherwise load the file with the highest iteration number.
+    Otherwise load the file with the highest avg_avg_performance.
     """
     rollouts_dir = os.path.join(run_dir, "rollouts")
     if not os.path.isdir(rollouts_dir):
@@ -70,20 +71,19 @@ def find_eval_stats(run_dir: str, iteration: int | None = None) -> dict | None:
             return json.load(f)
 
     pattern = re.compile(r"^iter_(\d+)_eval_stats\.json$")
-    best_iter = -1
-    best_path = None
+    best_score = float("-inf")
+    best_data = None
     for fname in os.listdir(rollouts_dir):
-        m = pattern.match(fname)
-        if m:
-            it = int(m.group(1))
-            if it > best_iter:
-                best_iter = it
-                best_path = os.path.join(rollouts_dir, fname)
+        if not pattern.match(fname):
+            continue
+        with open(os.path.join(rollouts_dir, fname)) as f:
+            data = json.load(f)
+        score = data.get("statistics", {}).get("avg_avg_performance")
+        if score is not None and score > best_score:
+            best_score = score
+            best_data = data
 
-    if best_path is None:
-        return None
-    with open(best_path) as f:
-        return json.load(f)
+    return best_data
 
 
 def ci_half_width(values: list[float]) -> float:
@@ -173,11 +173,11 @@ def plot_bid_distribution(experiments_data: list[tuple[str, dict]], output_path:
         ))
 
     ax.set_xticks(group_positions)
-    ax.set_xticklabels([str(bv) for bv in bid_values], fontsize=12)
-    ax.set_xlabel("Bid Value", fontsize=16)
-    ax.set_ylabel("Avg Count per Episode", fontsize=16)
-    ax.tick_params(axis="y", labelsize=12)
-    ax.legend(loc="upper right", fontsize=12)
+    ax.set_xticklabels([str(bv) for bv in bid_values], fontsize=13)
+    ax.set_xlabel("Bid Value", fontsize=18)
+    ax.set_ylabel("Avg Count per Episode", fontsize=18)
+    ax.tick_params(axis="y", labelsize=13)
+    ax.legend(loc="center right", fontsize=14)
     ax.grid(True, axis="y", alpha=0.3)
 
     plt.tight_layout()
@@ -249,11 +249,12 @@ def plot_control_timesteps(experiments_data: list[tuple[str, dict]], output_path
         ))
 
     ax.set_xticks(group_positions)
-    ax.set_xticklabels([f"Agent {i}" for i in range(n_groups)], fontsize=12)
-    ax.set_xlabel("Agent", fontsize=16)
-    ax.set_ylabel("Avg Timesteps Controlled per Episode", fontsize=16)
-    ax.tick_params(axis="y", labelsize=12)
-    ax.legend(loc="upper right", fontsize=12)
+    ax.set_xticklabels([f"Policy {i}" for i in range(n_groups)], fontsize=13)
+    ax.set_xlabel("Policy", fontsize=18)
+    ax.set_ylabel("Avg Timesteps Controlled per Episode", fontsize=18)
+    ax.set_ylim(bottom=150)
+    ax.tick_params(axis="y", labelsize=13)
+    ax.legend(loc="lower right", fontsize=14)
     ax.grid(True, axis="y", alpha=0.3)
 
     plt.tight_layout()
@@ -270,13 +271,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--log-dir",
-        default="logs/gridworld_bidding_mechanism_comparison",
+        default="logs/gridworld_all_methods_comparison",
         help="Base log directory produced by bidding_mechanism_comparison.py",
     )
     parser.add_argument(
         "--iteration",
         type=int,
-        default=200,
+        default=-1,
         metavar="N",
         help="Which eval iteration to load (default: 200). Pass -1 to use the final iteration.",
     )
