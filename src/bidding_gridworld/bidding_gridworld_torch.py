@@ -744,29 +744,26 @@ class BiddingGridworld:
                 grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
-            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
+            stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple']
+
+            def draw_stick_figure(ax, cx, cy, color, lw=1.5):
+                ax.add_patch(plt.Circle((cx, cy - 0.22), 0.10, facecolor=color, edgecolor=color, linewidth=1))
+                ax.plot([cx, cx], [cy - 0.12, cy + 0.08], color=color, linewidth=lw)
+                ax.plot([cx - 0.18, cx + 0.18], [cy - 0.02, cy - 0.02], color=color, linewidth=lw)
+                ax.plot([cx, cx - 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
+                ax.plot([cx, cx + 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
 
             for i in range(self.num_agents):
                 target_row, target_col = target_positions[i]
                 if include_reached and targets_reached[i] != 0:
-                    grid_ax.add_patch(plt.Rectangle(
-                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
-                        facecolor='lightgreen', edgecolor='green', linewidth=2
-                    ))
-                    grid_ax.text(target_col, target_row, 'OK',
-                           ha='center', va='center', fontsize=9, fontweight='bold')
+                    draw_stick_figure(grid_ax, target_col, target_row, 'darkgreen')
+                    grid_ax.text(target_col, target_row - 0.5, '✓',
+                           ha='center', va='center', fontsize=8, fontweight='bold', color='darkgreen')
                 else:
-                    grid_ax.add_patch(plt.Rectangle(
-                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
-                        facecolor=target_colors[i % 3], edgecolor='black', linewidth=2
-                    ))
-                    grid_ax.text(target_col, target_row, str(i),
-                           ha='center', va='center', fontsize=10, fontweight='bold')
+                    draw_stick_figure(grid_ax, target_col, target_row, stick_colors[i % len(stick_colors)])
 
-            grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
-                                   facecolor='yellow', edgecolor='orange'))
-            grid_ax.text(agent_col, agent_row, 'A',
-                   ha='center', va='center', fontsize=9, fontweight='bold')
+            grid_ax.text(agent_col, agent_row, '☕',
+                   ha='center', va='center', fontsize=16)
 
             grid_ax.set_title(f'Step {frame}', fontsize=11, fontweight='bold')
 
@@ -893,42 +890,37 @@ class BiddingGridworld:
                 grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
-            target_colors = ['lightblue', 'lightcoral', 'lightyellow']
-            edge_colors = ['blue', 'red', 'orange']
+            stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple']
+            edge_colors = ['blue', 'red', 'orange', 'green', 'purple']
             winning_agent = step_detail.get("winning_agent", -1) if step_detail else None
+
+            def draw_stick_figure(ax, cx, cy, color, lw=1.5):
+                ax.add_patch(plt.Circle((cx, cy - 0.22), 0.10, facecolor=color, edgecolor=color, linewidth=1))
+                ax.plot([cx, cx], [cy - 0.12, cy + 0.08], color=color, linewidth=lw)
+                ax.plot([cx - 0.18, cx + 0.18], [cy - 0.02, cy - 0.02], color=color, linewidth=lw)
+                ax.plot([cx, cx - 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
+                ax.plot([cx, cx + 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
 
             for i in range(self.num_agents):
                 target_row, target_col = target_positions[i]
                 is_controlling = (winning_agent == i)
-                edge_width = 4 if is_controlling else 2
-                edge_color = 'gold' if is_controlling else edge_colors[i % 3]
 
                 if include_reached and targets_reached[i] != 0:
-                    grid_ax.add_patch(plt.Rectangle(
-                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
-                        facecolor='lightgreen', edgecolor='green', linewidth=2
-                    ))
-                    grid_ax.text(target_col, target_row, 'OK',
-                           ha='center', va='center', fontsize=9, fontweight='bold')
+                    draw_stick_figure(grid_ax, target_col, target_row, 'darkgreen')
+                    grid_ax.text(target_col, target_row - 0.5, '✓',
+                           ha='center', va='center', fontsize=8, fontweight='bold', color='darkgreen')
                 else:
-                    grid_ax.add_patch(plt.Rectangle(
-                        (target_col - 0.4, target_row - 0.4), 0.8, 0.8,
-                        facecolor=target_colors[i % 3], edgecolor=edge_color, linewidth=edge_width
-                    ))
-                    grid_ax.text(target_col, target_row, str(i),
-                           ha='center', va='center', fontsize=10, fontweight='bold')
+                    draw_stick_figure(grid_ax, target_col, target_row, stick_colors[i % len(stick_colors)])
                     if is_controlling:
-                        grid_ax.text(target_col, target_row - 0.6, '*',
+                        grid_ax.text(target_col, target_row - 0.6, '⚡',
                                ha='center', va='center', fontsize=8, color='gold')
 
             if winning_agent is not None and 0 <= winning_agent < self.num_agents:
                 grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
-                                       facecolor='none', edgecolor=edge_colors[winning_agent % 3], linewidth=3))
+                                       facecolor='none', edgecolor=edge_colors[winning_agent % len(edge_colors)], linewidth=3))
 
-            grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.3,
-                                   facecolor='yellow', edgecolor='orange'))
-            grid_ax.text(agent_col, agent_row, 'A',
-                   ha='center', va='center', fontsize=9, fontweight='bold')
+            grid_ax.text(agent_col, agent_row, '☕',
+                   ha='center', va='center', fontsize=16)
 
             grid_ax.set_title(f'Step {frame}', fontsize=11, fontweight='bold')
 

@@ -39,11 +39,11 @@ def main():
     # ========================================================================
 
     # Mode selection
-    SINGLE_AGENT_MODE = False  # Set to True for single-agent navigation, False for multi-agent bidding
+    SINGLE_AGENT_MODE = True  # Set to True for single-agent navigation, False for multi-agent bidding
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "ppo_multiagentppo_onlyselfvisible"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "ppo_8moving_singleagent_optunait21"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 10  # Save checkpoint every N iterations
     EVAL_FREQ = 10  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
@@ -58,7 +58,7 @@ def main():
     TARGET_REWARD = 50.0
     MAX_STEPS = 2000  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
-    DISTANCE_REWARD_SCALE = 0.6
+    DISTANCE_REWARD_SCALE = 0.0
     TARGET_EXPIRY_STEPS = 200
     TARGET_EXPIRY_PENALTY = 50.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
@@ -78,26 +78,27 @@ def main():
 
     # Training parameters
     NUM_ITERATIONS = 400
-    LEARNING_RATE = 2.5e-4
+    LEARNING_RATE = 0.00017424327114990362
+    LR_MIN = 0.0
     NUM_ENVS = 4096
     NUM_STEPS = 256
-    NUM_MINIBATCHES = 256
-    UPDATE_EPOCHS = 4
+    NUM_MINIBATCHES = 512
+    UPDATE_EPOCHS = 8
     ANNEAL_LR = True
-    GAMMA = 0.99
-    GAE_LAMBDA = 0.95
+    GAMMA = 0.9628273653645039
+    GAE_LAMBDA = 0.9700939890919841
     NORM_ADV = True
-    CLIP_COEF = 0.05
+    CLIP_COEF = 0.3274570814373295
     CLIP_VLOSS = False
-    ENT_COEF = 0.03
-    VF_COEF = 1.0
-    MAX_GRAD_NORM = 0.5
+    ENT_COEF = 0.00010345747934992622
+    VF_COEF = 1.075641688670566
+    MAX_GRAD_NORM = 0.8399003639311579
     TARGET_KL = None
     SEED = 1
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
-    USE_TARGET_ATTENTION_POOLING = True
+    USE_TARGET_ATTENTION_POOLING = False
     TARGET_EMBED_DIM = 64
     TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 
@@ -136,6 +137,7 @@ def main():
             # Training config
             num_iterations=NUM_ITERATIONS,
             learning_rate=LEARNING_RATE,
+            lr_min=LR_MIN,
             num_envs=NUM_ENVS,
             num_steps=NUM_STEPS,
             num_minibatches=NUM_MINIBATCHES,

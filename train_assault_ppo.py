@@ -18,10 +18,10 @@ def main():
     # ========================================================================
     # CONFIGURATION
     # ========================================================================
-    SINGLE_AGENT_MODE = True
+    SINGLE_AGENT_MODE = False
 
     # Experiment settings
-    EXPERIMENT_NAME = "assault_ppo_multiagent_onlyselfvisible"
+    EXPERIMENT_NAME = "assault_ppo_multiagent_localobs"
     CHECKPOINT_FREQ = 10
     EVAL_FREQ = 10
     VIDEO_FREQ = 0  # Save videos every N iterations (0 = same as EVAL_FREQ)
@@ -52,7 +52,7 @@ def main():
     WINDOW_BIDDING = False
     WINDOW_PENALTY = 0.0
     BIDDING_MECHANISM = "all_pay"  # "all_pay" | "winner_pays" | "winner_pays_others_reward"
-    ONLY_OWN_ENEMY = True  # True = each agent sees only its own enemy; False = all enemies visible
+    ONLY_OWN_ENEMY = True  # True = each agent sees only its own enemy (local obs); False = all enemies visible
 
     # Training settings
     NUM_ITERATIONS = 150
