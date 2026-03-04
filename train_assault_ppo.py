@@ -50,27 +50,27 @@ def main():
     BID_PENALTY = 0.3
     ACTION_WINDOW = 15
     WINDOW_BIDDING = False
-    WINDOW_PENALTY = 0.0
+    WINDOW_PENALTY = 0.05
     BIDDING_MECHANISM = "all_pay"  # "all_pay" | "winner_pays" | "winner_pays_others_reward"
     ONLY_OWN_ENEMY = True  # True = each agent sees only its own enemy (local obs); False = all enemies visible
 
     # Training settings
-    NUM_ITERATIONS = 150
-    LEARNING_RATE = 1e-4
-    NUM_ENVS = 128
-    NUM_STEPS = 512
-    NUM_MINIBATCHES = 8
-    UPDATE_EPOCHS = 8
+    NUM_ITERATIONS = 400
+    LEARNING_RATE = 2.5e-4
+    NUM_ENVS = 4096
+    NUM_STEPS = 256
+    NUM_MINIBATCHES = 256
+    UPDATE_EPOCHS = 4
     ANNEAL_LR = True
     GAMMA = 0.99
     GAE_LAMBDA = 0.95
     NORM_ADV = True
     CLIP_COEF = 0.05
-    CLIP_VLOSS = True
-    ENT_COEF = 0.05
-    VF_COEF = 0.5
+    CLIP_VLOSS = False
+    ENT_COEF = 0.03
+    VF_COEF = 1.0
     MAX_GRAD_NORM = 0.5
-    TARGET_KL = 0.02
+    TARGET_KL = None
 
     # Network
     ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)

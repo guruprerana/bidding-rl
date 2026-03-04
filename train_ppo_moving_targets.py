@@ -43,23 +43,23 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "gridw_smalldem"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "gridw_multiagent_noattn"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 10  # Save checkpoint every N iterations
     EVAL_FREQ = 10  # Evaluate every N iterations
-    NUM_EVAL_EPISODES = 3  # Number of episodes per evaluation
-    NUM_VIDEO_EPISODES = 1  # Number of episodes to save as MP4s
+    NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
+    NUM_VIDEO_EPISODES = 0  # Number of episodes to save as MP4s
     VIDEO_FREQ = 0  # Save video rollouts every N iterations (0 = use eval freq)
     EVAL_NUM_AGENTS = None  # Multi-agent only: override number of agents/targets during eval (requires attention pooling)
     EVAL_NUM_TARGETS = None  # Single-agent only: override number of targets during eval (fixed obs; keep None)
 
     # Environment parameters
-    GRID_SIZE = 10
-    NUM_AGENTS = 3  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    GRID_SIZE = 30
+    NUM_AGENTS = 8  # For multi-agent: number of bidding agents; For single-agent: number of targets
     TARGET_REWARD = 50.0
-    MAX_STEPS = 500  # Maximum steps per episode during training
-    EVAL_MAX_STEPS = 500  # Maximum steps per episode during evaluation (typically longer than training)
+    MAX_STEPS = 2000  # Maximum steps per episode during training
+    EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
     DISTANCE_REWARD_SCALE = 0.6
-    TARGET_EXPIRY_STEPS = 50
+    TARGET_EXPIRY_STEPS = 200
     TARGET_EXPIRY_PENALTY = 50.0
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
 
@@ -98,7 +98,7 @@ def main():
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
-    USE_TARGET_ATTENTION_POOLING = True
+    USE_TARGET_ATTENTION_POOLING = False
     TARGET_EMBED_DIM = 64
     TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 

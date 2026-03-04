@@ -37,8 +37,9 @@ METHODS = [
     ("run",      "multiagentppo_localobs",                 "Multi-Agent PPO (Local Obs)"),
     ("run",      "bidding_cmp_dwn",                        "DWN"),
     ("run",      "ppo_singleagent_optunait21",             "Single-Agent PPO"),
-    ("baseline", "nearest_target",                         "Nearest Target"),
-    ("baseline", "least_time_left",                        "Least Time Left"),
+    ("run",      "multiagentppo_noattention",             "All-Pay (No Attn. Pool)"),
+    # ("baseline", "nearest_target",                         "Nearest Target"),
+    # ("baseline", "least_time_left",                        "Least Time Left"),
 ]
 
 
