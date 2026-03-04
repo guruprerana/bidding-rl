@@ -139,7 +139,7 @@ def main() -> None:
     env = make_env(SEED)
 
     policies = [
-        ("round_robin",     RoundRobinPolicy(NUM_AGENTS, GRID_SIZE, TARGET_EXPIRY_STEPS)),
+        # ("round_robin",     RoundRobinPolicy(NUM_AGENTS, GRID_SIZE, TARGET_EXPIRY_STEPS)),
         ("nearest_target",  NearestTargetPolicy(NUM_AGENTS, GRID_SIZE, TARGET_EXPIRY_STEPS)),
         ("least_time_left", LeastTimeLeftPolicy(NUM_AGENTS, GRID_SIZE, TARGET_EXPIRY_STEPS)),
     ]
@@ -179,7 +179,10 @@ def main() -> None:
             "num_eval_episodes": NUM_EVAL_EPISODES,
             "seed": SEED,
         },
-        "results": summaries,
+        "results": {
+            name: {"summary": v["summary"], "per_episode": v["raw"]}
+            for name, v in all_results.items()
+        },
     }
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)

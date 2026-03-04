@@ -10,6 +10,7 @@ Results are saved as JSON files under BASE_LOG_DIR/<timestamp>/.
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -32,19 +33,16 @@ from bidding_gridworld.bidding_ppo import SharedAgent
 # CONFIG
 # ============================================================================
 
-TRAINING_LOG_DIR = "logs/gridworld_bidding_mechanism_comparison"
-BASE_LOG_DIR = "logs/eval_bidding_mechanism_scaling"
+BASE_LOG_DIR = "logs/gridworld_num_targets_scaling"
 
-# Multi-agent PPO mechanisms to evaluate (mechanism name → experiment dir prefix)
+# (mechanism name, exact run directory)
 MECHANISMS = [
-    ("all_pay",                   "bidding_cmp_all_pay"),
-    ("winner_pays",               "bidding_cmp_winner_pays"),
-    ("winner_pays_others_reward", "bidding_cmp_winner_pays_others_reward"),
+    ("all_pay",               "logs/gridworld_all_methods_comparison/bidding_cmp_all_pay_20260228_232515"),
+    ("multiagentppo_localobs","logs/gridworld_all_methods_comparison/multiagentppo_localobs_20260303_115001"),
 ]
 
 # Numbers of eval agents/targets to sweep over
 EVAL_NUM_AGENTS_LIST = [8, 10, 12, 14]
-CHECKPOINT_ITERATION = 200  # Which training iteration checkpoint to load
 
 NUM_EVAL_EPISODES = 20
 EVAL_MAX_STEPS = 2000
@@ -67,12 +65,25 @@ def find_latest_run_dir(base_log_dir: str, exp_name_prefix: str) -> Path:
     return candidates[-1]
 
 
-def find_checkpoint_path(run_dir: Path, iteration: int) -> Path:
-    """Return agent.pt path for a specific iter checkpoint in run_dir/checkpoints/."""
-    ckpt_path = run_dir / "checkpoints" / f"iter_{iteration}" / "agent.pt"
+def find_best_checkpoint_path(run_dir: Path) -> tuple[Path, int]:
+    """Return (agent.pt path, iteration) for the checkpoint with highest avg_avg_performance."""
+    rollouts_dir = run_dir / "rollouts"
+    best_iter, best_score = None, float("-inf")
+    for fname in os.listdir(rollouts_dir):
+        m = re.match(r"iter_(\d+)_eval_stats\.json$", fname)
+        if not m:
+            continue
+        with open(rollouts_dir / fname) as f:
+            data = json.load(f)
+        score = data.get("statistics", {}).get("avg_avg_performance")
+        if score is not None and score > best_score:
+            best_score, best_iter = score, int(m.group(1))
+    if best_iter is None:
+        raise FileNotFoundError(f"No iter eval stats found in {rollouts_dir}")
+    ckpt_path = run_dir / "checkpoints" / f"iter_{best_iter}" / "agent.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-    return ckpt_path
+    return ckpt_path, best_iter
 
 
 def load_config(run_dir: Path) -> dict:
@@ -116,14 +127,14 @@ def build_agent(config: dict, device: str) -> SharedAgent:
 
 
 def load_agent(run_dir: Path, device: str):
-    """Load the iter_CHECKPOINT_ITERATION checkpoint into a reconstructed SharedAgent."""
+    """Load the best checkpoint (by avg_avg_performance) into a reconstructed SharedAgent."""
     config = load_config(run_dir)
     agent = build_agent(config, device)
-    ckpt_path = find_checkpoint_path(run_dir, CHECKPOINT_ITERATION)
+    ckpt_path, best_iter = find_best_checkpoint_path(run_dir)
     state_dict = torch.load(ckpt_path, map_location=device)
     agent.load_state_dict(state_dict)
     agent.eval()
-    print(f"  Loaded checkpoint: {ckpt_path}")
+    print(f"  Loaded checkpoint: iter_{best_iter} (best avg_avg_performance)")
     return agent, config
 
 
@@ -248,12 +259,12 @@ def main():
 
     all_results = {}
 
-    for mechanism, exp_name_prefix in MECHANISMS:
+    for mechanism, run_dir_str in MECHANISMS:
         print(f"\n{'='*72}")
         print(f"  Mechanism: {mechanism}")
         print(f"{'='*72}")
 
-        run_dir = find_latest_run_dir(TRAINING_LOG_DIR, exp_name_prefix)
+        run_dir = Path(run_dir_str)
         print(f"  Run dir: {run_dir}")
 
         agent, config = load_agent(run_dir, DEVICE)
@@ -273,7 +284,7 @@ def main():
             mech_results[str(eval_num_agents)] = stats
 
             # Save per-mechanism per-num-agents JSON
-            out_file = out_dir / f"{exp_name_prefix}_eval_{eval_num_agents}agents.json"
+            out_file = out_dir / f"{mechanism}_eval_{eval_num_agents}agents.json"
             with open(out_file, "w") as f:
                 json.dump(stats, f, indent=2)
             print(f"  Saved: {out_file.name}")

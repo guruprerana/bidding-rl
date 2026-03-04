@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Plot learning curves for the bidding mechanism comparison experiment.
+Learning curves for gridworld_all_methods_comparison.
 
-Reads eval stats from each experiment's rollouts/ directory and produces a
-single figure with avg_min_targets_reached vs environment steps for all
-algorithms (excluding DWN).
+X axis: env steps (divided by 8 for multi-agent methods to give per-agent steps).
+Y axis: 8 × avg_avg_performance (with 95% CI across 20 eval episodes).
+Only iterations up to 400 are included.
 
 Usage:
     python experiment_scripts/plots/plot_bidding_mechanism_comparison.py
-    python experiment_scripts/plots/plot_bidding_mechanism_comparison.py --log-dir logs/gridworld_bidding_mechanism_comparison
-    python experiment_scripts/plots/plot_bidding_mechanism_comparison.py --log-dir logs/gridworld_bidding_mechanism_comparison --smooth 5
+    python experiment_scripts/plots/plot_bidding_mechanism_comparison.py --log-dir logs/gridworld_all_methods_comparison
+    python experiment_scripts/plots/plot_bidding_mechanism_comparison.py --smooth 5
 """
 
 import argparse
@@ -22,19 +22,23 @@ import numpy as np
 from scipy import stats
 
 
-# Experiment name prefixes to include (DWN is excluded)
+LOG_DIR = "logs/gridworld_all_methods_comparison"
+NUM_AGENTS = 8
+MAX_ITERATION = 400
+CONFIDENCE = 0.95
+
+# (prefix, label, multi_agent)
+# multi_agent=True → x axis divided by NUM_AGENTS
 EXPERIMENTS = [
-    ("bidding_cmp_all_pay",                   "All-Pay"),
-    ("bidding_cmp_winner_pays",               "Winner-Pays"),
-    ("bidding_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)"),
-    ("bidding_cmp_single_agent",              "Single-Agent"),
+    ("bidding_cmp_all_pay",                   "All-Pay",                      True),
+    ("bidding_cmp_winner_pays",               "Winner-Pays",                  True),
+    ("bidding_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
+    ("multiagentppo_localobs",                "Multi-Agent PPO (Local Obs)",   True),
+    ("ppo_singleagent_optunait21",            "Single-Agent PPO",              True),
 ]
 
 
 def find_latest_run(log_dir: str, exp_prefix: str) -> str | None:
-    """Return the path to the most recent subdirectory matching exp_prefix."""
-    # Match exactly <exp_prefix>_<YYYYMMDD>_<HHMMSS> to avoid a shorter prefix
-    # (e.g. "winner_pays") accidentally matching a longer one ("winner_pays_others_reward").
     timestamp_re = re.compile(rf"^{re.escape(exp_prefix)}_\d{{8}}_\d{{6}}$")
     matches = [
         d for d in os.listdir(log_dir)
@@ -42,47 +46,50 @@ def find_latest_run(log_dir: str, exp_prefix: str) -> str | None:
     ]
     if not matches:
         return None
-    matches.sort()  # ISO-style timestamps sort lexicographically
+    matches.sort()
     return os.path.join(log_dir, matches[-1])
 
 
 def load_eval_series(
     run_dir: str,
-) -> tuple[list[int], list[float], list[float], list[float]]:
-    """
-    Load all eval stats from rollouts/ and return
-    (steps, means, ci_lower, ci_upper) sorted by step.
+    multi_agent: bool,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Return (steps, means, ci_lower, ci_upper) sorted by step.
 
-    Confidence intervals are 90% using a t-distribution over the per-episode
-    min_targets_reached values stored in each eval stats file.
+    steps are per-agent steps (global_step / NUM_AGENTS) for multi-agent runs.
+    y values are NUM_AGENTS × avg_avg_performance with 95% t-CI over 20 episodes.
+    Only includes iterations ≤ MAX_ITERATION.
     """
     rollouts_dir = os.path.join(run_dir, "rollouts")
     if not os.path.isdir(rollouts_dir):
         return [], [], [], []
 
-    CONFIDENCE = 0.95
-    pattern = re.compile(r".*_eval_stats\.json$")
     records = []
     for fname in os.listdir(rollouts_dir):
-        if not pattern.match(fname):
+        m = re.match(r"iter_(\d+)_eval_stats\.json$", fname)
+        if not m:
             continue
-        path = os.path.join(rollouts_dir, fname)
-        with open(path) as f:
+        if int(m.group(1)) > MAX_ITERATION:
+            continue
+        with open(os.path.join(rollouts_dir, fname)) as f:
             data = json.load(f)
-        step = data.get("global_step")
-        episodes = (
-            data.get("per_episode_data", {}).get("min_targets_reached")
-        )
-        if step is None or not episodes:
+
+        global_step = data.get("global_step")
+        episodes = data.get("per_episode_data", {}).get("avg_performance")
+        if global_step is None or not episodes:
             continue
-        episodes = np.array(episodes, dtype=float)
+
+        episodes = np.array(episodes, dtype=float) * NUM_AGENTS
         n = len(episodes)
         mean = episodes.mean()
         se = episodes.std(ddof=1) / np.sqrt(n)
         t_crit = stats.t.ppf((1 + CONFIDENCE) / 2, df=n - 1)
-        records.append((step, mean, mean - t_crit * se, mean + t_crit * se))
+        half = t_crit * se
 
-    records.sort(key=lambda x: x[0])
+        x = global_step / NUM_AGENTS if multi_agent else global_step
+        records.append((x, mean, mean - half, mean + half))
+
+    records.sort(key=lambda r: r[0])
     if not records:
         return [], [], [], []
     steps, means, lows, highs = zip(*records)
@@ -90,7 +97,6 @@ def load_eval_series(
 
 
 def smooth(values: list[float], window: int) -> list[float]:
-    """Simple uniform moving average."""
     if window <= 1:
         return values
     kernel = np.ones(window) / window
@@ -100,65 +106,51 @@ def smooth(values: list[float], window: int) -> list[float]:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--log-dir",
-        default="logs/gridworld_bidding_mechanism_comparison",
-        help="Base log directory produced by bidding_mechanism_comparison.py",
-    )
-    parser.add_argument(
-        "--smooth",
-        type=int,
-        default=1,
-        metavar="W",
-        help="Moving-average window size for smoothing (default: 1 = no smoothing)",
-    )
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Output filename (default: learning_curves.png inside --log-dir)",
-    )
+    parser.add_argument("--log-dir", default=LOG_DIR)
+    parser.add_argument("--smooth", type=int, default=1, metavar="W")
+    parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
     log_dir = args.log_dir
     if not os.path.isdir(log_dir):
         raise SystemExit(f"Log directory not found: {log_dir}")
 
-    output_path = args.output or os.path.join(log_dir, "gridworld_bidding_mechanisms_learning_curves.png")
+    output_path = args.output or os.path.join(log_dir, "learning_curves.png")
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
     any_data = False
-    for exp_prefix, label in EXPERIMENTS:
+    for exp_prefix, label, multi_agent in EXPERIMENTS:
         run_dir = find_latest_run(log_dir, exp_prefix)
         if run_dir is None:
-            print(f"  [skip] no run found for prefix '{exp_prefix}'")
+            print(f"  [skip] no run found for '{exp_prefix}'")
             continue
 
-        steps, means, ci_lo, ci_hi = load_eval_series(run_dir)
+        steps, means, ci_lo, ci_hi = load_eval_series(run_dir, multi_agent)
         if not steps:
-            print(f"  [skip] no eval stats found in {run_dir}")
+            print(f"  [skip] no eval data in {run_dir}")
             continue
 
-        smoothed_mean = smooth(means, args.smooth)
-        smoothed_lo   = smooth(ci_lo, args.smooth)
-        smoothed_hi   = smooth(ci_hi, args.smooth)
+        steps     = smooth(steps,  args.smooth)
+        s_means   = smooth(means,  args.smooth)
+        s_lo      = smooth(ci_lo,  args.smooth)
+        s_hi      = smooth(ci_hi,  args.smooth)
 
-        (line,) = ax.plot(steps, smoothed_mean, label=label, linewidth=2)
-        ax.fill_between(steps, smoothed_lo, smoothed_hi,
-                        color=line.get_color(), alpha=0.15)
+        (line,) = ax.plot(steps, s_means, label=label, linewidth=2)
+        ax.fill_between(steps, s_lo, s_hi, color=line.get_color(), alpha=0.15)
 
-        print(f"  {label}: {len(steps)} eval points, "
-              f"steps {steps[0]:,} – {steps[-1]:,}, "
-              f"final avg_min_targets_reached = {means[-1]:.3f}")
+        print(f"  {label}: {len(steps)} points, "
+              f"steps {steps[0]:,.0f}–{steps[-1]:,.0f}, "
+              f"final {NUM_AGENTS}×avg_perf = {means[-1]:.2f}")
         any_data = True
 
     if not any_data:
         raise SystemExit("No data found — check --log-dir.")
 
-    ax.set_xlabel("Environment Steps", fontsize=16)
-    ax.set_ylabel("Min Targets Reached", fontsize=16)
-    ax.tick_params(axis="both", labelsize=12)
-    ax.legend(loc="lower right", fontsize=12)
+    ax.set_xlabel("Env Steps (per agent)", fontsize=14)
+    ax.set_ylabel(f"{NUM_AGENTS} × Avg Performance", fontsize=14)
+    ax.tick_params(axis="both", labelsize=11)
+    ax.legend(loc="lower right", fontsize=11)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
