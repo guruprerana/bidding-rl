@@ -39,6 +39,7 @@ class BiddingGridworldConfig:
     reward_decay_factor: float = 0.0
     bidding_mechanism: str = "all_pay"
     nearest_target_shaping: bool = False
+    nearest_expiry_shaping: bool = False
     # "all_pay" | "winner_pays" | "winner_pays_others_reward"
 
 
@@ -281,6 +282,19 @@ class BiddingGridworld:
                         torch.zeros(self.num_envs, device=device),
                     )
                     rewards = rewards + cfg.distance_reward_scale * nearest_improve
+                elif cfg.nearest_expiry_shaping and cfg.target_expiry_steps is not None:
+                    # Shape toward the unreached target nearest to expiry (highest counter)
+                    counters_f = self.target_counters.to(torch.float32).masked_fill(~unreached, -1.0)
+                    has_unreached = unreached.any(dim=1)
+                    expiry_idx = counters_f.argmax(dim=1).unsqueeze(1)  # (num_envs, 1)
+                    prev_expiry = self.previous_distances.to(torch.float32).gather(1, expiry_idx).squeeze(1)
+                    curr_expiry = current_distances.to(torch.float32).gather(1, expiry_idx).squeeze(1)
+                    expiry_improve = torch.where(
+                        has_unreached,
+                        prev_expiry - curr_expiry,
+                        torch.zeros(self.num_envs, device=device),
+                    )
+                    rewards = rewards + cfg.distance_reward_scale * expiry_improve
                 else:
                     dist_improve = (self.previous_distances - current_distances).to(torch.float32)
                     rewards = rewards + cfg.distance_reward_scale * (dist_improve * unreached.to(torch.float32)).sum(dim=1)
