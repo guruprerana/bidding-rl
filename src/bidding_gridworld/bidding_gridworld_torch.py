@@ -1356,7 +1356,7 @@ def evaluate_multi_agent_policy_batched(
             # winning_agent shape: (N,), value -1 means no winner
             valid_winner = (winning_agent >= 0) & active  # (N,)
             if valid_winner.any():
-                winner_idx = winning_agent.clamp(min=0)  # avoid negative index
+                winner_idx = winning_agent.clamp(min=0).long()  # avoid negative index; must be int64
                 control_steps.scatter_add_(
                     1,
                     winner_idx.unsqueeze(1),
