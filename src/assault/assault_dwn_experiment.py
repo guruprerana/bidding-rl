@@ -46,11 +46,18 @@ class AssaultDWNExperiment:
             num_video_episodes: Number of episodes to save as MP4s.
             log_videos_to_wandb: Upload MP4s to wandb.
         """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
             experiment_name = "assault_dwn"
 
-        self.log_dir = Path(base_log_dir) / f"{experiment_name}_{timestamp}"
+        # Reuse an existing directory for this experiment if one exists
+        base = Path(base_log_dir)
+        existing_dirs = sorted(base.glob(f"{experiment_name}_*")) if base.exists() else []
+        if existing_dirs:
+            self.log_dir = existing_dirs[-1]
+            print(f"Resuming experiment: {self.log_dir}")
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.log_dir = base / f"{experiment_name}_{timestamp}"
         self.checkpoint_freq = checkpoint_freq
         self.eval_freq = eval_freq
         self.video_freq = eval_freq if video_freq in {0, None} else video_freq
@@ -286,11 +293,29 @@ class AssaultDWNExperiment:
 
         return eval_summary
 
+    def _find_latest_checkpoint_step(self) -> Optional[int]:
+        """Return the global_step of the latest checkpoint, or None."""
+        if not self.checkpoints_dir.exists():
+            return None
+        step_dirs = []
+        for p in self.checkpoints_dir.iterdir():
+            if p.is_dir() and p.name.startswith("step_"):
+                try:
+                    step_dirs.append(int(p.name.split("_")[1]))
+                except (IndexError, ValueError):
+                    pass
+        return max(step_dirs) if step_dirs else None
+
     def run(self, args: AssaultDWNArgs):
         """Run the full training experiment."""
         print(f"\n{'='*80}")
         print("ASSAULT DWN TRAINING")
         print(f"{'='*80}\n")
+
+        latest_step = self._find_latest_checkpoint_step()
+        if latest_step is not None and latest_step >= args.total_timesteps:
+            print(f"Already complete (step {latest_step}/{args.total_timesteps}), skipping.")
+            return
 
         self.save_config(args)
 

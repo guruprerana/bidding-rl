@@ -78,7 +78,7 @@ class SingleAgentPPOTrainerBase(PPOTrainerBase):
         super().__init__(args, callbacks=callbacks)
         self.obs_dim = None
 
-    def train(self):
+    def train(self, start_iteration: int = 1, initial_global_step: int = 0):
         if self.envs is None:
             raise RuntimeError("Must call setup() before train()")
 
@@ -94,12 +94,12 @@ class SingleAgentPPOTrainerBase(PPOTrainerBase):
         dones = torch.zeros((args.num_steps, args.num_envs)).to(self.device)
         values = torch.zeros((args.num_steps, args.num_envs)).to(self.device)
 
-        global_step = 0
+        global_step = initial_global_step
         start_time = time.time()
         next_obs, _ = self.envs.reset(seed=self.args.seed)
         next_done = torch.zeros((args.num_envs,), device=self.device)
 
-        for iteration in range(1, args.num_iterations + 1):
+        for iteration in range(start_iteration, args.num_iterations + 1):
             iteration_start = time.time()
             self._on_iteration_start(iteration)
             if args.anneal_lr:
@@ -207,7 +207,7 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
         self.obs_dim = None
         self.num_action_components = None
 
-    def train(self):
+    def train(self, start_iteration: int = 1, initial_global_step: int = 0):
         if self.envs is None:
             raise RuntimeError("Must call setup() before train()")
 
@@ -223,12 +223,12 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
         dones = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
         values = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
 
-        global_step = 0
+        global_step = initial_global_step
         start_time = time.time()
         next_obs, _ = self.envs.reset(seed=self.args.seed)
         next_done = torch.zeros((args.num_envs, args.num_agents)).to(self.device)
 
-        for iteration in range(1, args.num_iterations + 1):
+        for iteration in range(start_iteration, args.num_iterations + 1):
             iteration_start = time.time()
             self._on_iteration_start(iteration)
             if args.anneal_lr:

@@ -355,7 +355,7 @@ def _run_worker(label: str, run_fn, log_path: str, gpu_id: int) -> None:
     import traceback
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
-    with open(log_path, "w", buffering=1) as f:
+    with open(log_path, "a", buffering=1) as f:
         sys.stdout = f
         sys.stderr = f
         print(f"{'=' * 72}")
@@ -371,17 +371,15 @@ def _run_worker(label: str, run_fn, log_path: str, gpu_id: int) -> None:
             raise
 
 
+def _guarded_worker(sem, label: str, run_fn, log_path: str, gpu_id: int) -> None:
+    """Acquire semaphore slot, run experiment, then release — limits concurrency."""
+    with sem:
+        _run_worker(label, run_fn, log_path, gpu_id)
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
-
-def experiment_exists(exp_name: str) -> bool:
-    """Return True if a folder starting with exp_name already exists in BASE_LOG_DIR."""
-    base = os.path.join(os.path.dirname(__file__), '..', BASE_LOG_DIR)
-    if not os.path.isdir(base):
-        return False
-    return any(entry.startswith(exp_name) for entry in os.listdir(base))
-
 
 def main():
     def make_experiments(seed: int):
@@ -404,18 +402,21 @@ def main():
     ctx = multiprocessing.get_context("spawn")
 
     gpu_ids = [4, 7, 8, 9]
+    max_concurrent = len(gpu_ids) * 2
+    sem = ctx.Semaphore(max_concurrent)
+
     procs = []
     for idx, (seed, label, exp_name, run_fn) in enumerate(all_experiments):
         gpu_id = gpu_ids[idx % len(gpu_ids)]
         seed_log_dir = os.path.join(BASE_LOG_DIR, f"seed_{seed}")
         os.makedirs(seed_log_dir, exist_ok=True)
         log_path = os.path.join(seed_log_dir, f"{exp_name}.log")
-        p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path, gpu_id), name=exp_name)
+        p = ctx.Process(target=_guarded_worker, args=(sem, label, run_fn, log_path, gpu_id), name=exp_name)
         procs.append((label, log_path, p, gpu_id))
 
     print()
     print("=" * 72)
-    print(f"  Launching {len(procs)} experiments in parallel (one per GPU)")
+    print(f"  Launching {len(procs)} experiments (max {max_concurrent} concurrent)")
     print(f"  Seeds: {SEEDS}")
     if MULTI_AGENT_ONLY:
         print("  (baselines skipped — MULTI_AGENT_ONLY=True)")

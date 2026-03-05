@@ -34,12 +34,21 @@ class AssaultExperiment:
         single_agent_mode: bool = False,
         render_oc_overlay: bool = False,
     ):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
             mode_prefix = "single_agent" if single_agent_mode else "multi_agent"
             experiment_name = f"assault_ppo_{mode_prefix}"
 
-        self.log_dir = Path(base_log_dir) / f"{experiment_name}_{timestamp}"
+        # Reuse an existing directory for this experiment if one exists
+        base = Path(base_log_dir)
+        existing_dirs = sorted(base.glob(f"{experiment_name}_*")) if base.exists() else []
+        if existing_dirs:
+            self.log_dir = existing_dirs[-1]
+            print(f"📁 Resuming experiment: {self.log_dir}")
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.log_dir = base / f"{experiment_name}_{timestamp}"
+            print(f"📁 Experiment directory: {self.log_dir}")
+
         self.checkpoint_freq = checkpoint_freq
         self.eval_freq = eval_freq
         self.video_freq = eval_freq if video_freq in {0, None} else video_freq
@@ -58,8 +67,6 @@ class AssaultExperiment:
         self.eval_dir.mkdir(exist_ok=True)
         self.rollouts_dir = self.log_dir / "rollouts"
         self.rollouts_dir.mkdir(exist_ok=True)
-
-        print(f"📁 Experiment directory: {self.log_dir}")
 
     def log_codebase_to_wandb(self, run):
         disabled = os.environ.get("WANDB_MODE", "").lower() == "disabled" or \
@@ -371,6 +378,30 @@ class AssaultExperiment:
                     step=global_step,
                 )
 
+    @staticmethod
+    def _find_latest_checkpoint(checkpoints_dir: Path):
+        """Return dict with iteration, global_step, path for the latest checkpoint, or None."""
+        if not checkpoints_dir.exists():
+            return None
+        iter_dirs = []
+        for p in checkpoints_dir.iterdir():
+            if p.is_dir() and p.name.startswith("iter_"):
+                try:
+                    iter_dirs.append((int(p.name.split("_")[1]), p))
+                except (IndexError, ValueError):
+                    pass
+        if not iter_dirs:
+            return None
+        iter_dirs.sort(key=lambda x: x[0])
+        _, latest = iter_dirs[-1]
+        info_path = latest / "checkpoint_info.json"
+        model_path = latest / "agent.pt"
+        if not info_path.exists() or not model_path.exists():
+            return None
+        with open(info_path) as f:
+            info = json.load(f)
+        return {"iteration": info["iteration"], "global_step": info["global_step"], "path": model_path}
+
     def run(self, args):
         mode_str = "SINGLE-AGENT" if self.single_agent_mode else "MULTI-AGENT"
         print(f"\n{'='*80}")
@@ -382,6 +413,21 @@ class AssaultExperiment:
                 args.total_timesteps = args.num_iterations * args.num_envs * args.num_steps
             else:
                 args.total_timesteps = args.num_iterations * args.num_envs * args.num_steps * args.num_agents
+
+        # Resume / skip logic
+        ckpt = self._find_latest_checkpoint(self.checkpoints_dir)
+        if ckpt and ckpt["iteration"] >= args.num_iterations:
+            print(f"Already complete (iter {ckpt['iteration']}/{args.num_iterations}), skipping.")
+            return
+
+        start_iteration = 1
+        initial_global_step = 0
+        resume_model_path = None
+        if ckpt:
+            start_iteration = ckpt["iteration"] + 1
+            initial_global_step = ckpt["global_step"]
+            resume_model_path = ckpt["path"]
+            print(f"Resuming from iteration {ckpt['iteration']} (global_step={initial_global_step})")
 
         self.save_config(args)
 
@@ -420,8 +466,14 @@ class AssaultExperiment:
             trainer = AssaultPPOTrainer(args, callbacks=callbacks)
 
         trainer.setup()
+        if resume_model_path is not None:
+            trainer.agent.load_state_dict(
+                torch.load(resume_model_path, map_location=trainer.device, weights_only=True)
+            )
+            print(f"Loaded weights from {resume_model_path}")
+
         self.log_codebase_to_wandb(wandb.run)
-        trainer.train()
+        trainer.train(start_iteration=start_iteration, initial_global_step=initial_global_step)
 
         # Save final model to logs directory
         model_filename = "assault_single_agent.pt" if self.single_agent_mode else "assault_agent.pt"
