@@ -32,9 +32,9 @@ CONFIDENCE = 0.95
 # (prefix, label, multi_agent)
 # multi_agent=True → x axis divided by NUM_AGENTS
 EXPERIMENTS = [
-    ("assault_cmp_all_pay",                   "All-Pay",                      True),
     ("assault_cmp_winner_pays",               "Winner-Pays",                  True),
-    ("assault_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
+    ("assault_cmp_all_pay",                   "All-Pay",                      True),
+    # ("assault_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
     ("assault_ppo_multiagent_localobs",       "All-Pay (Local Obs)",   True),
     ("assault_ppo_single_agent_ppo_default_params", "Single-Policy PPO",       False),
 ]

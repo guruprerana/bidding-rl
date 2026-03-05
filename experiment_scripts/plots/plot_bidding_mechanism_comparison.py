@@ -30,10 +30,11 @@ CONFIDENCE = 0.95
 # (prefix, label, multi_agent)
 # multi_agent=True → x axis divided by NUM_AGENTS
 EXPERIMENTS = [
-    ("bidding_cmp_all_pay",                   "All-Pay",                      True),
     ("bidding_cmp_winner_pays",               "Winner-Pays",                  True),
-    ("bidding_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
+    ("bidding_cmp_all_pay",                   "All-Pay",                      True),
+    # ("bidding_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
     ("multiagentppo_localobs",                "All-Pay (Local Obs)",   True),
+    ("gridw_multiagent_noattn", "All-Pay (No Attn. Pool.)", True),
     ("ppo_singleagent_optunait21",            "Single-Policy PPO",              False),
 ]
 
