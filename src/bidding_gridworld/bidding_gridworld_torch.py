@@ -38,6 +38,7 @@ class BiddingGridworldConfig:
     single_agent_mode: bool = False
     reward_decay_factor: float = 0.0
     bidding_mechanism: str = "all_pay"
+    nearest_target_shaping: bool = False
     # "all_pay" | "winner_pays" | "winner_pays_others_reward"
 
 
@@ -268,8 +269,21 @@ class BiddingGridworld:
         if cfg.single_agent_mode:
             rewards = torch.zeros((self.num_envs,), device=device, dtype=torch.float32)
             if cfg.distance_reward_scale > 0:
-                dist_improve = (self.previous_distances - current_distances).to(torch.float32)
-                rewards = rewards + cfg.distance_reward_scale * (dist_improve * (self.targets_reached == 0).to(torch.float32)).sum(dim=1)
+                unreached = self.targets_reached == 0
+                if cfg.nearest_target_shaping:
+                    INF = float(self.grid_size * 2 + 1)
+                    prev_masked = self.previous_distances.to(torch.float32).masked_fill(~unreached, INF)
+                    curr_masked = current_distances.to(torch.float32).masked_fill(~unreached, INF)
+                    has_unreached = unreached.any(dim=1)
+                    nearest_improve = torch.where(
+                        has_unreached,
+                        prev_masked.min(dim=1).values - curr_masked.min(dim=1).values,
+                        torch.zeros(self.num_envs, device=device),
+                    )
+                    rewards = rewards + cfg.distance_reward_scale * nearest_improve
+                else:
+                    dist_improve = (self.previous_distances - current_distances).to(torch.float32)
+                    rewards = rewards + cfg.distance_reward_scale * (dist_improve * unreached.to(torch.float32)).sum(dim=1)
 
             if cfg.reward_decay_factor > 0:
                 min_count = self.targets_reached_count.min(dim=1).values
@@ -1258,6 +1272,205 @@ def evaluate_multi_agent_policy(
     return eval_stats
 
 
+def evaluate_multi_agent_policy_batched(
+    env: BiddingGridworld,
+    policy_fn,
+    num_episodes: int,
+    target_expiry_penalty: float = 0.0,
+    verbose: bool = True
+) -> Dict[str, List]:
+    """
+    Batched evaluation of a multi-agent policy.
+
+    Assumes env.num_envs == num_episodes. Runs all episodes in parallel in a single
+    while loop, which is much faster than sequential evaluation when episodes have
+    fixed length (e.g. moving-targets mode where episodes always run to max_steps).
+
+    Args:
+        env: BiddingGridworld with num_envs == num_episodes
+        policy_fn: Callable taking obs (N, num_agents, obs_dim) and returning actions
+                   (N, num_agents, action_dim).
+        num_episodes: Number of episodes (must equal env.num_envs)
+        target_expiry_penalty: Unused; kept for API parity.
+        verbose: Whether to print progress
+    """
+    N = env.num_envs
+    A = env.num_agents
+    bid_upper_bound = env.config.bid_upper_bound
+    device = env.device
+
+    if N != num_episodes:
+        raise ValueError(f"env.num_envs ({N}) must equal num_episodes ({num_episodes})")
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print("Evaluating multi-agent policy (batched)")
+        print(f"Running {num_episodes} episodes in parallel")
+        print(f"{'='*60}\n")
+
+    obs, _ = env.reset()
+
+    # GPU accumulators
+    returns = torch.zeros(N, device=device)
+    returns_no_bid = torch.zeros(N, device=device)
+    lengths = torch.zeros(N, dtype=torch.long, device=device)
+    targets_reached_count = torch.zeros(N, A, dtype=torch.long, device=device)
+    expired_count = torch.zeros(N, A, dtype=torch.long, device=device)
+    control_steps = torch.zeros(N, A, dtype=torch.long, device=device)
+    bid_count_tensor = torch.zeros(N, bid_upper_bound + 1, dtype=torch.long, device=device)
+
+    # active[i] is True while episode i has not terminated/truncated
+    active = torch.ones(N, dtype=torch.bool, device=device)
+
+    while active.any():
+        actions = policy_fn(obs)
+        if not torch.is_tensor(actions):
+            actions = torch.tensor(actions, device=device)
+        actions = actions.to(device)
+
+        obs, rewards, terminations, truncations, info = env.step(actions)
+
+        done = terminations | truncations  # (N,)
+        # Only update accumulators for still-active envs
+        active_f = active.float()
+
+        returns += (rewards.sum(dim=1) * active_f)
+        lengths += active.long()
+
+        rnb = info.get("reward_no_bid_sum")
+        if isinstance(rnb, torch.Tensor):
+            returns_no_bid += (rnb * active_f)
+
+        tje = info.get("targets_just_expired")
+        if isinstance(tje, torch.Tensor):
+            # tje shape: (N, A)
+            expired_count += (tje.long() * active.unsqueeze(1).long())
+
+        tjr = info.get("targets_just_reached")
+        if isinstance(tjr, torch.Tensor):
+            # tjr shape: (N, A)
+            targets_reached_count += (tjr.long() * active.unsqueeze(1).long())
+
+        winning_agent = info.get("winning_agent")
+        if isinstance(winning_agent, torch.Tensor):
+            # winning_agent shape: (N,), value -1 means no winner
+            valid_winner = (winning_agent >= 0) & active  # (N,)
+            if valid_winner.any():
+                winner_idx = winning_agent.clamp(min=0)  # avoid negative index
+                control_steps.scatter_add_(
+                    1,
+                    winner_idx.unsqueeze(1),
+                    valid_winner.long().unsqueeze(1)
+                )
+
+        bids = info.get("bids")
+        is_bidding_round = info.get("is_bidding_round")
+        if isinstance(bids, torch.Tensor) and isinstance(is_bidding_round, torch.Tensor):
+            # bids shape: (N, A), is_bidding_round shape: (N,)
+            bidding_active = is_bidding_round & active  # (N,)
+            if bidding_active.any():
+                bids_clamped = bids.clamp(0, bid_upper_bound).long()
+                for a_idx in range(A):
+                    bid_count_tensor.scatter_add_(
+                        1,
+                        bids_clamped[:, a_idx].unsqueeze(1),
+                        bidding_active.long().unsqueeze(1)
+                    )
+
+        # Mark envs that are done as inactive
+        active = active & ~done
+
+    # Move results to CPU for output
+    returns_cpu = returns.cpu().tolist()
+    returns_no_bid_cpu = returns_no_bid.cpu().tolist()
+    lengths_cpu = lengths.cpu().tolist()
+    targets_reached_cpu = targets_reached_count.cpu().numpy()
+    expired_cpu = expired_count.cpu().numpy()
+    control_steps_cpu = control_steps.cpu().tolist()
+    bid_count_np = bid_count_tensor.cpu().numpy()
+
+    eval_stats = {
+        "episode_returns": [],
+        "episode_returns_no_bid": [],
+        "episode_lengths": [],
+        "targets_reached_per_episode": [],
+        "expired_targets_per_episode": [],
+        "min_targets_reached_per_episode": [],
+        "targets_reached_count_per_episode": [],
+        "episode_data_list": [],  # empty — video not supported in batched mode
+        "bid_counts_per_episode": [],
+        "control_steps_per_agent_per_episode": [],
+        "expired_count_per_target_per_episode": [],
+        "avg_expired_per_episode": [],
+        "max_expired_per_episode": [],
+        "avg_reached_per_episode": [],
+        "performance_per_episode": [],
+        "avg_performance_per_episode": [],
+        "min_performance_per_episode": [],
+    }
+
+    for i in range(N):
+        trc = targets_reached_cpu[i]  # (A,) numpy
+        ec = expired_cpu[i]           # (A,) numpy
+        performance = trc - ec
+
+        targets_reached = int((trc > 0).sum())
+        min_targets_reached = int(trc.min())
+        episode_expired_count = int(ec.sum())
+
+        bid_counts_dict = {b: int(bid_count_np[i, b]) for b in range(bid_upper_bound + 1)}
+
+        eval_stats["episode_returns"].append(returns_cpu[i])
+        eval_stats["episode_returns_no_bid"].append(returns_no_bid_cpu[i])
+        eval_stats["episode_lengths"].append(int(lengths_cpu[i]))
+        eval_stats["targets_reached_per_episode"].append(targets_reached)
+        eval_stats["expired_targets_per_episode"].append(episode_expired_count)
+        eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
+        eval_stats["targets_reached_count_per_episode"].append(trc.tolist())
+        eval_stats["bid_counts_per_episode"].append(bid_counts_dict)
+        eval_stats["control_steps_per_agent_per_episode"].append(control_steps_cpu[i])
+        eval_stats["expired_count_per_target_per_episode"].append(ec.tolist())
+        eval_stats["avg_expired_per_episode"].append(float(np.mean(ec)))
+        eval_stats["max_expired_per_episode"].append(float(np.max(ec)))
+        eval_stats["avg_reached_per_episode"].append(float(np.mean(trc)))
+        eval_stats["performance_per_episode"].append(performance.tolist())
+        eval_stats["avg_performance_per_episode"].append(float(np.mean(performance)))
+        eval_stats["min_performance_per_episode"].append(float(np.min(performance)))
+
+    if verbose:
+        for i in range(N):
+            print(f"  Episode {i + 1}: Return={eval_stats['episode_returns'][i]:.2f}, "
+                  f"Length={eval_stats['episode_lengths'][i]}, "
+                  f"Targets={eval_stats['targets_reached_per_episode'][i]}/{A}, "
+                  f"Expired={eval_stats['expired_targets_per_episode'][i]}, "
+                  f"MinReached={eval_stats['min_targets_reached_per_episode'][i]}, "
+                  f"AvgPerf={eval_stats['avg_performance_per_episode'][i]:.2f}")
+
+        avg_return = np.mean(eval_stats["episode_returns"])
+        avg_return_no_bid = np.mean(eval_stats["episode_returns_no_bid"])
+        avg_length = np.mean(eval_stats["episode_lengths"])
+        avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
+        avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
+        avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
+        avg_min_perf = np.mean(eval_stats["min_performance_per_episode"])
+        success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
+                          if t == A) / num_episodes
+
+        print("\nEvaluation Summary:")
+        print(f"  Average Return: {avg_return:.2f}")
+        print(f"  Average Return (no bid penalty): {avg_return_no_bid:.2f}")
+        print(f"  Average Length: {avg_length:.1f}")
+        print(f"  Average Targets: {avg_targets:.2f}/{A}")
+        print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
+        print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
+        print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
+        print(f"  Avg Min Performance: {avg_min_perf:.2f}")
+        print(f"  Success Rate: {success_rate*100:.1f}%\n")
+
+    return eval_stats
+
+
 def evaluate_single_agent_policy(
     env: BiddingGridworld,
     policy_fn,
@@ -1396,6 +1609,150 @@ def evaluate_single_agent_policy(
         print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
         print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
+        print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
+        print(f"  Avg Min Performance: {avg_min_perf:.2f}")
+        print(f"  Success Rate: {success_rate*100:.1f}%\n")
+
+    return eval_stats
+
+
+def evaluate_single_agent_policy_batched(
+    env: BiddingGridworld,
+    policy_fn,
+    num_episodes: int,
+    target_expiry_penalty: float = 0.0,
+    verbose: bool = True
+) -> Dict[str, List]:
+    """
+    Batched evaluation of a single-agent policy.
+
+    Assumes env.num_envs == num_episodes. Runs all episodes in parallel in a single
+    while loop.
+
+    Args:
+        env: BiddingGridworld with num_envs == num_episodes, single_agent_mode=True
+        policy_fn: Callable taking obs (N, obs_dim) and returning actions (N,).
+        num_episodes: Number of episodes (must equal env.num_envs)
+        target_expiry_penalty: Unused; kept for API parity.
+        verbose: Whether to print progress
+    """
+    N = env.num_envs
+    A = env.num_agents
+    device = env.device
+
+    if N != num_episodes:
+        raise ValueError(f"env.num_envs ({N}) must equal num_episodes ({num_episodes})")
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print("Evaluating single-agent policy (batched)")
+        print(f"Running {num_episodes} episodes in parallel")
+        print(f"{'='*60}\n")
+
+    obs, _ = env.reset()
+
+    # GPU accumulators
+    returns = torch.zeros(N, device=device)
+    lengths = torch.zeros(N, dtype=torch.long, device=device)
+    targets_reached_count = torch.zeros(N, A, dtype=torch.long, device=device)
+    expired_count = torch.zeros(N, A, dtype=torch.long, device=device)
+
+    active = torch.ones(N, dtype=torch.bool, device=device)
+
+    while active.any():
+        actions = policy_fn(obs)
+        if not torch.is_tensor(actions):
+            actions = torch.tensor(actions, device=device)
+        actions = actions.to(device)
+
+        obs, rewards, terminations, truncations, info = env.step(actions)
+
+        done = terminations | truncations  # (N,)
+        active_f = active.float()
+
+        returns += (rewards * active_f)
+        lengths += active.long()
+
+        tje = info.get("targets_just_expired")
+        if isinstance(tje, torch.Tensor):
+            expired_count += (tje.long() * active.unsqueeze(1).long())
+
+        tjr = info.get("targets_just_reached")
+        if isinstance(tjr, torch.Tensor):
+            targets_reached_count += (tjr.long() * active.unsqueeze(1).long())
+
+        active = active & ~done
+
+    returns_cpu = returns.cpu().tolist()
+    lengths_cpu = lengths.cpu().tolist()
+    targets_reached_cpu = targets_reached_count.cpu().numpy()
+    expired_cpu = expired_count.cpu().numpy()
+
+    eval_stats = {
+        "episode_returns": [],
+        "episode_lengths": [],
+        "targets_reached_per_episode": [],
+        "expired_targets_per_episode": [],
+        "min_targets_reached_per_episode": [],
+        "targets_reached_count_per_episode": [],
+        "episode_data_list": [],  # empty — video not supported in batched mode
+        "expired_count_per_target_per_episode": [],
+        "avg_expired_per_episode": [],
+        "max_expired_per_episode": [],
+        "avg_reached_per_episode": [],
+        "performance_per_episode": [],
+        "avg_performance_per_episode": [],
+        "min_performance_per_episode": [],
+    }
+
+    for i in range(N):
+        trc = targets_reached_cpu[i]  # (A,) numpy
+        ec = expired_cpu[i]           # (A,) numpy
+        performance = trc - ec
+
+        targets_reached = int((trc > 0).sum())
+        min_targets_reached = int(trc.min())
+        episode_expired_count = int(ec.sum())
+
+        eval_stats["episode_returns"].append(returns_cpu[i])
+        eval_stats["episode_lengths"].append(int(lengths_cpu[i]))
+        eval_stats["targets_reached_per_episode"].append(targets_reached)
+        eval_stats["expired_targets_per_episode"].append(episode_expired_count)
+        eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
+        eval_stats["targets_reached_count_per_episode"].append(trc.tolist())
+        eval_stats["expired_count_per_target_per_episode"].append(ec.tolist())
+        eval_stats["avg_expired_per_episode"].append(float(np.mean(ec)))
+        eval_stats["max_expired_per_episode"].append(float(np.max(ec)))
+        eval_stats["avg_reached_per_episode"].append(float(np.mean(trc)))
+        eval_stats["performance_per_episode"].append(performance.tolist())
+        eval_stats["avg_performance_per_episode"].append(float(np.mean(performance)))
+        eval_stats["min_performance_per_episode"].append(float(np.min(performance)))
+
+    if verbose:
+        for i in range(N):
+            print(f"  Episode {i + 1}: Return={eval_stats['episode_returns'][i]:.2f}, "
+                  f"Length={eval_stats['episode_lengths'][i]}, "
+                  f"Targets={eval_stats['targets_reached_per_episode'][i]}/{A}, "
+                  f"Expired={eval_stats['expired_targets_per_episode'][i]}, "
+                  f"MinReached={eval_stats['min_targets_reached_per_episode'][i]}, "
+                  f"AvgPerf={eval_stats['avg_performance_per_episode'][i]:.2f}")
+
+        avg_return = np.mean(eval_stats["episode_returns"])
+        avg_length = np.mean(eval_stats["episode_lengths"])
+        avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
+        avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
+        avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
+        avg_min_perf = np.mean(eval_stats["min_performance_per_episode"])
+        success_rate = sum(1 for t in eval_stats["targets_reached_per_episode"]
+                          if t == A) / num_episodes
+
+        print("\nEvaluation Summary:")
+        print(f"  Average Return: {avg_return:.2f}")
+        print(f"  Average Length: {avg_length:.1f}")
+        print(f"  Average Targets: {avg_targets:.2f}/{A}")
+        print(f"  Average Expired: {avg_expired:.2f} +/- {np.std(eval_stats['expired_targets_per_episode']):.2f}")
+        print(f"  Average Min Reached: {avg_min_reached:.2f} +/- {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
         print(f"  Avg Min Performance: {avg_min_perf:.2f}")
         print(f"  Success Rate: {success_rate*100:.1f}%\n")

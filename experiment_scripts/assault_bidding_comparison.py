@@ -2,13 +2,12 @@
 """
 Assault Bidding Mechanism Comparison Experiment
 
-Runs 5 experiments in parallel to compare bidding mechanisms and baselines
+Runs 4 experiments in parallel to compare bidding mechanisms and baselines
 in the OCAtari Assault environment:
   1. Multi-agent PPO — all_pay
   2. Multi-agent PPO — winner_pays
-  3. Multi-agent PPO — winner_pays_others_reward
-  4. Single-agent PPO baseline
-  5. DWN baseline
+  3. Single-agent PPO baseline
+  4. DWN baseline
 
 All configuration is at the top of this file.
 Each experiment runs in its own subprocess (required for separate CUDA contexts).
@@ -89,7 +88,7 @@ ENT_COEF = 0.05
 VF_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 TARGET_KL = 0.02
-SEED = 1
+SEEDS = [1825, 410, 4507, 4013, 3658]
 
 # Network
 ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)
@@ -104,21 +103,20 @@ VIDEO_FREQ = 0
 LOG_VIDEOS_TO_WANDB = False
 
 # Set to True to skip single-agent PPO and DWN baselines
-MULTI_AGENT_ONLY = True
+MULTI_AGENT_ONLY = False
 
 # ============================================================================
 # SINGLE-AGENT BASELINE CONFIG
 # ============================================================================
 
-# 150 × 128 × 512 × 3 = 450 × 128 × 512 → same total env steps
-SINGLE_AGENT_ITERATIONS = 450
-SINGLE_AGENT_EVAL_FREQ = 30  # 450 * ~6.7% ≈ 30 iterations
+SINGLE_AGENT_ITERATIONS = 150
+SINGLE_AGENT_EVAL_FREQ = 10
 
 # These differ from the multi-agent PPO config above
 SINGLE_AGENT_LEARNING_RATE = 2.5e-4
-SINGLE_AGENT_NUM_STEPS = 128
-SINGLE_AGENT_NUM_MINIBATCHES = 4
-SINGLE_AGENT_UPDATE_EPOCHS = 4
+SINGLE_AGENT_NUM_STEPS = 512
+SINGLE_AGENT_NUM_MINIBATCHES = 8
+SINGLE_AGENT_UPDATE_EPOCHS = 8
 SINGLE_AGENT_CLIP_COEF = 0.1
 SINGLE_AGENT_ENT_COEF = 0.01
 SINGLE_AGENT_TARGET_KL = None
@@ -162,11 +160,11 @@ DWN_NUM_VIDEO_EPISODES = 0
 # ============================================================================
 
 
-def run_ppo_experiment(bidding_mechanism: str, exp_name: str) -> None:
+def run_ppo_experiment(bidding_mechanism: str, exp_name: str, seed: int) -> None:
     """Create and run a multi-agent Assault PPO experiment."""
     args = AssaultArgs(
         exp_name=exp_name,
-        seed=SEED,
+        seed=seed,
         track=TRACK,
         wandb_project_name=WANDB_PROJECT,
         wandb_entity=WANDB_ENTITY,
@@ -226,12 +224,11 @@ def run_ppo_experiment(bidding_mechanism: str, exp_name: str) -> None:
     experiment.run(args)
 
 
-def run_single_agent_baseline() -> None:
+def run_single_agent_baseline(exp_name: str, seed: int) -> None:
     """Create and run the single-agent Assault PPO baseline."""
-    exp_name = "assault_cmp_single_agent"
     args = AssaultSingleAgentArgs(
         exp_name=exp_name,
-        seed=SEED,
+        seed=seed,
         track=TRACK,
         wandb_project_name=WANDB_PROJECT,
         wandb_entity=WANDB_ENTITY,
@@ -285,12 +282,11 @@ def run_single_agent_baseline() -> None:
     experiment.run(args)
 
 
-def run_dwn_baseline() -> None:
+def run_dwn_baseline(exp_name: str, seed: int) -> None:
     """Create and run the Assault DWN baseline."""
-    exp_name = "assault_cmp_dwn"
     args = AssaultDWNArgs(
         exp_name=exp_name,
-        seed=SEED,
+        seed=seed,
         track=TRACK,
         wandb_project_name=WANDB_PROJECT,
         wandb_entity=WANDB_ENTITY,
@@ -388,37 +384,39 @@ def experiment_exists(exp_name: str) -> bool:
 
 
 def main():
-    multi_agent_experiments = [
-        ("Multi-agent PPO — all_pay",                  "assault_cmp_all_pay",                   functools.partial(run_ppo_experiment, "all_pay",                   "assault_cmp_all_pay")),
-        ("Multi-agent PPO — winner_pays",               "assault_cmp_winner_pays",               functools.partial(run_ppo_experiment, "winner_pays",               "assault_cmp_winner_pays")),
-        ("Multi-agent PPO — winner_pays_others_reward", "assault_cmp_winner_pays_others_reward", functools.partial(run_ppo_experiment, "winner_pays_others_reward",  "assault_cmp_winner_pays_others_reward")),
-    ]
-    baseline_experiments = [
-        ("Single-agent PPO baseline",                   "assault_cmp_single_agent",              run_single_agent_baseline),
-        ("DWN baseline",                                "assault_cmp_dwn",                       run_dwn_baseline),
-    ]
+    def make_experiments(seed: int):
+        s = f"_s{seed}"
+        multi_agent = [
+            (f"Multi-agent PPO — all_pay (seed={seed})",     f"assault_cmp_all_pay{s}",    functools.partial(run_ppo_experiment, "all_pay",    f"assault_cmp_all_pay{s}",    seed)),
+            (f"Multi-agent PPO — winner_pays (seed={seed})", f"assault_cmp_winner_pays{s}", functools.partial(run_ppo_experiment, "winner_pays", f"assault_cmp_winner_pays{s}", seed)),
+        ]
+        baselines = [
+            (f"Single-agent PPO baseline (seed={seed})", f"assault_cmp_single_agent{s}", functools.partial(run_single_agent_baseline, f"assault_cmp_single_agent{s}", seed)),
+            (f"DWN baseline (seed={seed})",              f"assault_cmp_dwn{s}",          functools.partial(run_dwn_baseline,          f"assault_cmp_dwn{s}",          seed)),
+        ]
+        return multi_agent if MULTI_AGENT_ONLY else multi_agent + baselines
 
-    experiments = multi_agent_experiments if MULTI_AGENT_ONLY else multi_agent_experiments + baseline_experiments
-
-    # Skip experiments whose output folder already exists
-    experiments = [(label, exp_name, run_fn) for label, exp_name, run_fn in experiments if not experiment_exists(exp_name)]
-
-    if not experiments:
-        print("All experiments already exist — nothing to run.")
-        return
+    all_experiments = []
+    for seed in SEEDS:
+        all_experiments.extend((seed, label, exp_name, run_fn) for label, exp_name, run_fn in make_experiments(seed))
 
     os.makedirs(BASE_LOG_DIR, exist_ok=True)
     ctx = multiprocessing.get_context("spawn")
 
+    gpu_ids = [4, 7, 8, 9]
     procs = []
-    for gpu_id, (label, exp_name, run_fn) in enumerate(experiments):
-        log_path = os.path.join(BASE_LOG_DIR, f"{exp_name}.log")
+    for idx, (seed, label, exp_name, run_fn) in enumerate(all_experiments):
+        gpu_id = gpu_ids[idx % len(gpu_ids)]
+        seed_log_dir = os.path.join(BASE_LOG_DIR, f"seed_{seed}")
+        os.makedirs(seed_log_dir, exist_ok=True)
+        log_path = os.path.join(seed_log_dir, f"{exp_name}.log")
         p = ctx.Process(target=_run_worker, args=(label, run_fn, log_path, gpu_id), name=exp_name)
         procs.append((label, log_path, p, gpu_id))
 
     print()
     print("=" * 72)
     print(f"  Launching {len(procs)} experiments in parallel (one per GPU)")
+    print(f"  Seeds: {SEEDS}")
     if MULTI_AGENT_ONLY:
         print("  (baselines skipped — MULTI_AGENT_ONLY=True)")
     print("=" * 72)

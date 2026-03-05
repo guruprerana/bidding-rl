@@ -15,7 +15,9 @@ from bidding_gridworld.bidding_gridworld_torch import (
     BiddingGridworld,
     BiddingGridworldConfig,
     evaluate_multi_agent_policy,
+    evaluate_multi_agent_policy_batched,
     evaluate_single_agent_policy,
+    evaluate_single_agent_policy_batched,
 )
 from bidding_gridworld.bidding_ppo import PPOTrainer
 from bidding_gridworld.single_agent_ppo import SingleAgentPPOTrainer
@@ -198,23 +200,25 @@ class PPOMovingTargetsExperiment:
         )
         eval_env = BiddingGridworld(
             env_config,
-            num_envs=1,
+            num_envs=self.num_eval_episodes,
             device=trainer.device,
             seed=trainer.args.seed,
         )
 
-        # Create policy wrapper function
+        # Create batched policy wrapper function
+        # obs shape: (N, num_agents, obs_dim) — reshape for shared network, then reshape back
         def policy_fn(obs):
-            """Get actions for a single env using per-agent observations."""
+            """Get actions for all envs in a batched call."""
             obs_tensor = obs if torch.is_tensor(obs) else torch.tensor(obs, dtype=torch.float32)
             obs_tensor = obs_tensor.to(trainer.device)
-
+            N_envs, n_agents, obs_dim = obs_tensor.shape
+            obs_flat = obs_tensor.reshape(N_envs * n_agents, obs_dim)
             with torch.no_grad():
-                action, _, _, _ = trainer.agent.get_action_and_value(obs_tensor)
-                return action
+                action, _, _, _ = trainer.agent.get_action_and_value(obs_flat)
+            return action.reshape(N_envs, n_agents, -1)
 
-        # Run evaluation using refactored function
-        eval_stats = evaluate_multi_agent_policy(
+        # Run batched evaluation
+        eval_stats = evaluate_multi_agent_policy_batched(
             env=eval_env,
             policy_fn=policy_fn,
             num_episodes=self.num_eval_episodes,
@@ -375,22 +379,23 @@ class PPOMovingTargetsExperiment:
         )
         eval_env = BiddingGridworld(
             env_config,
-            num_envs=1,
+            num_envs=self.num_eval_episodes,
             device=trainer.device,
             seed=trainer.args.seed,
         )
 
-        # Create policy wrapper function
+        # Create batched policy wrapper function
+        # obs shape: (N, obs_dim) — network already handles batch dimension
         def policy_fn(obs):
-            """Get action for a single env."""
+            """Get actions for all envs in a batched call."""
             obs_tensor = obs if torch.is_tensor(obs) else torch.tensor(obs, dtype=torch.float32)
             obs_tensor = obs_tensor.to(trainer.device)
             with torch.no_grad():
-                action, _, _, _ = trainer.agent.get_action_and_value(obs_tensor.unsqueeze(0))
-                return action.squeeze(0)
+                action, _, _, _ = trainer.agent.get_action_and_value(obs_tensor)
+            return action
 
-        # Run evaluation using refactored function
-        eval_stats = evaluate_single_agent_policy(
+        # Run batched evaluation
+        eval_stats = evaluate_single_agent_policy_batched(
             env=eval_env,
             policy_fn=policy_fn,
             num_episodes=self.num_eval_episodes,

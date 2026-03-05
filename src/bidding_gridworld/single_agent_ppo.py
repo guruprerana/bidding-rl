@@ -59,6 +59,8 @@ class SingleAgentArgs:
     """probability of target direction change (for moving targets)"""
     target_move_interval: int = 1
     """steps between target movements (for moving targets)"""
+    nearest_target_shaping: bool = False
+    """whether to shape reward toward nearest unreached target instead of summing over all"""
 
     # Network architecture
     actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
@@ -283,6 +285,7 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
             visible_targets=None,
             single_agent_mode=True,
             reward_decay_factor=self.args.reward_decay_factor,
+            nearest_target_shaping=self.args.nearest_target_shaping,
         )
         self.envs = BiddingGridworld(
             env_config,
