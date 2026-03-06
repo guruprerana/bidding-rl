@@ -772,26 +772,51 @@ class BiddingGridworld:
                 grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
-            stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple']
+            stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple', 'deeppink', 'teal', 'saddlebrown', 'mediumvioletred', 'steelblue', 'olivedrab', 'coral']
 
-            def draw_stick_figure(ax, cx, cy, color, lw=1.5):
-                ax.add_patch(plt.Circle((cx, cy - 0.22), 0.10, facecolor=color, edgecolor=color, linewidth=1))
-                ax.plot([cx, cx], [cy - 0.12, cy + 0.08], color=color, linewidth=lw)
-                ax.plot([cx - 0.18, cx + 0.18], [cy - 0.02, cy - 0.02], color=color, linewidth=lw)
-                ax.plot([cx, cx - 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
-                ax.plot([cx, cx + 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
+            cat_expressions = ['😸', '😺', '😼', '😽', '🙀', '😹', '😻', '😾', '😿', '🐱', '😺', '😸']
+
+            _scale = 15 / self.grid_size
+            _cat_fontsize = max(6, int(18 * _scale))
+            _robot_s = 0.32 * _scale
+
+            def draw_cat(ax, cx, cy, color, idx=0):
+                expr = cat_expressions[idx % len(cat_expressions)]
+                ax.text(cx, cy, expr, ha='center', va='center', fontsize=_cat_fontsize, color=color, zorder=5)
+
+            def draw_robot(ax, cx, cy, s=_robot_s):
+                import matplotlib.patches as mpatches
+                ax.plot([cx, cx], [cy - s*1.05, cy - s*0.72], color='#444', linewidth=1.5, zorder=4)
+                ax.add_patch(plt.Circle((cx, cy - s*1.12), s*0.08, facecolor='#FF4444', edgecolor='#444', linewidth=1, zorder=5))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.42, cy - s*0.70), s*0.84, s*0.60,
+                             boxstyle='round,pad=0.02', facecolor='#A8C8E8', edgecolor='#444', linewidth=1.5, zorder=4))
+                for ex in [cx - s*0.15, cx + s*0.15]:
+                    ax.add_patch(plt.Circle((ex, cy - s*0.42), s*0.10, facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
+                    ax.add_patch(plt.Circle((ex + s*0.03, cy - s*0.44), s*0.04, facecolor='white', linewidth=0, zorder=6))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.18, cy - s*0.22), s*0.36, s*0.10,
+                             boxstyle='round,pad=0.01', facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.46, cy + s*0.02), s*0.92, s*0.68,
+                             boxstyle='round,pad=0.02', facecolor='#88AACC', edgecolor='#444', linewidth=1.5, zorder=4))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.26, cy + s*0.12), s*0.52, s*0.36,
+                             boxstyle='round,pad=0.01', facecolor='#CCDDE8', edgecolor='#666', linewidth=1, zorder=5))
+                for bx, bc in [(cx - s*0.10, '#FF4444'), (cx + s*0.10, '#44CC44')]:
+                    ax.add_patch(plt.Circle((bx, cy + s*0.30), s*0.07, facecolor=bc, edgecolor='#444', linewidth=1, zorder=6))
+                for side in [-1, 1]:
+                    ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
+                            color='#88AACC', linewidth=4, solid_capstyle='round', zorder=3)
+                    ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
+                            color='#444', linewidth=1.5, solid_capstyle='round', zorder=3)
 
             for i in range(self.num_agents):
                 target_row, target_col = target_positions[i]
                 if include_reached and targets_reached[i] != 0:
-                    draw_stick_figure(grid_ax, target_col, target_row, 'darkgreen')
+                    draw_cat(grid_ax, target_col, target_row, 'darkgreen', idx=i)
                     grid_ax.text(target_col, target_row - 0.5, '✓',
                            ha='center', va='center', fontsize=8, fontweight='bold', color='darkgreen')
                 else:
-                    draw_stick_figure(grid_ax, target_col, target_row, stick_colors[i % len(stick_colors)])
+                    draw_cat(grid_ax, target_col, target_row, stick_colors[i % len(stick_colors)], idx=i)
 
-            grid_ax.text(agent_col, agent_row, '☕',
-                   ha='center', va='center', fontsize=16)
+            draw_robot(grid_ax, agent_col, agent_row)
 
             grid_ax.set_title(f'Step {frame}', fontsize=11, fontweight='bold')
 
@@ -918,27 +943,53 @@ class BiddingGridworld:
                 grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
                 grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
 
-            stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple']
+            stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple', 'deeppink', 'teal', 'saddlebrown', 'mediumvioletred', 'steelblue', 'olivedrab', 'coral']
             edge_colors = ['blue', 'red', 'orange', 'green', 'purple']
             winning_agent = step_detail.get("winning_agent", -1) if step_detail else None
 
-            def draw_stick_figure(ax, cx, cy, color, lw=1.5):
-                ax.add_patch(plt.Circle((cx, cy - 0.22), 0.10, facecolor=color, edgecolor=color, linewidth=1))
-                ax.plot([cx, cx], [cy - 0.12, cy + 0.08], color=color, linewidth=lw)
-                ax.plot([cx - 0.18, cx + 0.18], [cy - 0.02, cy - 0.02], color=color, linewidth=lw)
-                ax.plot([cx, cx - 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
-                ax.plot([cx, cx + 0.16], [cy + 0.08, cy + 0.28], color=color, linewidth=lw)
+            cat_expressions = ['😸', '😺', '😼', '😽', '🙀', '😹', '😻', '😾', '😿', '🐱', '😺', '😸']
+
+            _scale = 15 / self.grid_size
+            _cat_fontsize = max(6, int(18 * _scale))
+            _robot_s = 0.32 * _scale
+
+            def draw_cat(ax, cx, cy, color, idx=0):
+                expr = cat_expressions[idx % len(cat_expressions)]
+                ax.text(cx, cy, expr, ha='center', va='center', fontsize=_cat_fontsize, color=color, zorder=5)
+
+            def draw_robot(ax, cx, cy, s=_robot_s):
+                import matplotlib.patches as mpatches
+                ax.plot([cx, cx], [cy - s*1.05, cy - s*0.72], color='#444', linewidth=1.5, zorder=4)
+                ax.add_patch(plt.Circle((cx, cy - s*1.12), s*0.08, facecolor='#FF4444', edgecolor='#444', linewidth=1, zorder=5))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.42, cy - s*0.70), s*0.84, s*0.60,
+                             boxstyle='round,pad=0.02', facecolor='#A8C8E8', edgecolor='#444', linewidth=1.5, zorder=4))
+                for ex in [cx - s*0.15, cx + s*0.15]:
+                    ax.add_patch(plt.Circle((ex, cy - s*0.42), s*0.10, facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
+                    ax.add_patch(plt.Circle((ex + s*0.03, cy - s*0.44), s*0.04, facecolor='white', linewidth=0, zorder=6))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.18, cy - s*0.22), s*0.36, s*0.10,
+                             boxstyle='round,pad=0.01', facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.46, cy + s*0.02), s*0.92, s*0.68,
+                             boxstyle='round,pad=0.02', facecolor='#88AACC', edgecolor='#444', linewidth=1.5, zorder=4))
+                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.26, cy + s*0.12), s*0.52, s*0.36,
+                             boxstyle='round,pad=0.01', facecolor='#CCDDE8', edgecolor='#666', linewidth=1, zorder=5))
+                for bx, bc in [(cx - s*0.10, '#FF4444'), (cx + s*0.10, '#44CC44')]:
+                    ax.add_patch(plt.Circle((bx, cy + s*0.30), s*0.07, facecolor=bc, edgecolor='#444', linewidth=1, zorder=6))
+                for side in [-1, 1]:
+                    ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
+                            color='#88AACC', linewidth=4, solid_capstyle='round', zorder=3)
+                    ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
+                            color='#444', linewidth=1.5, solid_capstyle='round', zorder=3)
 
             for i in range(self.num_agents):
                 target_row, target_col = target_positions[i]
                 is_controlling = (winning_agent == i)
 
                 if include_reached and targets_reached[i] != 0:
-                    draw_stick_figure(grid_ax, target_col, target_row, 'darkgreen')
+                    draw_cat(grid_ax, target_col, target_row, 'darkgreen', idx=i)
                     grid_ax.text(target_col, target_row - 0.5, '✓',
                            ha='center', va='center', fontsize=8, fontweight='bold', color='darkgreen')
                 else:
-                    draw_stick_figure(grid_ax, target_col, target_row, stick_colors[i % len(stick_colors)])
+                    draw_cat(grid_ax, target_col, target_row, stick_colors[i % len(stick_colors)], idx=i)
                     if is_controlling:
                         grid_ax.text(target_col, target_row - 0.6, '⚡',
                                ha='center', va='center', fontsize=8, color='gold')
@@ -947,8 +998,7 @@ class BiddingGridworld:
                 grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
                                        facecolor='none', edgecolor=edge_colors[winning_agent % len(edge_colors)], linewidth=3))
 
-            grid_ax.text(agent_col, agent_row, '☕',
-                   ha='center', va='center', fontsize=16)
+            draw_robot(grid_ax, agent_col, agent_row)
 
             grid_ax.set_title(f'Step {frame}', fontsize=11, fontweight='bold')
 

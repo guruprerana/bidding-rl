@@ -8,15 +8,15 @@ np.random.seed(42)
 grid_size = 7
 num_targets = 5
 
-stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple']
+stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple', 'deeppink', 'teal', 'saddlebrown', 'mediumvioletred', 'steelblue', 'olivedrab', 'coral']
 directions = [(-1,0), (1,0), (0,-1), (0,1)]
 
-def draw_stick_figure(ax, cx, cy, color, lw=2.0):
-    ax.add_patch(plt.Circle((cx, cy - 0.22), 0.12, facecolor=color, edgecolor=color, linewidth=1))
-    ax.plot([cx, cx], [cy - 0.10, cy + 0.12], color=color, linewidth=lw)
-    ax.plot([cx - 0.22, cx + 0.22], [cy - 0.00, cy - 0.00], color=color, linewidth=lw)
-    ax.plot([cx, cx - 0.18], [cy + 0.12, cy + 0.35], color=color, linewidth=lw)
-    ax.plot([cx, cx + 0.18], [cy + 0.12, cy + 0.35], color=color, linewidth=lw)
+cat_expressions = ['😸', '😺', '😼', '😽', '🙀', '😹', '😻', '😾', '😿', '🐱', '😺', '😸']
+
+def draw_stick_figure(ax, cx, cy, color, lw=2.0, expression_idx=0):
+    expr = cat_expressions[expression_idx % len(cat_expressions)]
+    ax.text(cx, cy, expr, fontsize=42, ha='center', va='center', zorder=5,
+            color=color, fontfamily='DejaVu Sans')
 
 def sample_spread_positions(grid_size, n, min_dist=2, seed=42):
     rng = random.Random(seed)
@@ -37,26 +37,26 @@ target_positions = positions[1:]
 fig, ax = plt.subplots(figsize=(8, 8))
 
 # Parchment background
-fig.patch.set_facecolor('#F2E0C0')
-ax.set_facecolor('#F2E0C0')
+fig.patch.set_facecolor('white')
+ax.set_facecolor('white')
 
 ax.set_xlim(-0.5, grid_size - 0.5)
 ax.set_ylim(-0.5, grid_size - 0.5)
 ax.set_aspect('equal')
 
-# Rustic gridlines in warm brown
+# Inner gridlines in grey
 for i in range(grid_size + 1):
-    ax.axhline(i - 0.5, color='#8B5E3C', linewidth=1.5, alpha=0.6)
-    ax.axvline(i - 0.5, color='#8B5E3C', linewidth=1.5, alpha=0.6)
+    ax.axhline(i - 0.5, color='#AAAAAA', linewidth=1.0)
+    ax.axvline(i - 0.5, color='#AAAAAA', linewidth=1.0)
 
-# Thick rustic border
+# Black border
 for spine in ax.spines.values():
-    spine.set_edgecolor('#5C3317')
-    spine.set_linewidth(4)
+    spine.set_edgecolor('black')
+    spine.set_linewidth(3)
 
 for i, (row, col) in enumerate(target_positions):
     color = stick_colors[i % len(stick_colors)]
-    draw_stick_figure(ax, col, row, color)
+    draw_stick_figure(ax, col, row, color, expression_idx=i)
     dr, dc = random.choice(directions)
     mid_col = col + dc * 0.65
     mid_row = row + dr * 0.65
@@ -65,44 +65,49 @@ for i, (row, col) in enumerate(target_positions):
                 arrowprops=dict(arrowstyle='->', color=color, lw=4.0,
                                 mutation_scale=20))
 
-def draw_coffee_cup(ax, cx, cy, cup_color='#C0522A', rim_color='#7A2E0E', steam_color='#A0522A', s=0.78):
+def draw_robot(ax, cx, cy, s=0.55):
     import matplotlib.patches as mpatches
-    # Steam lines
-    for sx, phase in [(-0.08*s, 0), (0.08*s, np.pi)]:
-        t = np.linspace(0, 1, 30)
-        wx = cx + sx + 0.04*s * np.sin(phase + t * 3 * np.pi)
-        wy = cy - 0.32*s - t * 0.22*s
-        ax.plot(wx, wy, color=steam_color, linewidth=2, alpha=0.7)
-    # Saucer
-    ax.add_patch(mpatches.Ellipse((cx, cy + 0.30*s), width=0.72*s, height=0.14*s,
-                                   facecolor=rim_color, edgecolor=rim_color, zorder=2))
-    ax.add_patch(mpatches.Ellipse((cx, cy + 0.28*s), width=0.58*s, height=0.09*s,
-                                   facecolor=cup_color, edgecolor=cup_color, zorder=3))
-    # Cup body (trapezoid)
-    ax.add_patch(plt.Polygon([
-        (cx - 0.27*s, cy - 0.22*s), (cx + 0.27*s, cy - 0.22*s),
-        (cx + 0.20*s, cy + 0.22*s), (cx - 0.20*s, cy + 0.22*s),
-    ], closed=True, facecolor=cup_color, edgecolor=rim_color, linewidth=2, zorder=4))
-    # Rim (top ellipse)
-    ax.add_patch(mpatches.Ellipse((cx, cy - 0.22*s), width=0.54*s, height=0.10*s,
-                                   facecolor=rim_color, edgecolor=rim_color, zorder=5))
-    # Inner top (lighter)
-    ax.add_patch(mpatches.Ellipse((cx, cy - 0.22*s), width=0.46*s, height=0.07*s,
-                                   facecolor='#6B2A00', edgecolor='#6B2A00', zorder=6))
-    # Handle
-    ax.add_patch(mpatches.Arc((cx + 0.27*s, cy + 0.02*s), width=0.22*s, height=0.28*s,
-                               angle=0, theta1=-90, theta2=90,
-                               color=rim_color, linewidth=4, zorder=4))
+    # Antenna
+    ax.plot([cx, cx], [cy - s*1.05, cy - s*0.72], color='#444', linewidth=2, zorder=4)
+    ax.add_patch(plt.Circle((cx, cy - s*1.12), s*0.08, facecolor='#FF4444', edgecolor='#444', linewidth=1, zorder=5))
+    # Head
+    ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.42, cy - s*0.70), s*0.84, s*0.60,
+                 boxstyle='round,pad=0.02', facecolor='#A8C8E8', edgecolor='#444', linewidth=2, zorder=4))
+    # Eyes
+    for ex in [cx - s*0.15, cx + s*0.15]:
+        ax.add_patch(plt.Circle((ex, cy - s*0.42), s*0.10, facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
+        ax.add_patch(plt.Circle((ex + s*0.03, cy - s*0.44), s*0.04, facecolor='white', linewidth=0, zorder=6))
+    # Mouth
+    ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.18, cy - s*0.22), s*0.36, s*0.10,
+                 boxstyle='round,pad=0.01', facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
+    # Body
+    ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.46, cy + s*0.02), s*0.92, s*0.68,
+                 boxstyle='round,pad=0.02', facecolor='#88AACC', edgecolor='#444', linewidth=2, zorder=4))
+    # Chest panel
+    ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.26, cy + s*0.12), s*0.52, s*0.36,
+                 boxstyle='round,pad=0.01', facecolor='#CCDDE8', edgecolor='#666', linewidth=1, zorder=5))
+    # Chest buttons
+    for bx, bc in [(cx - s*0.10, '#FF4444'), (cx + s*0.10, '#44CC44')]:
+        ax.add_patch(plt.Circle((bx, cy + s*0.30), s*0.07, facecolor=bc, edgecolor='#444', linewidth=1, zorder=6))
+    # Arms
+    for side in [-1, 1]:
+        ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
+                color='#88AACC', linewidth=6, solid_capstyle='round', zorder=3)
+        ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
+                color='#444', linewidth=2, solid_capstyle='round', zorder=3)
+
+
+def draw_coffee_cup(ax, cx, cy):
+    draw_robot(ax, cx, cy)
 
 draw_coffee_cup(ax, agent_pos[1], agent_pos[0])
 
 # Tick styling
 ax.set_xticks(range(grid_size))
 ax.set_yticks(range(grid_size))
-ax.tick_params(colors='#5C3317', labelsize=9)
+ax.tick_params(colors='black', labelsize=9)
 for label in ax.get_xticklabels() + ax.get_yticklabels():
-    label.set_color('#5C3317')
-    label.set_fontfamily('serif')
+    label.set_color('black')
 
 ax.invert_yaxis()
 
