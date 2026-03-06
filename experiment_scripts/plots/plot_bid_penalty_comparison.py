@@ -24,6 +24,7 @@ EXPERIMENTS = [
     ("bid_penalty_cmp_p0",   "0"),
     ("bid_penalty_cmp_p0p1", "0.1"),
     ("bid_penalty_cmp_p0p3", "0.3"),
+    ("bid_penalty_cmp_p0p6", "0.6"),
     ("bid_penalty_cmp_p1",   "1"),
 ]
 

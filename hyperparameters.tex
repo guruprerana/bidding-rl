@@ -1,0 +1,230 @@
+% ============================================================
+\section{Reproducibility Details}
+% ============================================================
+
+The code for all experiments is included in the supplementary materials.
+
+All experiments use 5 random seeds: \{1825, 410, 4507, 4013, 3658\}.
+
+% ============================================================
+\subsection{Cat Feeder Environment}
+% ============================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Grid size & $30 \times 30$ \\
+Number of agents / targets & 8 \\
+Target reward & 50.0 \\
+Target expiry steps & 200 \\
+Target expiry penalty & 50.0 \\
+Max episode steps & 2000 \\
+Moving targets & True \\
+Direction change probability & 0.1 \\
+Target move interval & 5 \\
+\bottomrule
+\end{tabular}
+\caption{Cat Feeder shared environment parameters.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+\multicolumn{2}{l}{\textit{Auction}} \\
+Bid upper bound & 6 \\
+Bid penalty & 0.1 \\
+Action window & 5 \\
+Distance reward scale & 0.6 \\
+\midrule
+\multicolumn{2}{l}{\textit{Training}} \\
+Iterations & 400 \\
+Parallel environments & 4096 \\
+Steps per rollout & 256 \\
+Minibatches & 256 \\
+PPO epochs & 4 \\
+Learning rate & $2.5 \times 10^{-4}$ (annealed) \\
+Discount $\gamma$ & 0.99 \\
+GAE $\lambda$ & 0.95 \\
+Clip coefficient & 0.05 \\
+Entropy coefficient & 0.03 \\
+Value function coefficient & 1.0 \\
+Max gradient norm & 0.5 \\
+\midrule
+\multicolumn{2}{l}{\textit{Network}} \\
+Actor hidden layers & $[128, 128, 128, 128]$ \\
+Critic hidden layers & $[256, 256, 256, 256]$ \\
+Target attention pooling & True \\
+Target embedding dim & 64 \\
+Target encoder hidden layers & $[64, 64]$ \\
+\bottomrule
+\end{tabular}
+\caption{Cat Feeder multi-agent PPO hyperparameters (all-pay and winner-pays).}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+\multicolumn{2}{l}{\textit{Training}} \\
+Iterations & 400 \\
+Parallel environments & 4096 \\
+Steps per rollout & 256 \\
+Minibatches & 512 \\
+PPO epochs & 8 \\
+Learning rate & $1.74 \times 10^{-4}$ (annealed) \\
+Discount $\gamma$ & 0.963 \\
+GAE $\lambda$ & 0.970 \\
+Clip coefficient & 0.327 \\
+Entropy coefficient & $1.03 \times 10^{-4}$ \\
+Value function coefficient & 1.076 \\
+Max gradient norm & 0.840 \\
+Distance reward scale & 0.0 \\
+Target attention pooling & False \\
+\midrule
+\multicolumn{2}{l}{\textit{Network (shared with multi-agent PPO)}} \\
+Actor hidden layers & $[128, 128, 128, 128]$ \\
+Critic hidden layers & $[256, 256, 256, 256]$ \\
+\bottomrule
+\end{tabular}
+\caption{Cat Feeder single-agent PPO baseline hyperparameters. Hyperparameters were tuned using Optuna with 40 trials. The nearest-target shaping variant is identical but uses a distance reward scale of 0.6 with shaping toward the nearest target.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+\multicolumn{2}{l}{\textit{Training}} \\
+Total timesteps & $5 \times 10^{7}$ \\
+Parallel environments & 256 \\
+Discount $\gamma$ & 0.99 \\
+Replay buffer size & $1 \times 10^{6}$ \\
+Batch size & 256 \\
+Learning starts & $1 \times 10^{5}$ \\
+Train frequency & 2560 \\
+W-network train delay & $1 \times 10^{6}$ \\
+Target network update frequency & 1000 \\
+Target network $\tau$ & 1.0 \\
+\midrule
+\multicolumn{2}{l}{\textit{Networks}} \\
+Q-network hidden layers & $[256, 256, 256, 256]$ \\
+W-network hidden layers & $[128, 128, 128]$ \\
+Q-network learning rate & $1 \times 10^{-4}$ \\
+W-network learning rate & $1 \times 10^{-4}$ \\
+\midrule
+\multicolumn{2}{l}{\textit{Epsilon schedules}} \\
+Q $\varepsilon$ start / min / decay & 0.99 / 0.01 / 0.99 \\
+W $\varepsilon$ start / min / decay & 0.99 / 0.01 / 0.99 \\
+\bottomrule
+\end{tabular}
+\caption{Cat Feeder DWN baseline hyperparameters.}
+\end{table}
+
+% ============================================================
+\subsection{Assault Environment}
+% ============================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Number of agents & 3 \\
+Max enemies & 3 \\
+Max episode steps & 10000 \\
+Enemy destroy reward & 10.0 \\
+Life loss penalty & 10.0 \\
+Fire-while-hot penalty & 8.0 \\
+Action window & 15 \\
+Bid upper bound & 2 \\
+Bid penalty & 0.3 \\
+\bottomrule
+\end{tabular}
+\caption{Assault shared environment parameters.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+\multicolumn{2}{l}{\textit{Training}} \\
+Iterations & 150 \\
+Parallel environments & 128 \\
+Steps per rollout & 512 \\
+Minibatches & 8 \\
+PPO epochs & 8 \\
+Learning rate & $1 \times 10^{-4}$ (annealed) \\
+Discount $\gamma$ & 0.99 \\
+GAE $\lambda$ & 0.95 \\
+Clip coefficient & 0.05 \\
+Entropy coefficient & 0.05 \\
+Value function coefficient & 0.5 \\
+Max gradient norm & 0.5 \\
+Target KL & 0.02 \\
+\midrule
+\multicolumn{2}{l}{\textit{Network}} \\
+Actor hidden layers & $[128, 128, 128, 128]$ \\
+Critic hidden layers & $[256, 256, 256, 256]$ \\
+\bottomrule
+\end{tabular}
+\caption{Assault multi-agent PPO hyperparameters (all-pay and winner-pays).}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+Learning rate & $2.5 \times 10^{-4}$ (annealed) \\
+Clip coefficient & 0.1 \\
+Entropy coefficient & 0.01 \\
+Target KL & --- \\
+\bottomrule
+\end{tabular}
+\caption{Assault single-agent PPO baseline hyperparameters (differences from multi-agent PPO only; all other parameters are shared).}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+\multicolumn{2}{l}{\textit{Training}} \\
+Total timesteps & $1 \times 10^{7}$ \\
+Parallel environments & 8 \\
+Discount $\gamma$ & 0.99 \\
+Replay buffer size & $5 \times 10^{5}$ \\
+Batch size & 256 \\
+Learning starts & $1 \times 10^{4}$ \\
+Train frequency & 80 \\
+W-network train delay & $1 \times 10^{5}$ \\
+Target network update frequency & 1000 \\
+Target network $\tau$ & 1.0 \\
+\midrule
+\multicolumn{2}{l}{\textit{Networks}} \\
+Q-network hidden layers & $[256, 256, 256]$ \\
+W-network hidden layers & $[128, 128, 128]$ \\
+Q-network learning rate & $1 \times 10^{-4}$ \\
+W-network learning rate & $1 \times 10^{-4}$ \\
+\midrule
+\multicolumn{2}{l}{\textit{Epsilon schedules}} \\
+Q $\varepsilon$ start / min / decay & 0.99 / 0.01 / 0.995 \\
+W $\varepsilon$ start / min / decay & 0.99 / 0.01 / 0.995 \\
+\bottomrule
+\end{tabular}
+\caption{Assault DWN baseline hyperparameters.}
+\end{table}

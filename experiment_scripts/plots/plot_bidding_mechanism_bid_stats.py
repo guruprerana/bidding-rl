@@ -33,7 +33,7 @@ EXPERIMENTS = [
      ("bidding_cmp_winner_pays",               "Winner-Pays"),
     ("bidding_cmp_all_pay",                   "All-Pay"),
     # ("bidding_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)"),
-    ("multiagentppo_localobs",                "All-Pay (Local Obs)"),
+    # ("multiagentppo_localobs",                "All-Pay (Local Obs)"),
 ]
 
 CONFIDENCE = 0.95

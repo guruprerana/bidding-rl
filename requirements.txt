@@ -3,7 +3,6 @@ numpy
 scipy
 matplotlib
 opencv-python
-stable-baselines3[extra]
 wandb
 torch
 torchvision

@@ -28,14 +28,14 @@ BID_DIST_EXPERIMENTS = [
     ("assault_cmp_winner_pays",                      "Winner-Pays"),
     ("assault_cmp_all_pay",                          "All-Pay"),
     # ("assault_cmp_winner_pays_others_reward",         "Winner-Pays (Others Rewarded)"),
-    ("assault_ppo_multiagent_localobs",              "All-Pay (Local Obs)"),
+    # ("assault_ppo_multiagent_localobs",              "All-Pay (Local Obs)"),
 ]
 
 CONTROL_EXPERIMENTS = [
     ("assault_cmp_winner_pays",                      "Winner-Pays"),
     ("assault_cmp_all_pay",                          "All-Pay"),
     # ("assault_cmp_winner_pays_others_reward",         "Winner-Pays (Others Rewarded)"),
-    ("assault_ppo_multiagent_localobs",              "All-Pay (Local Obs)"),
+    # ("assault_ppo_multiagent_localobs",              "All-Pay (Local Obs)"),
 ]
 
 CONFIDENCE = 0.95
