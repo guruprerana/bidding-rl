@@ -105,6 +105,9 @@ LOG_VIDEOS_TO_WANDB = False
 # Set to True to skip single-agent PPO and DWN baselines
 MULTI_AGENT_ONLY = False
 
+# Set to True to skip DWN baseline only
+SKIP_DWN = True
+
 # ============================================================================
 # SINGLE-AGENT BASELINE CONFIG
 # ============================================================================
@@ -390,8 +393,9 @@ def main():
         ]
         baselines = [
             (f"Single-agent PPO baseline (seed={seed})", f"assault_cmp_single_agent{s}", functools.partial(run_single_agent_baseline, f"assault_cmp_single_agent{s}", seed)),
-            (f"DWN baseline (seed={seed})",              f"assault_cmp_dwn{s}",          functools.partial(run_dwn_baseline,          f"assault_cmp_dwn{s}",          seed)),
         ]
+        if not SKIP_DWN:
+            baselines.append((f"DWN baseline (seed={seed})", f"assault_cmp_dwn{s}", functools.partial(run_dwn_baseline, f"assault_cmp_dwn{s}", seed)))
         return multi_agent if MULTI_AGENT_ONLY else multi_agent + baselines
 
     all_experiments = []
@@ -420,6 +424,8 @@ def main():
     print(f"  Seeds: {SEEDS}")
     if MULTI_AGENT_ONLY:
         print("  (baselines skipped — MULTI_AGENT_ONLY=True)")
+    elif SKIP_DWN:
+        print("  (DWN baseline skipped — SKIP_DWN=True)")
     print("=" * 72)
     for label, log_path, p, gpu_id in procs:
         p.start()

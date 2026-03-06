@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Plot learning curves for the assault all-methods comparison experiment.
+Plot learning curves for the assault bidding mechanism comparison experiment.
 
 X axis: env steps (per agent; multi-agent global_step divided by 3).
-Y axis: average score with 95% CI across eval episodes.
+Y axis: average score with ±1 std shaded region across seeds.
 All runs are capped at the per-agent step count corresponding to multi-agent
 iter 150 (150 × 128 × 512 = 9,830,400 steps per agent).
 
 Usage:
     python experiment_scripts/plots/plot_assault_bidding_comparison.py
-    python experiment_scripts/plots/plot_assault_bidding_comparison.py --log-dir logs/assault_all_methods_comparison
+    python experiment_scripts/plots/plot_assault_bidding_comparison.py --log-dir logs/assault_bidding_mechanism_comparison
     python experiment_scripts/plots/plot_assault_bidding_comparison.py --smooth 3
 """
 
@@ -20,50 +20,56 @@ import re
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy import stats
 
 
-LOG_DIR = "logs/assault_all_methods_comparison"
+LOG_DIR = "logs/assault_bidding_mechanism_comparison"
 NUM_AGENTS = 3
 # Per-agent step cap: matches multi-agent at iter 150 (150 × 128 × 512 = 9,830,400)
 MAX_STEPS_PER_AGENT = 150 * 128 * 512
-CONFIDENCE = 0.95
+SEEDS = [1825, 410, 4507, 4013, 3658]
 
 # (prefix, label, multi_agent)
 # multi_agent=True → x axis divided by NUM_AGENTS
 EXPERIMENTS = [
-    ("assault_cmp_winner_pays",               "Winner-Pays",                  True),
-    ("assault_cmp_all_pay",                   "All-Pay",                      True),
-    # ("assault_cmp_winner_pays_others_reward", "Winner-Pays (Others Rewarded)", True),
-    ("assault_ppo_multiagent_localobs",       "All-Pay (Local Obs)",   True),
-    ("assault_ppo_single_agent_ppo_default_params", "Single-Policy PPO",       False),
+    ("assault_cmp_winner_pays",          "Winner-Pays",            True),
+    ("assault_cmp_winner_pays_localobs", "Winner-Pays (Local Obs)", True),
+    ("assault_cmp_all_pay",              "All-Pay",                True),
+    ("assault_cmp_all_pay_localobs",     "All-Pay (Local Obs)",    True),
+    ("assault_cmp_single_agent",         "Single-Agent PPO",       False),
 ]
 
 
-def find_latest_run(log_dir: str, exp_prefix: str) -> str | None:
-    timestamp_re = re.compile(rf"^{re.escape(exp_prefix)}_\d{{8}}_\d{{6}}$")
-    matches = [
-        d for d in os.listdir(log_dir)
-        if timestamp_re.match(d) and os.path.isdir(os.path.join(log_dir, d))
-    ]
-    if not matches:
-        return None
-    matches.sort()
-    return os.path.join(log_dir, matches[-1])
+def find_all_seed_runs(log_dir: str, exp_prefix: str, seeds: list[int]) -> dict[int, str]:
+    """Find run directories for all seeds of an experiment.
+
+    Returns dict mapping seed → run_dir path.
+    """
+    seed_runs = {}
+    for seed in seeds:
+        pattern_re = re.compile(rf"^{re.escape(exp_prefix)}_s{seed}_\d{{8}}_\d{{6}}$")
+        matches = [
+            d for d in os.listdir(log_dir)
+            if pattern_re.match(d) and os.path.isdir(os.path.join(log_dir, d))
+        ]
+        if matches:
+            matches.sort()
+            seed_runs[seed] = os.path.join(log_dir, matches[-1])
+    return seed_runs
 
 
-def load_eval_series(
+def load_eval_series_single_seed(
     run_dir: str,
     multi_agent: bool,
-) -> tuple[list[float], list[float], list[float], list[float]]:
-    """Return (steps, means, ci_lower, ci_upper) sorted by step.
+) -> tuple[list[float], list[float]]:
+    """Return (steps, means) sorted by step for a single seed.
 
     steps are per-agent steps (global_step / NUM_AGENTS) for multi-agent runs.
-    Only includes iterations <= MAX_ITERATION.
+    y values are mean score across eval episodes.
+    Only includes points within MAX_STEPS_PER_AGENT.
     """
     eval_dir = os.path.join(run_dir, "evaluation")
     if not os.path.isdir(eval_dir):
-        return [], [], [], []
+        return [], []
 
     records = []
     for fname in os.listdir(eval_dir):
@@ -81,20 +87,51 @@ def load_eval_series(
         if x > MAX_STEPS_PER_AGENT:
             continue
 
-        episodes = np.array(episodes, dtype=float)
-        n = len(episodes)
-        mean = episodes.mean()
-        se = episodes.std(ddof=1) / np.sqrt(n)
-        t_crit = stats.t.ppf((1 + CONFIDENCE) / 2, df=n - 1)
-        half = t_crit * se
-
-        records.append((x, mean, mean - half, mean + half))
+        mean = np.mean(episodes)
+        records.append((x, mean))
 
     records.sort(key=lambda r: r[0])
     if not records:
+        return [], []
+    steps, means = zip(*records)
+    return list(steps), list(means)
+
+
+def aggregate_across_seeds(
+    seed_runs: dict[int, str],
+    multi_agent: bool,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Aggregate data across multiple seeds.
+
+    Returns (steps, mean_across_seeds, mean - std, mean + std) at common steps.
+    """
+    all_seed_data = {}
+
+    for seed, run_dir in seed_runs.items():
+        steps, means = load_eval_series_single_seed(run_dir, multi_agent)
+        if steps:
+            all_seed_data[seed] = dict(zip(steps, means))
+
+    if not all_seed_data:
         return [], [], [], []
-    steps, means, lows, highs = zip(*records)
-    return list(steps), list(means), list(lows), list(highs)
+
+    common_steps = set.intersection(*[set(data.keys()) for data in all_seed_data.values()])
+    common_steps = sorted(common_steps)
+
+    if not common_steps:
+        return [], [], [], []
+
+    steps_out, means_out, std_lower, std_upper = [], [], [], []
+    for step in common_steps:
+        values = [all_seed_data[seed][step] for seed in all_seed_data]
+        mean = np.mean(values)
+        std = np.std(values, ddof=1) if len(values) > 1 else 0.0
+        steps_out.append(step)
+        means_out.append(mean)
+        std_lower.append(mean - std)
+        std_upper.append(mean + std)
+
+    return steps_out, means_out, std_lower, std_upper
 
 
 def smooth(values: list[float], window: int) -> list[float]:
@@ -120,62 +157,31 @@ def main():
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # Collect all series first so we can match single-agent freq to multi-agent
-    all_series = []
-    for exp_prefix, label, multi_agent in EXPERIMENTS:
-        run_dir = find_latest_run(log_dir, exp_prefix)
-        if run_dir is None:
-            print(f"  [skip] no run found for '{exp_prefix}'")
-            continue
-        steps, means, ci_lo, ci_hi = load_eval_series(run_dir, multi_agent)
-        if not steps:
-            print(f"  [skip] no eval data in {run_dir}")
-            continue
-        all_series.append((label, multi_agent, steps, means, ci_lo, ci_hi))
-
-    # Target step gap = median step gap of multi-agent series
-    def step_gap(steps):
-        if len(steps) < 2:
-            return None
-        return np.median(np.diff(steps))
-
-    ma_gaps = [step_gap(s[2]) for s in all_series if s[1] and step_gap(s[2]) is not None]
-    target_gap = np.median(ma_gaps) if ma_gaps else None
-
-    # Align all series to start at the same step (max of all first steps)
-    start_step = max(s[2][0] for s in all_series if s[2])
-
     any_data = False
-    for label, multi_agent, steps, means, ci_lo, ci_hi in all_series:
-        # Trim to common start
-        start_idx = next((i for i, s in enumerate(steps) if s >= start_step), 0)
-        steps = steps[start_idx:]
-        means = means[start_idx:]
-        ci_lo = ci_lo[start_idx:]
-        ci_hi = ci_hi[start_idx:]
+    for exp_prefix, label, multi_agent in EXPERIMENTS:
+        seed_runs = find_all_seed_runs(log_dir, exp_prefix, SEEDS)
+        if not seed_runs:
+            print(f"  [skip] no runs found for '{exp_prefix}'")
+            continue
 
-        if not multi_agent and target_gap:
-            # Keep only points at least target_gap apart
-            keep = [0]
-            for i in range(1, len(steps)):
-                if steps[i] - steps[keep[-1]] >= target_gap:
-                    keep.append(i)
-            steps = [steps[i] for i in keep]
-            means = [means[i] for i in keep]
-            ci_lo = [ci_lo[i] for i in keep]
-            ci_hi = [ci_hi[i] for i in keep]
+        print(f"  {label}: found {len(seed_runs)}/{len(SEEDS)} seeds")
 
-        s_steps = smooth(steps,  args.smooth)
-        s_means = smooth(means,  args.smooth)
-        s_lo    = smooth(ci_lo,  args.smooth)
-        s_hi    = smooth(ci_hi,  args.smooth)
+        steps, means, std_lo, std_hi = aggregate_across_seeds(seed_runs, multi_agent)
+        if not steps:
+            print(f"  [skip] no common eval data across seeds for '{exp_prefix}'")
+            continue
+
+        s_steps  = smooth(steps,   args.smooth)
+        s_means  = smooth(means,   args.smooth)
+        s_lo     = smooth(std_lo,  args.smooth)
+        s_hi     = smooth(std_hi,  args.smooth)
 
         (line,) = ax.plot(s_steps, s_means, label=label, linewidth=2)
         ax.fill_between(s_steps, s_lo, s_hi, color=line.get_color(), alpha=0.15)
 
-        print(f"  {label}: {len(steps)} points, "
+        print(f"    {len(steps)} points, "
               f"steps {steps[0]:,.0f}–{steps[-1]:,.0f}, "
-              f"final score = {means[-1]:.1f}")
+              f"final score = {means[-1]:.1f} ± {means[-1] - std_lo[-1]:.1f}")
         any_data = True
 
     if not any_data:
@@ -184,7 +190,7 @@ def main():
     ax.set_xlabel("Env. Steps", fontsize=18)
     ax.set_ylabel("Score", fontsize=18)
     ax.tick_params(axis="both", labelsize=13)
-    ax.legend(loc="lower right", fontsize=14)
+    ax.legend(loc="upper left", fontsize=14)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()

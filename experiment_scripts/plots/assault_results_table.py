@@ -2,9 +2,10 @@
 """
 Print a LaTeX table comparing Assault algorithm performance.
 
-Reads trained runs from logs/assault_all_methods_comparison/ and picks the
-best evaluation iteration for each method (highest statistics.avg_score),
-then computes mean score with 95% CI from per_episode.scores.
+Reads trained runs from logs/assault_bidding_mechanism_comparison/ across
+5 seeds. Picks the best evaluation iteration for each seed (highest
+statistics.avg_score), computes mean score across seeds with standard
+deviation, and renders a LaTeX table.
 
 Usage:
     python experiment_scripts/plots/assault_results_table.py
@@ -15,48 +16,56 @@ import os
 import re
 
 import numpy as np
-from scipy import stats
 
 
 # ── configuration ──────────────────────────────────────────────────────────
 
-LOG_DIR = "logs/assault_all_methods_comparison"
+LOG_DIR = "logs/assault_bidding_mechanism_comparison"
+SEEDS = [1825, 410, 4507, 4013, 3658]
 
 # Ordered table rows: (prefix, display_label)
 METHODS = [
-    ("assault_cmp_all_pay",                          "All-Pay"),
-    ("assault_cmp_winner_pays",                      "Winner-Pays"),
-    ("assault_cmp_winner_pays_others_reward",         "Winner-Pays (Others Rewarded)"),
-    ("assault_ppo_multiagent_localobs",              "All-Pay (Local Obs)"),
-    ("assault_cmp_dwn",                              "DWN"),
-    ("assault_ppo_single_agent_ppo_default_params",  "Single-Policy PPO"),
+    ("assault_cmp_winner_pays",          "Winner-Pays"),
+    ("assault_cmp_winner_pays_localobs", "Winner-Pays (Local Obs)"),
+    ("assault_cmp_all_pay",              "All-Pay"),
+    ("assault_cmp_all_pay_localobs",     "All-Pay (Local Obs)"),
+    ("assault_cmp_dwn",                  "DWN"),
+    ("assault_cmp_single_agent",         "Single-Agent PPO"),
 ]
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def find_latest_run(log_dir: str, prefix: str) -> str | None:
-    timestamp_re = re.compile(rf"^{re.escape(prefix)}_\d{{8}}_\d{{6}}$")
+def find_all_seed_runs(log_dir: str, exp_prefix: str, seeds: list[int]) -> dict[int, str]:
+    """Find run directories for all seeds of an experiment.
+
+    Returns dict mapping seed → run_dir path.
+    """
+    seed_runs = {}
     try:
         entries = os.listdir(log_dir)
     except FileNotFoundError:
-        return None
-    matches = [
-        d for d in entries
-        if timestamp_re.match(d) and os.path.isdir(os.path.join(log_dir, d))
-    ]
-    if not matches:
-        return None
-    matches.sort()
-    return os.path.join(log_dir, matches[-1])
+        return seed_runs
+
+    for seed in seeds:
+        pattern_re = re.compile(rf"^{re.escape(exp_prefix)}_s{seed}_\d{{8}}_\d{{6}}$")
+        matches = [
+            d for d in entries
+            if pattern_re.match(d) and os.path.isdir(os.path.join(log_dir, d))
+        ]
+        if matches:
+            matches.sort()
+            seed_runs[seed] = os.path.join(log_dir, matches[-1])
+    return seed_runs
 
 
-def best_iter_scores(run_dir: str) -> list[float] | None:
-    """Return per-episode scores from the best iteration (highest avg_score).
+def best_iter_mean_score(run_dir: str) -> float | None:
+    """Return mean score from the best iteration for a single seed.
 
-    Checks evaluation/ (iter_N_eval_stats.json) and rollouts/
-    (step_N_eval_stats.json) to support different run formats.
+    'Best' = highest statistics.avg_score.
+    Checks evaluation/ then rollouts/ to support different run formats.
     """
+    eval_dir = None
     for subdir in ("evaluation", "rollouts"):
         candidate = os.path.join(run_dir, subdir)
         if os.path.isdir(candidate):
@@ -64,22 +73,19 @@ def best_iter_scores(run_dir: str) -> list[float] | None:
             if files:
                 eval_dir = candidate
                 break
-    else:
-        return None
 
-    if not files:
+    if eval_dir is None:
         return None
 
     records = []
-    for fname in files:
-        path = os.path.join(eval_dir, fname)  # type: ignore[possibly-undefined]
-        with open(path) as fh:
+    for fname in os.listdir(eval_dir):
+        if not fname.endswith("_eval_stats.json"):
+            continue
+        with open(os.path.join(eval_dir, fname)) as fh:
             data = json.load(fh)
         avg_score = data.get("statistics", {}).get("avg_score")
-        if avg_score is None:
-            continue
         scores = data.get("per_episode", {}).get("scores")
-        if not scores:
+        if avg_score is None or not scores:
             continue
         records.append((avg_score, scores))
 
@@ -87,56 +93,63 @@ def best_iter_scores(run_dir: str) -> list[float] | None:
         return None
 
     records.sort(key=lambda x: x[0])
-    return records[-1][1]
+    best_scores = records[-1][1]
+    return float(np.mean(best_scores))
 
 
-def ci95(values: list[float]) -> tuple[float, float]:
-    """Return (mean, half_width) of a 95% t-interval."""
-    arr = np.array(values, dtype=float)
-    n = len(arr)
-    mean = arr.mean()
-    se = arr.std(ddof=1) / np.sqrt(n)
-    half_width = stats.t.ppf(0.975, df=n - 1) * se
-    return mean, half_width
+def aggregate_best_score_across_seeds(seed_runs: dict[int, str]) -> tuple[float, float] | None:
+    """Compute mean and std of best iteration score across seeds.
+
+    Returns (mean, std) or None if no data.
+    """
+    values = []
+    for seed, run_dir in seed_runs.items():
+        score = best_iter_mean_score(run_dir)
+        if score is not None:
+            values.append(score)
+
+    if not values:
+        return None
+
+    mean = float(np.mean(values))
+    std = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+    return mean, std
 
 
 # ── main ────────────────────────────────────────────────────────────────────
 
-def _fmt(ci_val: tuple[float, float] | None) -> str:
-    if ci_val is None:
+def _fmt(mean_std: tuple[float, float] | None) -> str:
+    if mean_std is None:
         return "---"
-    mean, hw = ci_val
-    lo, hi = mean - hw, mean + hw
-    ci = rf"{{\small\textcolor{{gray}}{{$[{lo:.2f},\ {hi:.2f}]$}}}}"
-    return rf"${mean:.2f}$ {ci}"
+    mean, std = mean_std
+    std_str = rf"{{\small\textcolor{{gray}}{{$(\pm {std:.2f})$}}}}"
+    return rf"${mean:.2f}$ {std_str}"
 
 
 def main() -> None:
     results: dict[str, tuple[float, float] | None] = {}
 
     for prefix, label in METHODS:
-        run_dir = find_latest_run(LOG_DIR, prefix)
-        if run_dir is None:
-            print(f"  [skip] no run found for '{prefix}'")
+        seed_runs = find_all_seed_runs(LOG_DIR, prefix, SEEDS)
+        if not seed_runs:
+            print(f"  [skip] no runs found for '{prefix}'")
             results[prefix] = None
             continue
 
-        scores = best_iter_scores(run_dir)
-        if scores is None:
-            print(f"  [skip] no eval data in {run_dir}")
-            results[prefix] = None
-            continue
+        mean_std = aggregate_best_score_across_seeds(seed_runs)
+        results[prefix] = mean_std
 
-        results[prefix] = ci95(scores)
-        mean, hw = results[prefix]
-        print(f"  {label}: {mean:.2f} ± {hw:.2f}  (n={len(scores)})")
+        if mean_std:
+            mean, std = mean_std
+            print(f"  {label}: {len(seed_runs)}/{len(SEEDS)} seeds, "
+                  f"score = {mean:.2f} ± {std:.2f}")
 
     # ── render LaTeX table ──────────────────────────────────────────────────
     lines = []
     lines.append(r"\begin{table}")
     lines.append(r"  \centering")
     lines.append(
-        r"  \caption{Assault score (mean with 95\% CI) at the best"
+        r"  \caption{Assault score (mean $\pm$ std across 5 seeds) at the best"
         r" evaluation iteration.}"
     )
     lines.append(r"  \begin{tabular}{ll}")
@@ -150,7 +163,7 @@ def main() -> None:
 
     lines.append(r"    \hline")
     lines.append(r"  \end{tabular}")
-    lines.append(r"  \label{tab:assault_all_methods}")
+    lines.append(r"  \label{tab:assault_methods}")
     lines.append(r"\end{table}")
 
     table = "\n".join(lines)
