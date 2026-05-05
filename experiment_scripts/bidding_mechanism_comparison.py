@@ -79,7 +79,8 @@ ENT_COEF = 0.03
 VF_COEF = 1.0
 MAX_GRAD_NORM = 0.5
 TARGET_KL = None
-SEEDS = [1825, 410, 4507, 4013, 3658]
+# SEEDS = [1825, 410, 4507, 4013, 3658]
+SEEDS = [5215, 6861, 6803, 7819, 8057]
 
 # Network
 ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
@@ -485,7 +486,7 @@ def main():
     ctx = multiprocessing.get_context("spawn")
 
     procs = []
-    gpu_ids = [5, 6, 7, 8, 9]
+    gpu_ids = [4, 5, 7, 8, 9]
     for idx, (seed, label, exp_name, run_fn) in enumerate(all_experiments):
         gpu_id = gpu_ids[idx % len(gpu_ids)]
         seed_log_dir = os.path.join(BASE_LOG_DIR, f"seed_{seed}")
