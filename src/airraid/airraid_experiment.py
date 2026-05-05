@@ -106,12 +106,23 @@ class AirRaidExperiment:
             building_hit_penalty=args.building_hit_penalty,
             life_loss_penalty=args.life_loss_penalty,
             raw_score_scale=getattr(args, "raw_score_scale", 0.0),
+            enemy_missile_danger_penalty=getattr(args, "enemy_missile_danger_penalty", 0.0),
+            enemy_missile_danger_y_threshold=getattr(args, "enemy_missile_danger_y_threshold", 110.0),
+            enemy_missile_danger_x_radius=getattr(args, "enemy_missile_danger_x_radius", 18.0),
+            enemy_missile_danger_y_radius=getattr(args, "enemy_missile_danger_y_radius", 80.0),
+            enemy_missile_near_hit_penalty=getattr(args, "enemy_missile_near_hit_penalty", 0.0),
+            enemy_missile_near_hit_y_margin=getattr(args, "enemy_missile_near_hit_y_margin", 35.0),
+            enemy_missile_near_hit_x_radius=getattr(args, "enemy_missile_near_hit_x_radius", 25.0),
+            enemy_disappear_penalty=getattr(args, "enemy_disappear_penalty", 0.0),
             max_steps=args.max_steps,
             hud=args.hud,
             single_agent_mode=single_agent_mode,
             allow_sideward_fire=getattr(args, "allow_sideward_fire", True),
             bidding_mechanism=getattr(args, "bidding_mechanism", "all_pay"),
             only_own_enemy=getattr(args, "only_own_enemy", False),
+            obs_stack=getattr(args, "obs_stack", 1),
+            building_penalty_mode=getattr(args, "building_penalty_mode", "lane"),
+            include_agent_id=getattr(args, "separate_agent_networks", False),
         )
         env = AirRaidEnv(env_config, num_envs=1, device=trainer.device, seed=args.seed, render_mode=render_mode, render_oc_overlay=self.render_oc_overlay)
 
@@ -123,6 +134,9 @@ class AirRaidExperiment:
         all_agent_control_counts: List[List[int]] = []
         all_agent_bid_counts: List[List[Dict[int, int]]] = []
         all_agent_returns: List[List[float]] = []
+        all_hit_agent_counts: List[List[int]] = []
+        all_missile_owner_counts: List[List[int]] = []
+        all_owner_hit_counts: List[List[List[int]]] = []
 
         for ep_idx in range(self.num_eval_episodes):
             obs, _ = env.reset()
@@ -135,6 +149,9 @@ class AirRaidExperiment:
             agent_control_counts = [0] * args.num_agents
             agent_bid_counts: List[Dict[int, int]] = [{} for _ in range(args.num_agents)]
             agent_returns = [0.0] * args.num_agents
+            hit_agent_counts = [0] * args.num_agents
+            missile_owner_counts = [0] * args.num_agents
+            owner_hit_counts = [[0] * args.num_agents for _ in range(args.num_agents)]
             should_record = need_render and ep_idx < self.num_video_episodes
             if should_record:
                 frame = env.render(env_idx=0, show_agent_overlay=not single_agent_mode)
@@ -178,6 +195,21 @@ class AirRaidExperiment:
                             ep_components[key] = v
                         else:
                             ep_components[key] = ep_components.get(key, 0.0) + v
+                    if rc:
+                        score_delta_val = rc.get("score_delta", None)
+                        hit_agent_val = rc.get("hit_agent", None)
+                        missile_owner_val = rc.get("missile_owner", None)
+                        score_delta = float(score_delta_val.item()) if torch.is_tensor(score_delta_val) else float(score_delta_val or 0.0)
+                        if score_delta > 0.0:
+                            hit_agent = int(hit_agent_val.item()) if torch.is_tensor(hit_agent_val) else int(hit_agent_val)
+                            if 0 <= hit_agent < args.num_agents:
+                                hit_agent_counts[hit_agent] += 1
+                            if not single_agent_mode:
+                                missile_owner = int(missile_owner_val.item()) if torch.is_tensor(missile_owner_val) else int(missile_owner_val)
+                                if 0 <= missile_owner < args.num_agents:
+                                    missile_owner_counts[missile_owner] += 1
+                                if 0 <= missile_owner < args.num_agents and 0 <= hit_agent < args.num_agents:
+                                    owner_hit_counts[missile_owner][hit_agent] += 1
                 if not single_agent_mode:
                     for i in range(args.num_agents):
                         agent_returns[i] += reward[0, i].item()
@@ -189,10 +221,13 @@ class AirRaidExperiment:
             scores.append(last_score)
             lengths.append(ep_len)
             all_episode_components.append(ep_components)
+            all_hit_agent_counts.append(hit_agent_counts)
             if not single_agent_mode:
                 all_agent_control_counts.append(agent_control_counts)
                 all_agent_bid_counts.append([dict(bc) for bc in agent_bid_counts])
                 all_agent_returns.append(agent_returns)
+                all_missile_owner_counts.append(missile_owner_counts)
+                all_owner_hit_counts.append(owner_hit_counts)
             if should_record and frames:
                 episode_frames.append(frames)
 
@@ -223,6 +258,13 @@ class AirRaidExperiment:
                 agent_rets = [ep[i] for ep in all_agent_returns]
                 per_agent_return_stats[f"avg_agent_{i}_return"] = float(np.mean(agent_rets))
                 per_agent_return_stats[f"std_agent_{i}_return"] = float(np.std(agent_rets))
+        hit_credit_stats = {}
+        if all_hit_agent_counts:
+            hit_credit_stats["avg_hit_agent_counts"] = np.array(all_hit_agent_counts, dtype=float).mean(axis=0).tolist()
+            hit_credit_stats["avg_hit_lane_counts"] = hit_credit_stats["avg_hit_agent_counts"]
+        if not single_agent_mode and all_missile_owner_counts:
+            hit_credit_stats["avg_missile_owner_counts"] = np.array(all_missile_owner_counts, dtype=float).mean(axis=0).tolist()
+            hit_credit_stats["avg_owner_hit_counts"] = np.array(all_owner_hit_counts, dtype=float).mean(axis=0).tolist()
 
         stats = {
             "avg_score": float(np.mean(scores)),
@@ -233,6 +275,7 @@ class AirRaidExperiment:
             **avg_components,
             **avg_agent_control,
             **per_agent_return_stats,
+            **hit_credit_stats,
             "avg_bid_counts_per_agent": avg_bid_counts_per_agent,
             "avg_control_timesteps_per_agent": avg_control_timesteps_per_agent,
         }

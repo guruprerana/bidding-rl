@@ -37,11 +37,22 @@ class AirRaidArgs:
     building_hit_penalty: float = 1.0
     life_loss_penalty: float = 10.0
     raw_score_scale: float = 0.0
+    enemy_missile_danger_penalty: float = 0.0
+    enemy_missile_danger_y_threshold: float = 110.0
+    enemy_missile_danger_x_radius: float = 18.0
+    enemy_missile_danger_y_radius: float = 80.0
+    enemy_missile_near_hit_penalty: float = 0.0
+    enemy_missile_near_hit_y_margin: float = 35.0
+    enemy_missile_near_hit_x_radius: float = 25.0
+    enemy_disappear_penalty: float = 0.0
     max_steps: int = 10000
     hud: bool = True
     allow_sideward_fire: bool = True
     bidding_mechanism: str = "all_pay"
     only_own_enemy: bool = False
+    obs_stack: int = 1
+    building_penalty_mode: str = "lane"
+    separate_agent_networks: bool = False
 
     actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
     critic_hidden_sizes: Tuple[int, ...] = (256, 256, 256)
@@ -136,6 +147,76 @@ class AirRaidSharedAgent(nn.Module):
         return action, log_prob, entropy, value
 
 
+class AirRaidSeparateAgent(nn.Module):
+    def __init__(
+        self,
+        num_agents: int,
+        obs_dim: int,
+        action_space_n: int,
+        bid_upper_bound: int,
+        window_bidding: bool,
+        action_window: int,
+        actor_hidden_sizes: Tuple[int, ...],
+        critic_hidden_sizes: Tuple[int, ...],
+    ):
+        super().__init__()
+        self.num_agents = num_agents
+        self.obs_dim = obs_dim
+        self.num_action_components = 3 if window_bidding else 2
+        self.agents = nn.ModuleList(
+            [
+                AirRaidSharedAgent(
+                    obs_dim=obs_dim,
+                    action_space_n=action_space_n,
+                    bid_upper_bound=bid_upper_bound,
+                    window_bidding=window_bidding,
+                    action_window=action_window,
+                    actor_hidden_sizes=actor_hidden_sizes,
+                    critic_hidden_sizes=critic_hidden_sizes,
+                )
+                for _ in range(num_agents)
+            ]
+        )
+
+    def _agent_ids_from_obs(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] < self.num_agents:
+            raise ValueError("Separate agent networks require one-hot agent id features in observations.")
+        agent_id_features = x[..., -self.num_agents :]
+        return torch.argmax(agent_id_features, dim=-1)
+
+    def get_value(self, x: torch.Tensor) -> torch.Tensor:
+        x_flat = x.reshape(-1, self.obs_dim)
+        agent_ids = self._agent_ids_from_obs(x_flat)
+        values = torch.zeros((x_flat.shape[0], 1), dtype=torch.float32, device=x_flat.device)
+        for agent_idx, agent in enumerate(self.agents):
+            mask = agent_ids == agent_idx
+            if torch.any(mask):
+                values[mask] = agent.get_value(x_flat[mask])
+        return values.reshape(*x.shape[:-1], 1)
+
+    def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor | None = None):
+        x_flat = x.reshape(-1, self.obs_dim)
+        action_flat = action.reshape(x_flat.shape[0], -1) if action is not None else None
+        agent_ids = self._agent_ids_from_obs(x_flat)
+        actions = torch.zeros(
+            (x_flat.shape[0], self.num_action_components), dtype=torch.long, device=x_flat.device
+        )
+        log_probs = torch.zeros((x_flat.shape[0],), dtype=torch.float32, device=x_flat.device)
+        entropies = torch.zeros((x_flat.shape[0],), dtype=torch.float32, device=x_flat.device)
+        values = torch.zeros((x_flat.shape[0], 1), dtype=torch.float32, device=x_flat.device)
+        for agent_idx, agent in enumerate(self.agents):
+            mask = agent_ids == agent_idx
+            if not torch.any(mask):
+                continue
+            selected_action = action_flat[mask].long() if action_flat is not None else None
+            a, lp, ent, val = agent.get_action_and_value(x_flat[mask], selected_action)
+            actions[mask] = a
+            log_probs[mask] = lp
+            entropies[mask] = ent
+            values[mask] = val
+        return actions.reshape(*x.shape[:-1], self.num_action_components), log_probs.reshape(*x.shape[:-1]), entropies.reshape(*x.shape[:-1]), values.reshape(*x.shape[:-1], 1)
+
+
 class AirRaidPPOTrainer(MultiAgentPPOTrainerBase):
     def __init__(self, args: AirRaidArgs, callbacks=None):
         super().__init__(args, callbacks=callbacks)
@@ -155,24 +236,47 @@ class AirRaidPPOTrainer(MultiAgentPPOTrainerBase):
             building_hit_penalty=self.args.building_hit_penalty,
             life_loss_penalty=self.args.life_loss_penalty,
             raw_score_scale=self.args.raw_score_scale,
+            enemy_missile_danger_penalty=self.args.enemy_missile_danger_penalty,
+            enemy_missile_danger_y_threshold=self.args.enemy_missile_danger_y_threshold,
+            enemy_missile_danger_x_radius=self.args.enemy_missile_danger_x_radius,
+            enemy_missile_danger_y_radius=self.args.enemy_missile_danger_y_radius,
+            enemy_missile_near_hit_penalty=self.args.enemy_missile_near_hit_penalty,
+            enemy_missile_near_hit_y_margin=self.args.enemy_missile_near_hit_y_margin,
+            enemy_missile_near_hit_x_radius=self.args.enemy_missile_near_hit_x_radius,
+            enemy_disappear_penalty=self.args.enemy_disappear_penalty,
             max_steps=self.args.max_steps,
             hud=self.args.hud,
             single_agent_mode=False,
             allow_sideward_fire=self.args.allow_sideward_fire,
             bidding_mechanism=self.args.bidding_mechanism,
             only_own_enemy=self.args.only_own_enemy,
+            obs_stack=self.args.obs_stack,
+            building_penalty_mode=self.args.building_penalty_mode,
+            include_agent_id=self.args.separate_agent_networks,
         )
         self.envs = AirRaidEnv(env_config, num_envs=self.args.num_envs, device=self.device, seed=self.args.seed)
         self.obs_dim = self.envs.per_agent_obs_dim
-        self.agent = AirRaidSharedAgent(
-            obs_dim=self.obs_dim,
-            action_space_n=self.envs.action_space_n,
-            bid_upper_bound=self.args.bid_upper_bound,
-            window_bidding=self.args.window_bidding,
-            action_window=self.args.action_window,
-            actor_hidden_sizes=self.args.actor_hidden_sizes,
-            critic_hidden_sizes=self.args.critic_hidden_sizes,
-        ).to(self.device)
+        if self.args.separate_agent_networks:
+            self.agent = AirRaidSeparateAgent(
+                num_agents=self.args.num_agents,
+                obs_dim=self.obs_dim,
+                action_space_n=self.envs.action_space_n,
+                bid_upper_bound=self.args.bid_upper_bound,
+                window_bidding=self.args.window_bidding,
+                action_window=self.args.action_window,
+                actor_hidden_sizes=self.args.actor_hidden_sizes,
+                critic_hidden_sizes=self.args.critic_hidden_sizes,
+            ).to(self.device)
+        else:
+            self.agent = AirRaidSharedAgent(
+                obs_dim=self.obs_dim,
+                action_space_n=self.envs.action_space_n,
+                bid_upper_bound=self.args.bid_upper_bound,
+                window_bidding=self.args.window_bidding,
+                action_window=self.args.action_window,
+                actor_hidden_sizes=self.args.actor_hidden_sizes,
+                critic_hidden_sizes=self.args.critic_hidden_sizes,
+            ).to(self.device)
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
         self.args.batch_size = int(self.args.num_envs * self.args.num_steps * self.args.num_agents)
         self.args.minibatch_size = int(self.args.batch_size // self.args.num_minibatches)

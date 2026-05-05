@@ -30,12 +30,23 @@ class AirRaidConfig:
     building_hit_penalty: float = 1.0
     life_loss_penalty: float = 10.0
     raw_score_scale: float = 0.0
+    enemy_missile_danger_penalty: float = 0.0
+    enemy_missile_danger_y_threshold: float = 110.0
+    enemy_missile_danger_x_radius: float = 18.0
+    enemy_missile_danger_y_radius: float = 80.0
+    enemy_missile_near_hit_penalty: float = 0.0
+    enemy_missile_near_hit_y_margin: float = 35.0
+    enemy_missile_near_hit_x_radius: float = 25.0
+    enemy_disappear_penalty: float = 0.0
     max_steps: int = 10000
     hud: bool = True
     single_agent_mode: bool = False
     allow_sideward_fire: bool = True
     bidding_mechanism: str = "all_pay"
     only_own_enemy: bool = False
+    obs_stack: int = 1
+    building_penalty_mode: str = "lane"
+    include_agent_id: bool = False
 
 
 class AirRaidEnv:
@@ -91,6 +102,7 @@ class AirRaidEnv:
                 env.reset(seed=seed + idx)
 
         self._slot_indices = self._build_slot_indices(self.envs[0])
+        self._missile_slot_count = len(self._slot_indices.get("Missile", []))
 
         self.step_count = torch.zeros((num_envs,), dtype=torch.int32)
         self.window_agent = torch.full((num_envs,), -1, dtype=torch.int32)
@@ -98,7 +110,20 @@ class AirRaidEnv:
         self.prev_enemy_visible = torch.zeros((num_envs, config.max_enemies), dtype=torch.int32)
         self.prev_enemy_raw = torch.zeros((num_envs, config.max_enemies, 2), dtype=torch.float32)
         self.prev_enemy_type = torch.zeros((num_envs, config.max_enemies), dtype=torch.int32)
+        self.prev_player_missile_x = torch.zeros((num_envs,), dtype=torch.float32)
         self.prev_player_missile_y = torch.zeros((num_envs,), dtype=torch.float32)
+        self.prev_player_missile_visible = torch.zeros((num_envs,), dtype=torch.int32)
+        self.player_missile_history_len = 5
+        self.player_missile_pos_history = torch.zeros(
+            (num_envs, self.player_missile_history_len, 2), dtype=torch.float32
+        )
+        self.player_missile_history_valid = torch.zeros(
+            (num_envs, self.player_missile_history_len), dtype=torch.bool
+        )
+        self.prev_missile_slot_raw = torch.zeros((num_envs, self._missile_slot_count, 2), dtype=torch.float32)
+        self.prev_missile_slot_visible = torch.zeros((num_envs, self._missile_slot_count), dtype=torch.int32)
+        self.player_missile_owner = torch.full((num_envs,), -1, dtype=torch.int32)
+        self.enemy_missile_near_hit_active = torch.zeros((num_envs,), dtype=torch.bool)
         self.prev_enemy_missile_y = torch.zeros((num_envs,), dtype=torch.float32)
         self.prev_lives = torch.zeros((num_envs,), dtype=torch.int32)
         self.prev_building_health = torch.zeros((num_envs, 3), dtype=torch.float32)
@@ -106,26 +131,35 @@ class AirRaidEnv:
         self.prev_score = torch.zeros((num_envs,), dtype=torch.float32)
         self.cumulative_score = torch.zeros((num_envs,), dtype=torch.float32)
 
+        self.obs_stack = max(int(config.obs_stack), 1)
+
         # Global features:
         # player(2) + player_missile(3) + enemy_missile(3) + missile_vy(2) +
         # building_x(3) + building_health(3) + lives/score/window(4) = 20
         self._global_obs_dim = 20
         # Per-enemy features: x, y, visible, type_onehot(4) = 7
         self._per_enemy_dim = 7
-        self._per_agent_dim = 2
+        self._per_agent_dim = 2 + (config.num_agents if config.include_agent_id else 0)
         if config.single_agent_mode:
-            self.obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim
+            self.base_obs_dim = self._global_obs_dim + config.max_enemies * self._per_enemy_dim
+            self.obs_dim = self.base_obs_dim * self.obs_stack
             self.obs_shape = (num_envs, self.obs_dim)
             self.per_agent_obs_dim = None
+            self._obs_history = torch.zeros((num_envs, self.obs_stack, self.base_obs_dim), dtype=torch.float32)
         else:
             visible_enemy_count = 1 if config.only_own_enemy else config.max_enemies
-            self.per_agent_obs_dim = (
+            self.base_per_agent_obs_dim = (
                 self._global_obs_dim
                 + visible_enemy_count * self._per_enemy_dim
                 + self._per_agent_dim
             )
+            self.per_agent_obs_dim = self.base_per_agent_obs_dim * self.obs_stack
             self.obs_dim = None
             self.obs_shape = (num_envs, config.num_agents, self.per_agent_obs_dim)
+            self._obs_history = torch.zeros(
+                (num_envs, config.num_agents, self.obs_stack, self.base_per_agent_obs_dim),
+                dtype=torch.float32,
+            )
 
     def reset(self, seed: Optional[int] = None) -> Tuple[torch.Tensor, Dict]:
         if seed is not None:
@@ -133,12 +167,18 @@ class AirRaidEnv:
         obs_list = []
         for idx, env in enumerate(self.envs):
             env.reset(seed=None if seed is None else seed + idx)
-            state = self._extract_state(env)
+            state = self._extract_state(env, idx)
             obs_list.append(self._build_obs(state, env_idx=idx))
             self.prev_enemy_visible[idx] = state["enemy_visible"]
             self.prev_enemy_raw[idx] = state["enemy_raw"]
             self.prev_enemy_type[idx] = state["enemy_type_id"]
+            self.prev_player_missile_x[idx] = state["player_missile_raw"][0].item()
             self.prev_player_missile_y[idx] = state["player_missile_raw"][1].item()
+            self.prev_player_missile_visible[idx] = int(state["player_missile"][2].item())
+            self._reset_player_missile_history(idx, state)
+            self._update_missile_slot_trackers(idx, state)
+            self.player_missile_owner[idx] = -1
+            self.enemy_missile_near_hit_active[idx] = False
             self.prev_enemy_missile_y[idx] = state["enemy_missile_raw"][1].item()
             self.prev_lives[idx] = state["lives_count"]
             self.prev_building_health[idx] = state["building_health"]
@@ -149,7 +189,8 @@ class AirRaidEnv:
             self.window_steps_remaining[idx] = 0
             self.cumulative_score[idx] = state["score"]
 
-        return torch.stack(obs_list, dim=0).to(self.device), {}
+        obs = torch.stack(obs_list, dim=0)
+        return self._reset_obs_history(obs), {}
 
     def step(
         self, action: torch.Tensor
@@ -208,6 +249,7 @@ class AirRaidEnv:
         rewards_list = []
         terminated_list = []
         truncated_list = []
+        score_list = []
         state_list = []
         reward_components_list = []
         bid_effect_list = []
@@ -215,21 +257,30 @@ class AirRaidEnv:
         for env_idx, env in enumerate(self.envs):
             if cfg.single_agent_mode:
                 chosen_action = int(action_dir[env_idx])
+                controller = -1
             else:
                 winner = int(winning_agent[env_idx].item())
+                controller = winner
                 chosen_action = 0 if winner < 0 else int(action_dir[env_idx, winner])
 
             if not cfg.allow_sideward_fire and chosen_action >= 4:
                 chosen_action = 1 if chosen_action == 4 else 3
+            is_fire_action = chosen_action in (1, 4, 5)
+            pre_missile_visible = int(self.prev_player_missile_visible[env_idx].item()) == 1
+            if not cfg.single_agent_mode and is_fire_action and controller >= 0 and not pre_missile_visible:
+                self.player_missile_owner[env_idx] = controller
 
             _, raw_reward, terminated, truncated, _ = env.step(chosen_action)
             if terminated or truncated or (cfg.max_steps and self.step_count[env_idx] >= cfg.max_steps):
                 terminated = bool(terminated)
                 truncated = bool(truncated or (cfg.max_steps and self.step_count[env_idx] >= cfg.max_steps))
 
-            state = self._extract_state(env)
+            state = self._extract_state(env, env_idx)
+            missile_owner = int(self.player_missile_owner[env_idx].item())
+            missile_visible = int(state["player_missile"][2].item()) == 1
             score_delta = float(state["score"].item() - self.prev_score[env_idx].item())
             self.cumulative_score[env_idx] += score_delta
+            score_list.append(float(self.cumulative_score[env_idx].item()))
 
             enemy_disappeared = (self.prev_enemy_visible[env_idx] == 1) & (state["enemy_visible"] == 0)
             life_loss = max(int(self.prev_lives[env_idx]) - int(state["lives_count"]), 0)
@@ -255,11 +306,25 @@ class AirRaidEnv:
                     prev_missile_y = self.prev_player_missile_y[env_idx].item()
                     prev_enemy_y = self.prev_enemy_raw[env_idx, candidates, 1]
                     hit_agent = int(candidates[torch.argmin(torch.abs(prev_enemy_y - prev_missile_y))].item())
+                else:
+                    # Air Raid often updates score without making the OCAtari enemy object disappear
+                    # in the same frame. Attribute those hits by the latest visible missile
+                    # position before the score event.
+                    missile_pos = self._latest_visible_player_missile_pos(env_idx)
+                    if missile_pos is not None:
+                        hit_agent = int(torch.argmin(torch.abs(self._lane_centers - missile_pos[0])).item())
 
-            enemy_destroy_reward = cfg.enemy_destroy_reward if score_delta > 0 else 0.0
-            building_hit_penalty = -cfg.building_hit_penalty * building_damage_total if building_damage_total > 0 else 0.0
+            enemy_destroy_reward = cfg.enemy_destroy_reward * (score_delta / 25.0) if score_delta > 0 else 0.0
+            building_hit_penalty = -cfg.building_hit_penalty if building_damage_total > 0 else 0.0
             life_loss_penalty = -cfg.life_loss_penalty * life_loss if life_loss > 0 else 0.0
             raw_score_reward = cfg.raw_score_scale * score_delta
+            unshot_enemy_disappeared = enemy_disappeared if score_delta <= 0 else torch.zeros_like(enemy_disappeared)
+            enemy_disappear_count = int(unshot_enemy_disappeared.sum().item())
+            enemy_disappear_penalty = -cfg.enemy_disappear_penalty * enemy_disappear_count
+            enemy_missile_danger_penalty = self._enemy_missile_danger_penalty(state)
+            enemy_missile_near_hit_penalty, enemy_missile_near_hit_event = self._enemy_missile_near_hit_penalty(
+                env_idx, state, life_loss > 0
+            )
 
             reward_components_list.append(
                 {
@@ -268,26 +333,58 @@ class AirRaidEnv:
                     "building_hit_penalty": building_hit_penalty,
                     "building_damage": building_damage_total,
                     "life_loss_penalty": life_loss_penalty,
+                    "enemy_disappear_penalty": enemy_disappear_penalty,
+                    "enemy_disappear_count": float(enemy_disappear_count),
+                    "enemy_missile_danger_penalty": enemy_missile_danger_penalty,
+                    "enemy_missile_near_hit_penalty": enemy_missile_near_hit_penalty,
+                    "enemy_missile_near_hit_event": enemy_missile_near_hit_event,
                     "life_loss_count": float(life_loss),
                     "score_delta": score_delta,
                     "lives_current": float(state["lives_count"].item()),
+                    "hit_agent": float(hit_agent),
+                    "missile_owner": float(missile_owner),
                 }
             )
 
             if cfg.single_agent_mode:
-                reward = enemy_destroy_reward + building_hit_penalty + life_loss_penalty + raw_score_reward
+                reward = (
+                    enemy_destroy_reward
+                    + building_hit_penalty
+                    + life_loss_penalty
+                    + enemy_disappear_penalty
+                    + enemy_missile_danger_penalty
+                    + enemy_missile_near_hit_penalty
+                    + raw_score_reward
+                )
                 rewards = torch.tensor(reward, dtype=torch.float32)
             else:
                 rewards = torch.zeros((cfg.num_agents,), dtype=torch.float32)
                 bid_effect = torch.zeros((cfg.num_agents,), dtype=torch.float32)
                 winner = int(winning_agent[env_idx].item())
-                if hit_agent >= 0:
-                    rewards[hit_agent] += cfg.enemy_destroy_reward
+                if hit_agent >= 0 and missile_owner == hit_agent:
+                    rewards[hit_agent] += enemy_destroy_reward
                 if damaged_building_penalties:
-                    for agent_idx, damage_amount in damaged_building_penalties:
-                        rewards[agent_idx] += -cfg.building_hit_penalty * damage_amount
+                    if cfg.building_penalty_mode == "all_agents":
+                        rewards += -cfg.building_hit_penalty
+                    elif cfg.building_penalty_mode == "controller":
+                        if winner >= 0:
+                            rewards[winner] += -cfg.building_hit_penalty
+                    elif cfg.building_penalty_mode != "lane":
+                        raise ValueError(f"Unknown building_penalty_mode: {cfg.building_penalty_mode}")
+                    else:
+                        penalized_agents = {agent_idx for agent_idx, _ in damaged_building_penalties}
+                        for agent_idx in penalized_agents:
+                            rewards[agent_idx] += -cfg.building_hit_penalty
+                if cfg.enemy_disappear_penalty != 0.0 and enemy_disappear_count > 0:
+                    for agent_idx in torch.where(unshot_enemy_disappeared)[0].tolist():
+                        if agent_idx < cfg.num_agents:
+                            rewards[agent_idx] += -cfg.enemy_disappear_penalty
                 if winner >= 0 and life_loss_penalty != 0.0:
                     rewards[winner] += life_loss_penalty
+                if winner >= 0 and enemy_missile_danger_penalty != 0.0:
+                    rewards[winner] += enemy_missile_danger_penalty
+                if winner >= 0 and enemy_missile_near_hit_penalty != 0.0:
+                    rewards[winner] += enemy_missile_near_hit_penalty
                 if bids is not None and apply_bid_penalty[env_idx]:
                     bids_f = bids[env_idx].to(torch.float32)
                     if cfg.bidding_mechanism == "all_pay":
@@ -318,9 +415,13 @@ class AirRaidEnv:
 
             if terminated or truncated:
                 env.reset()
-                state = self._extract_state(env)
+                state = self._extract_state(env, env_idx)
                 self.step_count[env_idx] = 0
                 self.cumulative_score[env_idx] = state["score"]
+                self.player_missile_owner[env_idx] = -1
+                self.enemy_missile_near_hit_active[env_idx] = False
+            elif not missile_visible:
+                self.player_missile_owner[env_idx] = -1
 
             obs_list.append(self._build_obs(state, env_idx=env_idx))
             rewards_list.append(rewards)
@@ -331,16 +432,21 @@ class AirRaidEnv:
             self.prev_enemy_visible[env_idx] = state["enemy_visible"]
             self.prev_enemy_raw[env_idx] = state["enemy_raw"]
             self.prev_enemy_type[env_idx] = state["enemy_type_id"]
+            self.prev_player_missile_x[env_idx] = state["player_missile_raw"][0].item()
             self.prev_player_missile_y[env_idx] = state["player_missile_raw"][1].item()
+            self.prev_player_missile_visible[env_idx] = int(state["player_missile"][2].item())
+            self._record_player_missile_history(env_idx, state)
+            self._update_missile_slot_trackers(env_idx, state)
             self.prev_enemy_missile_y[env_idx] = state["enemy_missile_raw"][1].item()
             self.prev_lives[env_idx] = state["lives_count"]
             self.prev_building_health[env_idx] = state["building_health"]
             self.prev_building_x[env_idx] = state["building_x"]
             self.prev_score[env_idx] = state["score"]
 
-        obs = torch.stack(obs_list, dim=0).to(self.device)
+        raw_obs = torch.stack(obs_list, dim=0)
         terminated_t = torch.tensor(terminated_list, dtype=torch.bool, device=self.device)
         truncated_t = torch.tensor(truncated_list, dtype=torch.bool, device=self.device)
+        obs = self._update_obs_history(raw_obs, terminated_t.cpu() | truncated_t.cpu())
         rewards_t = torch.stack(rewards_list, dim=0).to(self.device)
         reward_components = {
             key: torch.tensor([rc[key] for rc in reward_components_list], dtype=torch.float32, device=self.device)
@@ -352,9 +458,10 @@ class AirRaidEnv:
             "window_agent": self.window_agent.to(self.device),
             "window_steps_remaining": self.window_steps_remaining.to(self.device),
             "bid_penalty_applied": apply_bid_penalty.to(self.device),
-            "score": torch.stack([s["score"] for s in state_list], dim=0).to(self.device),
+            "score": torch.tensor(score_list, dtype=torch.float32, device=self.device),
             "player_xy_raw": torch.stack([s["player_xy_raw"] for s in state_list], dim=0).to(self.device),
             "player_missile_raw": torch.stack([s["player_missile_raw"] for s in state_list], dim=0).to(self.device),
+            "player_missile_owner": self.player_missile_owner.to(self.device),
             "enemy_missile_raw": torch.stack([s["enemy_missile_raw"] for s in state_list], dim=0).to(self.device),
             "enemy_raw": torch.stack([s["enemy_raw"] for s in state_list], dim=0).to(self.device),
             "enemy_visible": torch.stack([s["enemy_visible"] for s in state_list], dim=0).to(self.device),
@@ -386,7 +493,7 @@ class AirRaidEnv:
         if controlling_agent >= 0:
             color = agent_colors[controlling_agent % len(agent_colors)]
             cv2.putText(frame, f"Agent {controlling_agent}", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-            state = self._extract_state(self.envs[env_idx])
+            state = self._extract_state(self.envs[env_idx], env_idx)
             if controlling_agent < len(state["enemy_raw"]) and state["enemy_visible"][controlling_agent]:
                 ex, ey = state["enemy_raw"][controlling_agent]
                 cv2.circle(frame, (int(ex.item()), int(ey.item())), 12, color, 2)
@@ -395,21 +502,151 @@ class AirRaidEnv:
         return frame
 
     def _reset_env(self, env_idx: int) -> torch.Tensor:
-        state = self._extract_state(self.envs[env_idx])
+        state = self._extract_state(self.envs[env_idx], env_idx)
         self.step_count[env_idx] = 0
         self.window_agent[env_idx] = -1
         self.window_steps_remaining[env_idx] = 0
         self.prev_enemy_visible[env_idx] = state["enemy_visible"]
         self.prev_enemy_raw[env_idx] = state["enemy_raw"]
         self.prev_enemy_type[env_idx] = state["enemy_type_id"]
+        self.prev_player_missile_x[env_idx] = state["player_missile_raw"][0].item()
         self.prev_player_missile_y[env_idx] = state["player_missile_raw"][1].item()
+        self.prev_player_missile_visible[env_idx] = int(state["player_missile"][2].item())
+        self._reset_player_missile_history(env_idx, state)
+        self._update_missile_slot_trackers(env_idx, state)
+        self.player_missile_owner[env_idx] = -1
+        self.enemy_missile_near_hit_active[env_idx] = False
         self.prev_enemy_missile_y[env_idx] = state["enemy_missile_raw"][1].item()
         self.prev_lives[env_idx] = state["lives_count"]
         self.prev_building_health[env_idx] = state["building_health"]
         self.prev_building_x[env_idx] = state["building_x"]
         self.prev_score[env_idx] = state["score"]
         self.cumulative_score[env_idx] = state["score"]
-        return self._build_obs(state, env_idx=env_idx).to(self.device)
+        raw_obs = self._build_obs(state, env_idx=env_idx)
+        return self._reset_obs_history_env(env_idx, raw_obs)
+
+    def _stacked_obs(self) -> torch.Tensor:
+        if self.config.single_agent_mode:
+            stacked = self._obs_history.reshape(self.num_envs, self.obs_dim)
+        else:
+            stacked = self._obs_history.reshape(self.num_envs, self.config.num_agents, self.per_agent_obs_dim)
+        return stacked.to(self.device)
+
+    def _reset_obs_history(self, raw_obs: torch.Tensor) -> torch.Tensor:
+        if self.config.single_agent_mode:
+            self._obs_history = raw_obs.unsqueeze(1).repeat(1, self.obs_stack, 1).detach().cpu()
+        else:
+            self._obs_history = raw_obs.unsqueeze(2).repeat(1, 1, self.obs_stack, 1).detach().cpu()
+        return self._stacked_obs()
+
+    def _reset_obs_history_env(self, env_idx: int, raw_obs: torch.Tensor) -> torch.Tensor:
+        if self.config.single_agent_mode:
+            self._obs_history[env_idx] = raw_obs.unsqueeze(0).repeat(self.obs_stack, 1).detach().cpu()
+            return self._obs_history[env_idx].reshape(self.obs_dim).to(self.device)
+        self._obs_history[env_idx] = raw_obs.unsqueeze(1).repeat(1, self.obs_stack, 1).detach().cpu()
+        return self._obs_history[env_idx].reshape(self.config.num_agents, self.per_agent_obs_dim).to(self.device)
+
+    def _update_obs_history(self, raw_obs: torch.Tensor, done_mask: torch.Tensor) -> torch.Tensor:
+        raw_obs = raw_obs.detach().cpu()
+        if self.obs_stack == 1:
+            self._obs_history = raw_obs.unsqueeze(1) if self.config.single_agent_mode else raw_obs.unsqueeze(2)
+            return raw_obs.to(self.device)
+        if self.config.single_agent_mode:
+            self._obs_history = torch.roll(self._obs_history, shifts=-1, dims=1)
+            self._obs_history[:, -1] = raw_obs
+            for env_idx in torch.where(done_mask)[0].tolist():
+                self._obs_history[env_idx] = raw_obs[env_idx].unsqueeze(0).repeat(self.obs_stack, 1)
+        else:
+            self._obs_history = torch.roll(self._obs_history, shifts=-1, dims=2)
+            self._obs_history[:, :, -1] = raw_obs
+            for env_idx in torch.where(done_mask)[0].tolist():
+                self._obs_history[env_idx] = raw_obs[env_idx].unsqueeze(1).repeat(1, self.obs_stack, 1)
+        return self._stacked_obs()
+
+    def _reset_player_missile_history(self, env_idx: int, state: Dict[str, torch.Tensor]) -> None:
+        self.player_missile_pos_history[env_idx].zero_()
+        self.player_missile_history_valid[env_idx].zero_()
+        self._record_player_missile_history(env_idx, state)
+
+    def _record_player_missile_history(self, env_idx: int, state: Dict[str, torch.Tensor]) -> None:
+        if int(state["player_missile"][2].item()) != 1:
+            return
+        pos = state["player_missile_raw"].to(torch.float32).cpu()
+        if pos[0].item() <= 0.0 or pos[1].item() <= 0.0:
+            return
+        self.player_missile_pos_history[env_idx] = torch.roll(
+            self.player_missile_pos_history[env_idx], shifts=-1, dims=0
+        )
+        self.player_missile_history_valid[env_idx] = torch.roll(
+            self.player_missile_history_valid[env_idx], shifts=-1, dims=0
+        )
+        self.player_missile_pos_history[env_idx, -1] = pos
+        self.player_missile_history_valid[env_idx, -1] = True
+
+    def _latest_visible_player_missile_pos(self, env_idx: int) -> Optional[torch.Tensor]:
+        valid = torch.where(self.player_missile_history_valid[env_idx])[0]
+        if valid.numel() == 0:
+            return None
+        return self.player_missile_pos_history[env_idx, int(valid[-1].item())]
+
+    def _enemy_missile_danger_penalty(self, state: Dict[str, torch.Tensor]) -> float:
+        cfg = self.config
+        if cfg.enemy_missile_danger_penalty <= 0.0:
+            return 0.0
+        if int(state["enemy_missile"][2].item()) != 1:
+            return 0.0
+
+        enemy_x, enemy_y = state["enemy_missile_raw"].tolist()
+        player_x, player_y = state["player_xy_raw"].tolist()
+        if enemy_y < cfg.enemy_missile_danger_y_threshold:
+            return 0.0
+        if enemy_y > player_y + cfg.enemy_missile_danger_y_radius:
+            return 0.0
+
+        x_radius = max(float(cfg.enemy_missile_danger_x_radius), 1.0)
+        y_radius = max(float(cfg.enemy_missile_danger_y_radius), 1.0)
+        x_severity = max(0.0, 1.0 - abs(enemy_x - player_x) / x_radius)
+        y_severity = max(0.0, 1.0 - abs(player_y - enemy_y) / y_radius)
+        severity = x_severity * y_severity
+        if severity <= 0.0:
+            return 0.0
+        return -float(cfg.enemy_missile_danger_penalty) * severity
+
+    def _enemy_missile_near_hit_penalty(
+        self, env_idx: int, state: Dict[str, torch.Tensor], life_lost: bool
+    ) -> Tuple[float, float]:
+        cfg = self.config
+        if cfg.enemy_missile_near_hit_penalty <= 0.0:
+            self.enemy_missile_near_hit_active[env_idx] = False
+            return 0.0, 0.0
+        if int(state["enemy_missile"][2].item()) != 1:
+            self.enemy_missile_near_hit_active[env_idx] = False
+            return 0.0, 0.0
+
+        enemy_x, enemy_y = state["enemy_missile_raw"].tolist()
+        player_x, player_y = state["player_xy_raw"].tolist()
+        y_margin = max(float(cfg.enemy_missile_near_hit_y_margin), 1.0)
+        x_radius = max(float(cfg.enemy_missile_near_hit_x_radius), 1.0)
+        near_player = abs(enemy_x - player_x) <= x_radius and abs(enemy_y - player_y) <= y_margin
+
+        if life_lost:
+            self.enemy_missile_near_hit_active[env_idx] = False
+            return 0.0, 0.0
+        if not near_player:
+            if enemy_y > player_y + y_margin or abs(enemy_x - player_x) > x_radius:
+                self.enemy_missile_near_hit_active[env_idx] = False
+            return 0.0, 0.0
+        if self.enemy_missile_near_hit_active[env_idx]:
+            return 0.0, 0.0
+
+        self.enemy_missile_near_hit_active[env_idx] = True
+        return -float(cfg.enemy_missile_near_hit_penalty), 1.0
+
+    def _update_missile_slot_trackers(self, env_idx: int, state: Dict[str, torch.Tensor]) -> None:
+        if self._missile_slot_count == 0:
+            return
+        self.prev_missile_slot_raw[env_idx] = state["missile_slot_raw"]
+        self.prev_missile_slot_visible[env_idx] = state["missile_slot_visible"]
 
     def partial_reset(self, done_mask: torch.Tensor) -> torch.Tensor:
         if self.config.single_agent_mode:
@@ -450,7 +687,7 @@ class AirRaidEnv:
             indices.setdefault(name, []).append(idx)
         return indices
 
-    def _extract_state(self, env: OCAtari) -> Dict[str, torch.Tensor]:
+    def _extract_state(self, env: OCAtari, env_idx: Optional[int] = None) -> Dict[str, torch.Tensor]:
         slots = env.objects
         idx = self._slot_indices
 
@@ -474,13 +711,9 @@ class AirRaidEnv:
             x, y = obj.xy
             return float(x), float(y)
 
-        def to_building_health(obj) -> float:
-            if obj is None or obj.__class__.__name__ == "NoObject":
-                return 0.0
-            return float(getattr(obj, "wh", (0, 0))[1]) / 32.0
-
         player = slot_obj(idx.get("Player", []))
-        missiles = slot_list(idx.get("Missile", []))
+        missile_slots = idx.get("Missile", [])
+        missiles = slot_list(missile_slots)
         building_objs = slot_list(idx.get("Building", []))
         lives_obj = slot_obj(idx.get("Lives", []))
         score_obj = slot_obj(idx.get("PlayerScore", []))
@@ -488,8 +721,50 @@ class AirRaidEnv:
         player_x, player_y, _ = to_xy_vis(player)
         player_raw = to_xy_raw(player)
 
-        player_missile_obj = missiles[0] if missiles else None
-        enemy_missile_obj = missiles[1] if len(missiles) > 1 else None
+        missile_slot_raw = []
+        missile_slot_visible = []
+        missile_candidates = []
+        for offset, obj in enumerate(missiles):
+            raw_x, raw_y = to_xy_raw(obj)
+            visible = 0 if obj is None or obj.__class__.__name__ == "NoObject" else 1
+            missile_slot_raw.append((raw_x, raw_y))
+            missile_slot_visible.append(visible)
+            if not visible:
+                continue
+            dy = 0.0
+            if env_idx is not None and offset < self.prev_missile_slot_raw.shape[1]:
+                prev_visible = int(self.prev_missile_slot_visible[env_idx, offset].item()) == 1
+                prev_y = float(self.prev_missile_slot_raw[env_idx, offset, 1].item())
+                if prev_visible and prev_y > 0.0:
+                    dy = raw_y - prev_y
+            missile_candidates.append((offset, obj, raw_x, raw_y, dy))
+        while len(missile_slot_raw) < self._missile_slot_count:
+            missile_slot_raw.append((0.0, 0.0))
+            missile_slot_visible.append(0)
+
+        player_missile_obj = None
+        enemy_missile_obj = None
+        upward = [item for item in missile_candidates if item[4] < 0.0]
+        downward = [item for item in missile_candidates if item[4] > 0.0]
+        if upward:
+            player_missile_obj = min(upward, key=lambda item: item[4])[1]
+        if downward:
+            enemy_missile_obj = max(downward, key=lambda item: item[4])[1]
+
+        # At missile spawn there may be no motion history yet. Air Raid exposes two
+        # fixed Missile slots in RAM: slot 0 is the player's upward missile, slot 1
+        # is the enemy's downward missile. Use that only as a fallback.
+        if player_missile_obj is None:
+            for offset, obj, *_ in missile_candidates:
+                if offset == 0:
+                    player_missile_obj = obj
+                    break
+        if enemy_missile_obj is None:
+            for offset, obj, *_ in missile_candidates:
+                if offset == 1:
+                    enemy_missile_obj = obj
+                    break
+
         pm_x, pm_y, pm_vis = to_xy_vis(player_missile_obj)
         em_x, em_y, em_vis = to_xy_vis(enemy_missile_obj)
         player_missile_raw = to_xy_raw(player_missile_obj)
@@ -541,20 +816,22 @@ class AirRaidEnv:
             enemy_visible_by_lane.append(ev)
             enemy_type_ids.append(bucket)
 
-        buildings_sorted = sorted(
-            [obj for obj in building_objs if obj.__class__.__name__ != "NoObject"],
-            key=lambda obj: obj.xy[0],
-        )
         building_x = []
         building_health = []
-        for obj in buildings_sorted[:3]:
-            bx, by, bv = to_xy_vis(obj)
-            bw, bh = getattr(obj, "wh", (0, 0))
+        # Air Raid has two real buildings. OCAtari exposes a third Building slot
+        # for the wraparound visual fragment when a building crosses the screen
+        # edge; treating that fragment as a separate building creates fake damage
+        # events whenever it appears or disappears.
+        h_by_damage = [32, 29, 29, 29, 27, 23, 21, 19, 15, 19, 23, 25, 25, 8, 32]
+        for building_idx in range(2):
+            obj = building_objs[building_idx] if building_idx < len(building_objs) else None
+            bx, _, _ = to_xy_vis(obj)
+            damage_idx = int(ram_state[27 + building_idx])
+            health = float(h_by_damage[damage_idx]) / 32.0 if 0 <= damage_idx < len(h_by_damage) else 0.0
             building_x.append(bx)
-            building_health.append(to_building_health(obj))
-        while len(building_x) < 3:
-            building_x.append(0.0)
-            building_health.append(0.0)
+            building_health.append(health)
+        building_x.append(0.0)
+        building_health.append(0.0)
 
         score_value = float(getattr(score_obj, "score", 0.0)) if score_obj is not None else 0.0
         lives_count = int(getattr(lives_obj, "lives", 0)) if lives_obj is not None and lives_obj.__class__.__name__ != "NoObject" else 0
@@ -568,6 +845,8 @@ class AirRaidEnv:
             "player_missile_raw": torch.tensor(player_missile_raw, dtype=torch.float32),
             "enemy_missile": torch.tensor([em_x, em_y, em_vis], dtype=torch.float32),
             "enemy_missile_raw": torch.tensor(enemy_missile_raw, dtype=torch.float32),
+            "missile_slot_raw": torch.tensor(missile_slot_raw, dtype=torch.float32),
+            "missile_slot_visible": torch.tensor(missile_slot_visible, dtype=torch.int32),
             "enemy_features": torch.tensor(enemy_features_by_lane, dtype=torch.float32),
             "enemy_raw": torch.tensor(enemy_raw_by_lane, dtype=torch.float32),
             "enemy_visible": torch.tensor(enemy_visible_by_lane, dtype=torch.int32),
@@ -629,6 +908,10 @@ class AirRaidEnv:
                 ],
                 dtype=torch.float32,
             )
+            if cfg.include_agent_id:
+                agent_id_features = torch.zeros(cfg.num_agents, dtype=torch.float32)
+                agent_id_features[agent_id] = 1.0
+                agent_features = torch.cat([agent_features, agent_id_features], dim=0)
             if cfg.only_own_enemy:
                 per_agent_obs.append(torch.cat([global_features, target_enemy, agent_features], dim=0))
             else:

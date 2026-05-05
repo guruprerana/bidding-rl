@@ -36,6 +36,9 @@ def main():
     LIFE_LOSS_PENALTY = 10.0
     RAW_SCORE_SCALE_SINGLE = 0.00
     RAW_SCORE_SCALE_MULTI = 0.0
+    ENEMY_MISSILE_NEAR_HIT_PENALTY = 0.0
+    ENEMY_MISSILE_NEAR_HIT_Y_MARGIN = 35.0
+    ENEMY_MISSILE_NEAR_HIT_X_RADIUS = 25.0
 
     BID_UPPER_BOUND = 2
     BID_PENALTY = 0.01
@@ -44,6 +47,9 @@ def main():
     WINDOW_PENALTY = 0.0
     BIDDING_MECHANISM = "all_pay"
     ONLY_OWN_ENEMY = True
+    OBS_STACK = 1
+    BUILDING_PENALTY_MODE = "lane"
+    SEPARATE_AGENT_NETWORKS = False
 
     NUM_ITERATIONS = 400
     LEARNING_RATE = 1e-4
@@ -82,9 +88,13 @@ def main():
             building_hit_penalty=BUILDING_HIT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
             raw_score_scale=RAW_SCORE_SCALE_SINGLE,
+            enemy_missile_near_hit_penalty=ENEMY_MISSILE_NEAR_HIT_PENALTY,
+            enemy_missile_near_hit_y_margin=ENEMY_MISSILE_NEAR_HIT_Y_MARGIN,
+            enemy_missile_near_hit_x_radius=ENEMY_MISSILE_NEAR_HIT_X_RADIUS,
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_sideward_fire=ALLOW_SIDEWARD_FIRE,
+            obs_stack=OBS_STACK,
             num_iterations=NUM_ITERATIONS,
             learning_rate=LEARNING_RATE,
             num_envs=NUM_ENVS,
@@ -120,10 +130,16 @@ def main():
             window_penalty=WINDOW_PENALTY,
             bidding_mechanism=BIDDING_MECHANISM,
             only_own_enemy=ONLY_OWN_ENEMY,
+            obs_stack=OBS_STACK,
+            building_penalty_mode=BUILDING_PENALTY_MODE,
+            separate_agent_networks=SEPARATE_AGENT_NETWORKS,
             enemy_destroy_reward=ENEMY_DESTROY_REWARD,
             building_hit_penalty=BUILDING_HIT_PENALTY,
             life_loss_penalty=LIFE_LOSS_PENALTY,
             raw_score_scale=RAW_SCORE_SCALE_MULTI,
+            enemy_missile_near_hit_penalty=ENEMY_MISSILE_NEAR_HIT_PENALTY,
+            enemy_missile_near_hit_y_margin=ENEMY_MISSILE_NEAR_HIT_Y_MARGIN,
+            enemy_missile_near_hit_x_radius=ENEMY_MISSILE_NEAR_HIT_X_RADIUS,
             max_steps=MAX_STEPS,
             hud=HUD,
             allow_sideward_fire=ALLOW_SIDEWARD_FIRE,

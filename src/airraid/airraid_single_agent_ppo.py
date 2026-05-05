@@ -32,9 +32,13 @@ class AirRaidSingleAgentArgs:
     building_hit_penalty: float = 1.0
     life_loss_penalty: float = 10.0
     raw_score_scale: float = 0.0
+    enemy_missile_near_hit_penalty: float = 0.0
+    enemy_missile_near_hit_y_margin: float = 35.0
+    enemy_missile_near_hit_x_radius: float = 25.0
     max_steps: int = 10000
     hud: bool = True
     allow_sideward_fire: bool = True
+    obs_stack: int = 1
 
     actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
     critic_hidden_sizes: Tuple[int, ...] = (256, 256, 256)
@@ -115,10 +119,14 @@ class AirRaidSingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
             building_hit_penalty=self.args.building_hit_penalty,
             life_loss_penalty=self.args.life_loss_penalty,
             raw_score_scale=self.args.raw_score_scale,
+            enemy_missile_near_hit_penalty=self.args.enemy_missile_near_hit_penalty,
+            enemy_missile_near_hit_y_margin=self.args.enemy_missile_near_hit_y_margin,
+            enemy_missile_near_hit_x_radius=self.args.enemy_missile_near_hit_x_radius,
             max_steps=self.args.max_steps,
             hud=self.args.hud,
             single_agent_mode=True,
             allow_sideward_fire=self.args.allow_sideward_fire,
+            obs_stack=self.args.obs_stack,
         )
         self.envs = AirRaidEnv(env_config, num_envs=self.args.num_envs, device=self.device, seed=self.args.seed)
         self.obs_dim = self.envs.obs_shape[1]
