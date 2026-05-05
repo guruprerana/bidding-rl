@@ -101,7 +101,9 @@ MAX_GRAD_NORM = 0.5
 TARGET_KL = None
 
 # Same seeds as experiment_scripts/assault_bidding_comparison.py.
-SEEDS = [1825, 410, 4507, 4013, 3658]
+# SEEDS = [1825, 410, 4507, 4013, 3658]
+SEEDS = [5215, 6861, 6803, 7819, 8057]
+DWN_SEEDS = [410, 3658]
 
 # Network
 ACTOR_HIDDEN_SIZES = (128, 128, 128, 128)
@@ -445,7 +447,7 @@ def main() -> None:
                 functools.partial(run_single_agent_baseline, f"airraid_cmp_single_agent{s}", seed),
             ),
         ]
-        if not SKIP_DWN:
+        if not SKIP_DWN and seed in DWN_SEEDS:
             baselines.append(
                 (
                     f"AirRaid DWN baseline (seed={seed})",
@@ -484,6 +486,8 @@ def main() -> None:
     print("=" * 72)
     print(f"  Launching {len(procs)} experiments (max {MAX_CONCURRENT} concurrent)")
     print(f"  Seeds: {SEEDS}")
+    if not SKIP_DWN:
+        print(f"  DWN seeds: {DWN_SEEDS}")
     print(f"  GPUs: {GPU_IDS}")
     if MULTI_AGENT_ONLY:
         print("  (baselines skipped — MULTI_AGENT_ONLY=True)")
