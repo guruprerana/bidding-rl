@@ -3,7 +3,7 @@
 Learning curves for gridworld_bidding_mechanism_comparison.
 
 X axis: env steps (divided by 8 for multi-agent methods to give per-agent steps).
-Y axis: 8 × avg_avg_performance (mean across 5 seeds, shaded region shows ±1 std).
+Y axis: 8 × avg_avg_performance (mean across available seeds, shaded region shows ±1 std).
 Only iterations up to 400 are included.
 
 Usage:
@@ -25,7 +25,7 @@ from scipy import stats
 LOG_DIR = "logs/gridworld_bidding_mechanism_comparison"
 NUM_AGENTS = 8
 MAX_ITERATION = 400
-SEEDS = [410, 1825, 3658, 4013, 4507]
+SEEDS = [410, 1825, 3658, 4013, 4507, 5215, 6803, 6861, 7819, 8057]
 
 # (prefix, label, multi_agent)
 # multi_agent=True → x axis divided by NUM_AGENTS
@@ -180,7 +180,7 @@ def main():
             print(f"  [skip] no runs found for '{exp_prefix}'")
             continue
 
-        print(f"  {label}: found {len(seed_runs)}/{len(SEEDS)} seeds")
+        print(f"  {label}: found {len(seed_runs)}/{len(SEEDS)} candidate seeds")
 
         steps, means, std_lo, std_hi = aggregate_across_seeds(seed_runs, multi_agent)
         if not steps:

@@ -3,9 +3,9 @@
 Print a LaTeX table comparing gridworld algorithm performance.
 
 Reads trained runs from logs/gridworld_bidding_mechanism_comparison/ across
-5 seeds. Picks the best evaluation iteration for each seed (highest
-avg_avg_performance), computes 8 × avg_performance mean across seeds with
-standard deviation, and renders a LaTeX table.
+available seeds. Averages performance over the last 5 available evaluation
+iterations for each seed, then computes the mean and standard deviation across
+seed averages, and renders a LaTeX table.
 
 Usage:
     python experiment_scripts/plots/gridworld_results_table.py
@@ -22,7 +22,7 @@ import numpy as np
 
 LOG_DIR = "logs/gridworld_bidding_mechanism_comparison"
 NUM_AGENTS = 8  # multiplier applied to avg_performance values
-SEEDS = [410, 1825, 3658, 4013, 4507]
+SEEDS = [410, 1825, 3658, 4013, 4507, 5215, 6803, 6861, 7819, 8057]
 
 # Ordered table rows: (prefix, display_label)
 METHODS = [
@@ -65,62 +65,25 @@ def find_all_seed_runs(log_dir: str, exp_prefix: str, seeds: list[int]) -> dict[
     return seed_runs
 
 
-def best_iter_mean_performance(run_dir: str, is_dwn: bool = False) -> float | None:
-    """Return mean performance from the best iteration for a single seed.
-
-    'Best' = highest statistics.avg_avg_performance (or avg_return if not available).
-    For methods with avg_performance (per-agent), scales by NUM_AGENTS.
-    For DWN: uses 8*avg_targets_reached - avg_expired_targets.
-    """
-    rollouts_dir = os.path.join(run_dir, "rollouts")
-    if not os.path.isdir(rollouts_dir):
+def _eval_index_from_filename(fname: str) -> int | None:
+    match = re.match(r"(?:iter|step)_(\d+)_eval_stats\.json$", fname)
+    if not match:
         return None
+    return int(match.group(1))
 
-    files = [f for f in os.listdir(rollouts_dir) if f.endswith("_eval_stats.json")]
-    if not files:
-        return None
 
-    records = []
-    for fname in files:
-        path = os.path.join(rollouts_dir, fname)
-        with open(path) as fh:
-            data = json.load(fh)
-        stat = data.get("statistics", {})
+def _performance_from_eval(data: dict, is_dwn: bool = False) -> float | None:
+    """Return table performance from one eval stats payload."""
+    stat = data.get("statistics", {})
 
-        # For DWN, compute custom performance metric for sorting
-        if is_dwn:
-            targets = stat.get("avg_targets_reached")
-            expired = stat.get("avg_expired_targets")
-            if targets is not None and expired is not None:
-                sort_key = 8 * targets - expired
-            else:
-                continue
-        else:
-            sort_key = stat.get("avg_avg_performance", stat.get("avg_return"))
-            if sort_key is None:
-                continue
-
-        records.append((sort_key, data))
-
-    if not records:
-        return None
-
-    records.sort(key=lambda x: x[0])
-    best = records[-1][1]
-    stat = best.get("statistics", {})
-
-    # For DWN, return the custom metric
     if is_dwn:
         targets = stat.get("avg_targets_reached")
         expired = stat.get("avg_expired_targets")
-        if targets is not None and expired is not None:
-            return 8 * targets - expired
-        return None
+        if targets is None or expired is None:
+            return None
+        return float(NUM_AGENTS * targets - expired)
 
-    # For other methods, use per_episode_data
-    ped = best.get("per_episode_data", {})
-
-    # Check for avg_performance first (per-agent metric, needs scaling)
+    ped = data.get("per_episode_data", {})
     avg_perf = ped.get("avg_performance")
     if avg_perf:
         return float(np.mean(avg_perf)) * NUM_AGENTS
@@ -128,14 +91,44 @@ def best_iter_mean_performance(run_dir: str, is_dwn: bool = False) -> float | No
     return None
 
 
-def aggregate_best_performance_across_seeds(seed_runs: dict[int, str], is_dwn: bool = False) -> tuple[float, float] | None:
-    """Compute mean and std of best iteration performance across seeds.
+def recent_eval_mean_performance(run_dir: str, is_dwn: bool = False, num_evals: int = 5) -> float | None:
+    """Return mean performance over the last available eval iterations for one seed."""
+    rollouts_dir = os.path.join(run_dir, "rollouts")
+    if not os.path.isdir(rollouts_dir):
+        return None
+
+    files = []
+    for fname in os.listdir(rollouts_dir):
+        eval_index = _eval_index_from_filename(fname)
+        if eval_index is not None:
+            files.append((eval_index, fname))
+
+    if not files:
+        return None
+
+    values = []
+    for _, fname in sorted(files)[-num_evals:]:
+        path = os.path.join(rollouts_dir, fname)
+        with open(path) as fh:
+            data = json.load(fh)
+        perf = _performance_from_eval(data, is_dwn=is_dwn)
+        if perf is not None:
+            values.append(perf)
+
+    if not values:
+        return None
+
+    return float(np.mean(values))
+
+
+def aggregate_recent_performance_across_seeds(seed_runs: dict[int, str], is_dwn: bool = False) -> tuple[float, float] | None:
+    """Compute mean and std of recent-eval seed averages across seeds.
 
     Returns (mean, std) or None if insufficient data.
     """
     values = []
     for seed, run_dir in seed_runs.items():
-        perf = best_iter_mean_performance(run_dir, is_dwn=is_dwn)
+        perf = recent_eval_mean_performance(run_dir, is_dwn=is_dwn)
         if perf is not None:
             values.append(perf)
 
@@ -172,12 +165,12 @@ def main() -> None:
 
         # Special handling for DWN
         is_dwn = (key == "bidding_cmp_dwn")
-        mean_std = aggregate_best_performance_across_seeds(seed_runs, is_dwn=is_dwn)
+        mean_std = aggregate_recent_performance_across_seeds(seed_runs, is_dwn=is_dwn)
         perf_results[key] = mean_std
 
         if mean_std:
             mean, std = mean_std
-            print(f"  {label}: {len(seed_runs)}/{len(SEEDS)} seeds, "
+            print(f"  {label}: {len(seed_runs)}/{len(SEEDS)} candidate seeds, "
                   f"performance = {mean:.2f} ± {std:.2f}")
 
     # ── render LaTeX table ──────────────────────────────────────────────────
@@ -185,8 +178,8 @@ def main() -> None:
     lines.append(r"\begin{table}")
     lines.append(r"  \centering")
     lines.append(
-        r"  \caption{Gridworld performance (mean $\pm$ std across 5 seeds) at the best"
-        r" evaluation iteration. Values are $8 \times \text{avg performance}$ for"
+        r"  \caption{Gridworld performance (mean $\pm$ std across available seeds) averaged over"
+        r" each seed's last 5 available evaluation iterations. Values are $8 \times \text{avg performance}$ for"
         r" bidding/single-agent methods, and $8 \times \text{targets reached} - \text{expired}$ for DWN.}"
     )
     lines.append(r"  \begin{tabular}{ll}")
