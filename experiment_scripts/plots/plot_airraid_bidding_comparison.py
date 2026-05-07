@@ -10,6 +10,7 @@ Usage:
     python experiment_scripts/plots/plot_airraid_bidding_comparison.py
     python experiment_scripts/plots/plot_airraid_bidding_comparison.py --log-dir logs/airraid_bidding_mechanism_comparison
     python experiment_scripts/plots/plot_airraid_bidding_comparison.py --smooth 3 --min-seeds 2
+    python experiment_scripts/plots/plot_airraid_bidding_comparison.py --seeds 5215,6803,6861
     python experiment_scripts/plots/plot_airraid_bidding_comparison.py --include-partial
 """
 
@@ -34,13 +35,15 @@ NUM_ITERATIONS = 400
 NUM_ENVS = 128
 NUM_STEPS = 512
 MAX_STEPS_PER_AGENT = NUM_ITERATIONS * NUM_ENVS * NUM_STEPS
-SEEDS = [1825, 410, 4507, 4013, 3658]
+DEFAULT_SEEDS = None
 
 # (prefix, label, multi_agent)
 # multi_agent=True means x axis is global_step / NUM_AGENTS.
 EXPERIMENTS = [
-    ("airraid_cmp_all_pay", "All-Pay (Local Obs)", True),
+    ("airraid_cmp_winner_pays_global_obs", "Winner-Pays", True),
     ("airraid_cmp_winner_pays", "Winner-Pays (Local Obs)", True),
+    ("airraid_cmp_all_pay_global_obs", "All-Pay", True),
+    ("airraid_cmp_all_pay", "All-Pay (Local Obs)", True),
     ("airraid_cmp_single_agent", "Single-Agent PPO", False),
 ]
 
@@ -48,16 +51,40 @@ EXPERIMENTS = [
 def is_completed_run(log_dir: str, exp_prefix: str, seed: int, run_dir: str) -> bool:
     """Return whether this seed finished.
 
-    Prefer the worker log completion marker. If the log is unavailable, fall
-    back to the final iteration eval file so copied result folders still work.
+    Prefer the final iteration eval file because worker logs can be truncated
+    while the copied result folder is complete. If the final eval is missing,
+    fall back to the worker log completion marker.
     """
+    final_eval = os.path.join(run_dir, "evaluation", f"iter_{NUM_ITERATIONS}_eval_stats.json")
+    if os.path.isfile(final_eval):
+        return True
+
     log_path = os.path.join(log_dir, f"seed_{seed}", f"{exp_prefix}_s{seed}.log")
     if os.path.isfile(log_path):
         with open(log_path, errors="ignore") as f:
             return "EXPERIMENT COMPLETED" in f.read()
 
-    final_eval = os.path.join(run_dir, "evaluation", f"iter_{NUM_ITERATIONS}_eval_stats.json")
-    return os.path.isfile(final_eval)
+    return False
+
+
+def discover_seeds(log_dir: str, exp_prefix: str) -> list[int]:
+    """Discover seeds with run directories for one experiment prefix."""
+    if not os.path.isdir(log_dir):
+        return []
+
+    pattern_re = re.compile(rf"^{re.escape(exp_prefix)}_s(\d+)_\d{{8}}_\d{{6}}$")
+    seeds = []
+    for name in os.listdir(log_dir):
+        match = pattern_re.match(name)
+        if match and os.path.isdir(os.path.join(log_dir, name)):
+            seeds.append(int(match.group(1)))
+    return sorted(set(seeds))
+
+
+def parse_seeds(value: str | None) -> list[int] | None:
+    if not value:
+        return DEFAULT_SEEDS
+    return [int(seed.strip()) for seed in value.split(",") if seed.strip()]
 
 
 def find_seed_runs(
@@ -162,6 +189,11 @@ def main() -> None:
     parser.add_argument("--metric", default="avg_score")
     parser.add_argument("--output", default=None)
     parser.add_argument(
+        "--seeds",
+        default=None,
+        help="Comma-separated seed allowlist. By default, discover all seeds with matching run directories.",
+    )
+    parser.add_argument(
         "--include-partial",
         action="store_true",
         help="Include active/incomplete seeds. By default only completed seeds are plotted.",
@@ -179,14 +211,19 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(8, 6))
 
     any_data = False
+    requested_seeds = parse_seeds(args.seeds)
     for exp_prefix, label, multi_agent in EXPERIMENTS:
-        seed_runs = find_seed_runs(args.log_dir, exp_prefix, SEEDS, args.include_partial)
+        seeds = requested_seeds if requested_seeds is not None else discover_seeds(args.log_dir, exp_prefix)
+        seed_runs = find_seed_runs(args.log_dir, exp_prefix, seeds, args.include_partial)
         if not seed_runs:
             print(f"  [skip] no runs found for '{exp_prefix}'")
             continue
 
         seed_note = "completed" if not args.include_partial else "available"
-        print(f"  {label}: found {len(seed_runs)}/{len(SEEDS)} {seed_note} seeds")
+        print(
+            f"  {label}: found {len(seed_runs)}/{len(seeds)} {seed_note} seeds "
+            f"({', '.join(str(seed) for seed in sorted(seed_runs))})"
+        )
         steps, means, std_lo, std_hi, counts = aggregate_across_seeds(
             seed_runs,
             multi_agent,
