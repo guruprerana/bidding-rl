@@ -26,7 +26,7 @@ LOG_DIR = "logs/assault_bidding_mechanism_comparison"
 NUM_AGENTS = 3
 # Per-agent step cap: matches multi-agent at iter 150 (150 × 128 × 512 = 9,830,400)
 MAX_STEPS_PER_AGENT = 150 * 128 * 512
-SEEDS = [1825, 410, 4507, 4013, 3658]
+SEEDS = [1825, 410, 4507, 4013, 3658, 5215, 6861, 6803, 7819, 8057]
 
 # (prefix, label, multi_agent)
 # multi_agent=True → x axis divided by NUM_AGENTS

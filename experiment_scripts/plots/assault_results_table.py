@@ -3,9 +3,9 @@
 Print a LaTeX table comparing Assault algorithm performance.
 
 Reads trained runs from logs/assault_bidding_mechanism_comparison/ across
-5 seeds. Picks the best evaluation iteration for each seed (highest
-statistics.avg_score), computes mean score across seeds with standard
-deviation, and renders a LaTeX table.
+available seeds. Computes each seed's mean score over its last 5 evaluation
+iterations, then computes mean score across seeds with standard deviation,
+and renders a LaTeX table.
 
 Usage:
     python experiment_scripts/plots/assault_results_table.py
@@ -21,7 +21,7 @@ import numpy as np
 # ── configuration ──────────────────────────────────────────────────────────
 
 LOG_DIR = "logs/assault_bidding_mechanism_comparison"
-SEEDS = [1825, 410, 4507, 4013, 3658]
+SEEDS = [1825, 410, 4507, 4013, 3658, 5215, 6861, 6803, 7819, 8057]
 
 # Ordered table rows: (prefix, display_label)
 METHODS = [
@@ -59,10 +59,9 @@ def find_all_seed_runs(log_dir: str, exp_prefix: str, seeds: list[int]) -> dict[
     return seed_runs
 
 
-def best_iter_mean_score(run_dir: str) -> float | None:
-    """Return mean score from the best iteration for a single seed.
+def last_n_eval_mean_score(run_dir: str, n: int = 5) -> float | None:
+    """Return mean score over the last n evaluation iterations for one seed.
 
-    'Best' = highest statistics.avg_score.
     Checks evaluation/ then rollouts/ to support different run formats.
     """
     eval_dir = None
@@ -87,24 +86,29 @@ def best_iter_mean_score(run_dir: str) -> float | None:
         scores = data.get("per_episode", {}).get("scores")
         if avg_score is None or not scores:
             continue
-        records.append((avg_score, scores))
+        iteration = data.get("iteration")
+        if iteration is None:
+            match = re.search(r"iter_(\d+)_eval_stats\.json$", fname)
+            iteration = int(match.group(1)) if match else None
+        sort_key = iteration if iteration is not None else data.get("global_step", 0)
+        records.append((sort_key, float(avg_score)))
 
     if not records:
         return None
 
     records.sort(key=lambda x: x[0])
-    best_scores = records[-1][1]
-    return float(np.mean(best_scores))
+    last_scores = [avg_score for _, avg_score in records[-n:]]
+    return float(np.mean(last_scores))
 
 
-def aggregate_best_score_across_seeds(seed_runs: dict[int, str]) -> tuple[float, float] | None:
-    """Compute mean and std of best iteration score across seeds.
+def aggregate_last_n_score_across_seeds(seed_runs: dict[int, str], n: int = 5) -> tuple[float, float] | None:
+    """Compute mean and std of last-n-eval mean score across seeds.
 
     Returns (mean, std) or None if no data.
     """
     values = []
     for seed, run_dir in seed_runs.items():
-        score = best_iter_mean_score(run_dir)
+        score = last_n_eval_mean_score(run_dir, n=n)
         if score is not None:
             values.append(score)
 
@@ -136,7 +140,7 @@ def main() -> None:
             results[prefix] = None
             continue
 
-        mean_std = aggregate_best_score_across_seeds(seed_runs)
+        mean_std = aggregate_last_n_score_across_seeds(seed_runs, n=5)
         results[prefix] = mean_std
 
         if mean_std:
@@ -149,8 +153,8 @@ def main() -> None:
     lines.append(r"\begin{table}")
     lines.append(r"  \centering")
     lines.append(
-        r"  \caption{Assault score (mean $\pm$ std across 5 seeds) at the best"
-        r" evaluation iteration.}"
+        r"  \caption{Assault score (mean $\pm$ std across available seeds) averaged"
+        r" over each seed's last 5 evaluation iterations.}"
     )
     lines.append(r"  \begin{tabular}{ll}")
     lines.append(r"    \hline")
