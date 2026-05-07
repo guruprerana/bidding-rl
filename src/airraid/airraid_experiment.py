@@ -250,8 +250,11 @@ class AirRaidExperiment:
                     avg_bc[bid_val] = float(np.mean([ep[agent_i].get(bid_val, 0) for ep in all_agent_bid_counts]))
                 avg_bid_counts_per_agent.append(avg_bc)
         avg_control_timesteps_per_agent: List[float] = []
+        std_control_timesteps_per_agent: List[float] = []
         if not single_agent_mode and all_agent_control_counts:
-            avg_control_timesteps_per_agent = np.array(all_agent_control_counts).mean(axis=0).tolist()
+            control_counts_arr = np.array(all_agent_control_counts, dtype=float)
+            avg_control_timesteps_per_agent = control_counts_arr.mean(axis=0).tolist()
+            std_control_timesteps_per_agent = control_counts_arr.std(axis=0).tolist()
         per_agent_return_stats = {}
         if not single_agent_mode and all_agent_returns:
             for i in range(args.num_agents):
@@ -278,6 +281,7 @@ class AirRaidExperiment:
             **hit_credit_stats,
             "avg_bid_counts_per_agent": avg_bid_counts_per_agent,
             "avg_control_timesteps_per_agent": avg_control_timesteps_per_agent,
+            "std_control_timesteps_per_agent": std_control_timesteps_per_agent,
         }
         if iteration is not None:
             eval_summary = {

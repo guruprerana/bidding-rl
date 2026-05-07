@@ -5,7 +5,7 @@ Plot bid-distribution and per-agent control-timesteps for the all_pay Assault ex
 Reads eval stats from the experiment's evaluation/ directory and produces two
 figures saved into the base log directory:
 
-  1. bid_distribution.png  — grouped bar chart: agent on x-axis, one bar per bid value.
+  1. bid_distribution.png  — grouped bar chart: bid value on x-axis, one bar per agent.
   2. control_timesteps.png — bar chart: avg timesteps controlled per agent.
 
 Usage:
