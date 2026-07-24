@@ -32,9 +32,7 @@ SEEDS = [1825, 410, 4507, 4013, 3658, 5215, 6861, 6803, 7819, 8057]
 # multi_agent=True → x axis divided by NUM_AGENTS
 EXPERIMENTS = [
     ("assault_cmp_winner_pays",          "Winner-Pays",            True),
-    ("assault_cmp_winner_pays_localobs", "Winner-Pays (Local Obs)", True),
     ("assault_cmp_all_pay",              "All-Pay",                True),
-    ("assault_cmp_all_pay_localobs",     "All-Pay (Local Obs)",    True),
     ("assault_cmp_single_agent",         "Single-Agent PPO",       False),
 ]
 
@@ -188,7 +186,7 @@ def main():
         raise SystemExit("No data found — check --log-dir.")
 
     ax.set_xlabel("Env. Steps", fontsize=18)
-    ax.set_ylabel("Score", fontsize=18)
+    ax.set_ylabel("Avg Score", fontsize=18)
     ax.tick_params(axis="both", labelsize=13)
     ax.legend(loc="upper left", fontsize=14)
     ax.grid(True, alpha=0.3)

@@ -28,10 +28,7 @@ MAX_DWN_STEPS = 50_000_000
 
 METHODS = [
     ("airraid_cmp_winner_pays_global_obs", "Winner-Pays"),
-    ("airraid_cmp_winner_pays", "Winner-Pays (Local Obs)"),
     ("airraid_cmp_all_pay_global_obs", "All-Pay"),
-    ("airraid_cmp_all_pay", "All-Pay (Local Obs)"),
-    ("airraid_cmp_dwn", "DWN"),
     ("airraid_cmp_single_agent", "Single-Agent PPO"),
 ]
 

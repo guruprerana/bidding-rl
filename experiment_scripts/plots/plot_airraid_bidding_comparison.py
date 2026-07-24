@@ -41,9 +41,7 @@ DEFAULT_SEEDS = None
 # multi_agent=True means x axis is global_step / NUM_AGENTS.
 EXPERIMENTS = [
     ("airraid_cmp_winner_pays_global_obs", "Winner-Pays", True),
-    ("airraid_cmp_winner_pays", "Winner-Pays (Local Obs)", True),
     ("airraid_cmp_all_pay_global_obs", "All-Pay", True),
-    ("airraid_cmp_all_pay", "All-Pay (Local Obs)", True),
     ("airraid_cmp_single_agent", "Single-Agent PPO", False),
 ]
 
@@ -253,7 +251,8 @@ def main() -> None:
         raise SystemExit("No data found. Check --log-dir, --metric, or --min-seeds.")
 
     ax.set_xlabel("Env. Steps", fontsize=18)
-    ax.set_ylabel(args.metric.replace("_", " ").title(), fontsize=18)
+    ylabel = "Avg Score" if args.metric == "avg_score" else args.metric.replace("_", " ").title()
+    ax.set_ylabel(ylabel, fontsize=18)
     ax.tick_params(axis="both", labelsize=13)
     ax.legend(loc="upper left", fontsize=14)
     ax.grid(True, alpha=0.3)
