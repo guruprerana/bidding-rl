@@ -163,6 +163,11 @@ def main():
     parser.add_argument("--log-dir", default=LOG_DIR)
     parser.add_argument("--smooth", type=int, default=1, metavar="W")
     parser.add_argument("--output", default=None)
+    parser.add_argument(
+        "--exclude-local-obs",
+        action="store_true",
+        help="omit experiments whose labels include '(Local Obs)'",
+    )
     args = parser.parse_args()
 
     log_dir = args.log_dir
@@ -175,6 +180,10 @@ def main():
 
     any_data = False
     for exp_prefix, label, multi_agent in EXPERIMENTS:
+        if args.exclude_local_obs and "(Local Obs)" in label:
+            print(f"  [skip] excluded local-observation run '{exp_prefix}'")
+            continue
+
         seed_runs = find_all_seed_runs(log_dir, exp_prefix, SEEDS)
         if not seed_runs:
             print(f"  [skip] no runs found for '{exp_prefix}'")
@@ -204,7 +213,7 @@ def main():
         raise SystemExit("No data found — check --log-dir.")
 
     ax.set_xlabel("Env. Steps", fontsize=18)
-    ax.set_ylabel("Performance", fontsize=18)
+    ax.set_ylabel("Avg Score", fontsize=18)
     ax.tick_params(axis="both", labelsize=13)
     ax.legend(loc="upper left", fontsize=14)
     ax.grid(True, alpha=0.3)
