@@ -129,7 +129,7 @@ def main():
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=18)
     ax.set_xlabel("Bid Upper Bound", fontsize=20)
-    ax.set_ylabel("Avg. Performance", fontsize=20)
+    ax.set_ylabel("Avg Score", fontsize=20)
     ax.tick_params(axis="y", labelsize=16)
     ax.grid(True, axis="y", alpha=0.3)
 

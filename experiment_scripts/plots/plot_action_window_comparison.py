@@ -128,7 +128,7 @@ def main():
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=13)
     ax.set_xlabel("Action Window", fontsize=18)
-    ax.set_ylabel("Avg. Performance", fontsize=18)
+    ax.set_ylabel("Avg Score", fontsize=18)
     ax.tick_params(axis="y", labelsize=13)
     ax.grid(True, axis="y", alpha=0.3)
 

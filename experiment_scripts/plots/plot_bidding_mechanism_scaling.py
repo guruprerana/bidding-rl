@@ -137,7 +137,7 @@ def main():
     ax.set_xticks(group_positions)
     ax.set_xticklabels([str(n) for n in EVAL_NUM_AGENTS_LIST], fontsize=12)
     ax.set_xlabel("Number of Eval Targets", fontsize=16)
-    ax.set_ylabel("Avg. Performance", fontsize=16)
+    ax.set_ylabel("Avg Score", fontsize=16)
     ax.tick_params(axis="y", labelsize=12)
     ax.legend(loc="upper right", fontsize=14)
     ax.grid(True, axis="y", alpha=0.3)
