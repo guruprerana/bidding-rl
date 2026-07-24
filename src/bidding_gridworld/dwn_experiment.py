@@ -188,6 +188,10 @@ class DWNExperiment:
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_priority_sum = np.mean(eval_stats["reached_priority_sum_per_episode"])
+        avg_reached_count_by_priority = np.mean(
+            eval_stats["reached_count_by_priority_per_episode"], axis=0
+        ).tolist()
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         success_rate = sum(
@@ -199,6 +203,7 @@ class DWNExperiment:
                 "eval/avg_return": avg_return,
                 "eval/avg_length": avg_length,
                 "eval/avg_targets_reached": avg_targets,
+                "eval/avg_reached_priority_sum": avg_priority_sum,
                 "eval/avg_expired_targets": avg_expired,
                 "eval/avg_min_targets_reached": avg_min_reached,
                 "eval/success_rate": success_rate,
@@ -213,6 +218,8 @@ class DWNExperiment:
                 "avg_return": float(avg_return),
                 "avg_length": float(avg_length),
                 "avg_targets_reached": float(avg_targets),
+                "avg_reached_priority_sum": float(avg_priority_sum),
+                "avg_reached_count_by_priority": avg_reached_count_by_priority,
                 "avg_expired_targets": float(avg_expired),
                 "avg_min_targets_reached": float(avg_min_reached),
                 "success_rate": float(success_rate),
@@ -224,6 +231,15 @@ class DWNExperiment:
                 "returns": [float(r) for r in eval_stats["episode_returns"]],
                 "lengths": [int(l) for l in eval_stats["episode_lengths"]],
                 "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
+                "reached_priority_sum": [
+                    int(p) for p in eval_stats["reached_priority_sum_per_episode"]
+                ],
+                "reached_priority_sum_per_target": eval_stats[
+                    "reached_priority_sum_per_target_per_episode"
+                ],
+                "reached_count_by_priority": eval_stats[
+                    "reached_count_by_priority_per_episode"
+                ],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
                 "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
             },

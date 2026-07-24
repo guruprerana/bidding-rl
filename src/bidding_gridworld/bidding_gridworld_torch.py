@@ -74,6 +74,7 @@ class BiddingGridworld:
         self.targets_reached = None
         self.targets_reached_count = None
         self.target_counters = None
+        self.target_priorities = None
         self.window_agent = None
         self.window_steps_remaining = None
         self.step_count = None
@@ -104,15 +105,19 @@ class BiddingGridworld:
 
         include_reached = not self.config.moving_targets
         if self.config.single_agent_mode:
-            base_dim = 3 + (5 if include_reached else 4) * self.config.num_agents
+            base_dim = 3 + (6 if include_reached else 5) * self.config.num_agents
             self.obs_dim = base_dim
             self.obs_shape = (self.num_envs, self.obs_dim)
             self.per_agent_obs_dim = None
         else:
             if self.config.visible_targets is None:
-                self.per_agent_obs_dim = 3 + (4 if include_reached else 3) * self.config.num_agents
+                self.per_agent_obs_dim = 3 + (5 if include_reached else 4) * self.config.num_agents
             else:
-                self.per_agent_obs_dim = 7 + 3 * self.config.visible_targets if include_reached else 6 + 2 * self.config.visible_targets
+                self.per_agent_obs_dim = (
+                    8 + 4 * self.config.visible_targets
+                    if include_reached
+                    else 7 + 3 * self.config.visible_targets
+                )
             self.obs_dim = None
             self.obs_shape = (self.num_envs, self.config.num_agents, self.per_agent_obs_dim)
 
@@ -136,6 +141,7 @@ class BiddingGridworld:
         self.targets_reached = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.int32)
         self.targets_reached_count = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.int32)
         self.target_counters = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.int32)
+        self.target_priorities = self._sample_target_priorities()
         self.window_agent = torch.full((self.num_envs,), -1, device=device, dtype=torch.int32)
         self.window_steps_remaining = torch.zeros((self.num_envs,), device=device, dtype=torch.int32)
         self.step_count = torch.zeros((self.num_envs,), device=device, dtype=torch.int32)
@@ -252,6 +258,9 @@ class BiddingGridworld:
 
         # Targets reached
         targets_just_reached = self._positions_equal(self.agent_pos, self.target_pos) & (self.targets_reached == 0)
+        target_priorities_just_reached = (
+            self.target_priorities * targets_just_reached.to(self.target_priorities.dtype)
+        )
         self.targets_reached = torch.where(targets_just_reached, torch.ones_like(self.targets_reached), self.targets_reached)
         self.targets_reached_count = self.targets_reached_count + targets_just_reached.to(torch.int32)
         self.target_counters = torch.where(targets_just_reached, torch.zeros_like(self.target_counters), self.target_counters)
@@ -303,9 +312,18 @@ class BiddingGridworld:
                 min_count = self.targets_reached_count.min(dim=1).values
                 relative_count = (self.targets_reached_count - min_count.unsqueeze(1)).to(torch.float32)
                 decay = torch.exp(-cfg.reward_decay_factor * relative_count)
-                rewards = rewards + (targets_just_reached.to(torch.float32) * (cfg.target_reward * decay)).sum(dim=1)
+                rewards = rewards + (
+                    targets_just_reached.to(torch.float32)
+                    * cfg.target_reward
+                    * self.target_priorities.to(torch.float32)
+                    * decay
+                ).sum(dim=1)
             else:
-                rewards = rewards + (targets_just_reached.to(torch.float32) * cfg.target_reward).sum(dim=1)
+                rewards = rewards + (
+                    targets_just_reached.to(torch.float32)
+                    * cfg.target_reward
+                    * self.target_priorities.to(torch.float32)
+                ).sum(dim=1)
 
             if cfg.target_expiry_penalty > 0:
                 rewards = rewards - cfg.target_expiry_penalty * targets_expired.to(torch.float32).sum(dim=1)
@@ -353,7 +371,11 @@ class BiddingGridworld:
                 dist_improve = (self.previous_distances - current_distances).to(torch.float32)
                 rewards = rewards + cfg.distance_reward_scale * dist_improve * (self.targets_reached == 0).to(torch.float32)
 
-            rewards = rewards + cfg.target_reward * targets_just_reached.to(torch.float32)
+            rewards = rewards + (
+                cfg.target_reward
+                * self.target_priorities.to(torch.float32)
+                * targets_just_reached.to(torch.float32)
+            )
             if cfg.target_expiry_penalty > 0:
                 rewards = rewards - cfg.target_expiry_penalty * targets_expired.to(torch.float32)
 
@@ -367,9 +389,18 @@ class BiddingGridworld:
                 min_count = self.targets_reached_count.min(dim=1).values
                 relative_count = (self.targets_reached_count - min_count.unsqueeze(1)).to(torch.float32)
                 decay = torch.exp(-cfg.reward_decay_factor * relative_count)
-                per_obj = per_obj + targets_just_reached.to(torch.float32) * (cfg.target_reward * decay)
+                per_obj = per_obj + (
+                    targets_just_reached.to(torch.float32)
+                    * cfg.target_reward
+                    * self.target_priorities.to(torch.float32)
+                    * decay
+                )
             else:
-                per_obj = per_obj + targets_just_reached.to(torch.float32) * cfg.target_reward
+                per_obj = per_obj + (
+                    targets_just_reached.to(torch.float32)
+                    * cfg.target_reward
+                    * self.target_priorities.to(torch.float32)
+                )
             if cfg.target_expiry_penalty > 0:
                 per_obj = per_obj - cfg.target_expiry_penalty * targets_expired.to(torch.float32)
 
@@ -392,6 +423,7 @@ class BiddingGridworld:
             "window_steps_remaining": self.window_steps_remaining,
             "bid_penalty_applied": apply_bid_penalty,
             "targets_just_reached": targets_just_reached,
+            "target_priorities_just_reached": target_priorities_just_reached,
             "targets_just_expired": targets_expired,
         }
         if cfg.single_agent_mode:
@@ -417,6 +449,7 @@ class BiddingGridworld:
             counter_denom = float(cfg.max_steps)
         counter_denom = max(counter_denom, 1.0)
         target_counters = self.target_counters.to(torch.float32) / counter_denom
+        target_priorities = self.target_priorities.to(torch.float32) / 4.0
 
         window_denom = float(max(cfg.action_window, 1))
         window_steps = (self.window_steps_remaining.to(torch.float32) / window_denom).unsqueeze(-1)
@@ -428,6 +461,7 @@ class BiddingGridworld:
                     target_pos.reshape(self.num_envs, -1),
                     targets_reached,
                     target_counters,
+                    target_priorities,
                     window_steps,
                 ],
                 dim=-1,
@@ -438,6 +472,7 @@ class BiddingGridworld:
                     agent_pos,
                     target_pos.reshape(self.num_envs, -1),
                     target_counters,
+                    target_priorities,
                     window_steps,
                 ],
                 dim=-1,
@@ -477,6 +512,7 @@ class BiddingGridworld:
             counter_denom = float(cfg.max_steps)
         counter_denom = max(counter_denom, 1.0)
         target_counters = self.target_counters.to(torch.float32) / counter_denom
+        target_priorities = self.target_priorities.to(torch.float32) / 4.0
 
         window_denom = float(max(cfg.action_window, 1))
         window_steps = self.window_steps_remaining.to(torch.float32) / window_denom
@@ -490,6 +526,7 @@ class BiddingGridworld:
                         target_pos.reshape(self.num_envs, -1),
                         targets_reached,
                         target_counters,
+                        target_priorities,
                         window_steps,
                     ],
                     dim=-1,
@@ -500,6 +537,7 @@ class BiddingGridworld:
                         agent_pos,
                         target_pos.reshape(self.num_envs, -1),
                         target_counters,
+                        target_priorities,
                         window_steps,
                     ],
                     dim=-1,
@@ -513,6 +551,7 @@ class BiddingGridworld:
         if cfg.visible_targets is None:
             reordered_pos = target_pos[:, self._reorder_idx, :].reshape(self.num_envs, cfg.num_agents, -1)
             reordered_counters = target_counters[:, self._reorder_idx]
+            reordered_priorities = target_priorities[:, self._reorder_idx]
             if include_reached:
                 reordered_reached = targets_reached[:, self._reorder_idx]
                 return torch.cat(
@@ -520,6 +559,7 @@ class BiddingGridworld:
                      reordered_pos,
                      reordered_reached,
                      reordered_counters,
+                     reordered_priorities,
                      window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1)],
                     dim=-1,
                 )
@@ -527,6 +567,7 @@ class BiddingGridworld:
                 [agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                  reordered_pos,
                  reordered_counters,
+                 reordered_priorities,
                  window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1)],
                 dim=-1,
             )
@@ -534,6 +575,7 @@ class BiddingGridworld:
         if cfg.visible_targets == 0:
             own_pos = target_pos  # (num_envs, num_agents, 2) — each agent reads its own slice
             own_counter = target_counters.unsqueeze(-1)  # (num_envs, num_agents, 1)
+            own_priority = target_priorities.unsqueeze(-1)
             if include_reached:
                 own_reached = targets_reached.unsqueeze(-1)  # (num_envs, num_agents, 1)
                 return torch.cat(
@@ -542,6 +584,7 @@ class BiddingGridworld:
                         own_pos,
                         own_reached,
                         own_counter,
+                        own_priority,
                         window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                     ],
                     dim=-1,
@@ -551,6 +594,7 @@ class BiddingGridworld:
                     agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                     own_pos,
                     own_counter,
+                    own_priority,
                     window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                 ],
                 dim=-1,
@@ -568,6 +612,9 @@ class BiddingGridworld:
         )
         own_pos = target_pos
         own_counter = target_counters.unsqueeze(-1)
+        own_priority = target_priorities.unsqueeze(-1)
+        priority_exp = target_priorities.unsqueeze(1).expand(-1, cfg.num_agents, -1)
+        vis_priorities = priority_exp.gather(2, idx)
 
         if include_reached:
             targets_reached_exp = targets_reached.unsqueeze(1).expand(-1, cfg.num_agents, -1)
@@ -581,6 +628,8 @@ class BiddingGridworld:
                     own_reached,
                     vis_reached,
                     own_counter,
+                    own_priority,
+                    vis_priorities,
                     window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                 ],
                 dim=-1,
@@ -591,6 +640,8 @@ class BiddingGridworld:
                 own_pos,
                 vis_pos,
                 own_counter,
+                own_priority,
+                vis_priorities,
                 window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
             ],
             dim=-1,
@@ -631,7 +682,9 @@ class BiddingGridworld:
         respawn_mask = targets_just_reached | targets_expired
         if torch.any(respawn_mask):
             new_pos = self._sample_positions_excluding_agent(respawn_mask)
+            new_priorities = self._sample_target_priorities()
             self.target_pos = torch.where(respawn_mask.unsqueeze(-1), new_pos, self.target_pos)
+            self.target_priorities = torch.where(respawn_mask, new_priorities, self.target_priorities)
             self.targets_reached = torch.where(respawn_mask, torch.zeros_like(self.targets_reached), self.targets_reached)
             self.target_counters = torch.where(respawn_mask, torch.zeros_like(self.target_counters), self.target_counters)
             self.target_move_counters = torch.where(respawn_mask, torch.zeros_like(self.target_move_counters), self.target_move_counters)
@@ -715,6 +768,17 @@ class BiddingGridworld:
             new_pos = torch.where((match & respawn_mask).unsqueeze(-1), torch.stack([new_pos[..., 0], col_fix], dim=-1), new_pos)
 
         return new_pos.to(torch.int32)
+
+    def _sample_target_priorities(self) -> torch.Tensor:
+        """Sample integer feeding priorities uniformly from 1 through 4."""
+        return torch.randint(
+            1,
+            5,
+            (self.num_envs, self.config.num_agents),
+            generator=self.gen,
+            device=self.device,
+            dtype=torch.int32,
+        )
 
     def _build_reset_positions(self) -> torch.Tensor:
         """Build a cached grid of positions excluding (0,0) for reset sampling."""
@@ -1113,6 +1177,8 @@ class BiddingGridworld:
         self.targets_reached = torch.where(mask.unsqueeze(-1), zeros2d, self.targets_reached)
         self.targets_reached_count = torch.where(mask.unsqueeze(-1), zeros2d, self.targets_reached_count)
         self.target_counters = torch.where(mask.unsqueeze(-1), zeros2d, self.target_counters)
+        new_priorities = self._sample_target_priorities()
+        self.target_priorities = torch.where(mask.unsqueeze(-1), new_priorities, self.target_priorities)
         self.window_agent = torch.where(mask, torch.full_like(self.window_agent, -1), self.window_agent)
         self.window_steps_remaining = torch.where(
             mask, torch.zeros_like(self.window_steps_remaining), self.window_steps_remaining
@@ -1170,6 +1236,9 @@ def evaluate_multi_agent_policy(
         "expired_targets_per_episode": [],
         "min_targets_reached_per_episode": [],
         "targets_reached_count_per_episode": [],
+        "reached_priority_sum_per_episode": [],
+        "reached_priority_sum_per_target_per_episode": [],
+        "reached_count_by_priority_per_episode": [],
         "episode_data_list": [],
         "bid_counts_per_episode": [],
         "control_steps_per_agent_per_episode": [],
@@ -1196,6 +1265,8 @@ def evaluate_multi_agent_policy(
         truncated = False
 
         targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)
+        reached_priority_sum = np.zeros(env.num_agents, dtype=np.int32)
+        reached_count_by_priority = np.zeros(4, dtype=np.int32)
         expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
         bid_counts: dict = {}
         control_steps = np.zeros(env.num_agents, dtype=np.int32)
@@ -1245,6 +1316,11 @@ def evaluate_multi_agent_policy(
                 for agent_idx in range(env.num_agents):
                     if just_reached[agent_idx]:
                         targets_reached_count[agent_idx] += 1
+            priorities_just_reached = info.get("target_priorities_just_reached")
+            if isinstance(priorities_just_reached, torch.Tensor):
+                reached_priorities = priorities_just_reached[0].detach().cpu().numpy()
+                reached_priority_sum += reached_priorities
+                reached_count_by_priority += np.bincount(reached_priorities, minlength=5)[1:5]
 
             winning_agent = info.get("winning_agent", torch.tensor([-1], device=env.device))
             if isinstance(winning_agent, torch.Tensor):
@@ -1287,6 +1363,9 @@ def evaluate_multi_agent_policy(
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
         eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
         eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
+        eval_stats["reached_priority_sum_per_episode"].append(int(reached_priority_sum.sum()))
+        eval_stats["reached_priority_sum_per_target_per_episode"].append(reached_priority_sum.tolist())
+        eval_stats["reached_count_by_priority_per_episode"].append(reached_count_by_priority.tolist())
         eval_stats["bid_counts_per_episode"].append(bid_counts)
         eval_stats["control_steps_per_agent_per_episode"].append(control_steps.tolist())
         eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
@@ -1307,6 +1386,7 @@ def evaluate_multi_agent_policy(
         if verbose:
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
                   f"Length={step_count}, Targets={targets_reached}/{env.num_agents}, "
+                  f"PrioritySum={int(reached_priority_sum.sum())}, "
                   f"Expired={episode_expired_count}, MinReached={min_targets_reached}, "
                   f"AvgPerf={float(np.mean(performance)):.2f}")
 
@@ -1315,6 +1395,7 @@ def evaluate_multi_agent_policy(
         avg_return_no_bid = np.mean(eval_stats["episode_returns_no_bid"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_priority_sum = np.mean(eval_stats["reached_priority_sum_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
@@ -1327,6 +1408,7 @@ def evaluate_multi_agent_policy(
         print(f"  Average Return (no bid penalty): {avg_return_no_bid:.2f}")
         print(f"  Average Length: {avg_length:.1f}")
         print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
+        print(f"  Average Reached Priority Sum: {avg_priority_sum:.2f}")
         print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
@@ -1379,6 +1461,8 @@ def evaluate_multi_agent_policy_batched(
     returns_no_bid = torch.zeros(N, device=device)
     lengths = torch.zeros(N, dtype=torch.long, device=device)
     targets_reached_count = torch.zeros(N, A, dtype=torch.long, device=device)
+    reached_priority_sum = torch.zeros(N, A, dtype=torch.long, device=device)
+    reached_count_by_priority = torch.zeros(N, 4, dtype=torch.long, device=device)
     expired_count = torch.zeros(N, A, dtype=torch.long, device=device)
     control_steps = torch.zeros(N, A, dtype=torch.long, device=device)
     bid_count_tensor = torch.zeros(N, bid_upper_bound + 1, dtype=torch.long, device=device)
@@ -1414,6 +1498,14 @@ def evaluate_multi_agent_policy_batched(
         if isinstance(tjr, torch.Tensor):
             # tjr shape: (N, A)
             targets_reached_count += (tjr.long() * active.unsqueeze(1).long())
+        priorities_just_reached = info.get("target_priorities_just_reached")
+        if isinstance(priorities_just_reached, torch.Tensor):
+            active_priorities = priorities_just_reached.long() * active.unsqueeze(1).long()
+            reached_priority_sum += active_priorities
+            for priority in range(1, 5):
+                reached_count_by_priority[:, priority - 1] += (
+                    (active_priorities == priority) & active.unsqueeze(1)
+                ).sum(dim=1)
 
         winning_agent = info.get("winning_agent")
         if isinstance(winning_agent, torch.Tensor):
@@ -1449,6 +1541,8 @@ def evaluate_multi_agent_policy_batched(
     returns_no_bid_cpu = returns_no_bid.cpu().tolist()
     lengths_cpu = lengths.cpu().tolist()
     targets_reached_cpu = targets_reached_count.cpu().numpy()
+    reached_priority_cpu = reached_priority_sum.cpu().numpy()
+    reached_count_by_priority_cpu = reached_count_by_priority.cpu().numpy()
     expired_cpu = expired_count.cpu().numpy()
     control_steps_cpu = control_steps.cpu().tolist()
     bid_count_np = bid_count_tensor.cpu().numpy()
@@ -1461,6 +1555,9 @@ def evaluate_multi_agent_policy_batched(
         "expired_targets_per_episode": [],
         "min_targets_reached_per_episode": [],
         "targets_reached_count_per_episode": [],
+        "reached_priority_sum_per_episode": [],
+        "reached_priority_sum_per_target_per_episode": [],
+        "reached_count_by_priority_per_episode": [],
         "episode_data_list": [],  # empty — video not supported in batched mode
         "bid_counts_per_episode": [],
         "control_steps_per_agent_per_episode": [],
@@ -1475,6 +1572,8 @@ def evaluate_multi_agent_policy_batched(
 
     for i in range(N):
         trc = targets_reached_cpu[i]  # (A,) numpy
+        priority_sum = reached_priority_cpu[i]
+        priority_counts = reached_count_by_priority_cpu[i]
         ec = expired_cpu[i]           # (A,) numpy
         performance = trc - ec
 
@@ -1491,6 +1590,9 @@ def evaluate_multi_agent_policy_batched(
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
         eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
         eval_stats["targets_reached_count_per_episode"].append(trc.tolist())
+        eval_stats["reached_priority_sum_per_episode"].append(int(priority_sum.sum()))
+        eval_stats["reached_priority_sum_per_target_per_episode"].append(priority_sum.tolist())
+        eval_stats["reached_count_by_priority_per_episode"].append(priority_counts.tolist())
         eval_stats["bid_counts_per_episode"].append(bid_counts_dict)
         eval_stats["control_steps_per_agent_per_episode"].append(control_steps_cpu[i])
         eval_stats["expired_count_per_target_per_episode"].append(ec.tolist())
@@ -1506,6 +1608,7 @@ def evaluate_multi_agent_policy_batched(
             print(f"  Episode {i + 1}: Return={eval_stats['episode_returns'][i]:.2f}, "
                   f"Length={eval_stats['episode_lengths'][i]}, "
                   f"Targets={eval_stats['targets_reached_per_episode'][i]}/{A}, "
+                  f"PrioritySum={eval_stats['reached_priority_sum_per_episode'][i]}, "
                   f"Expired={eval_stats['expired_targets_per_episode'][i]}, "
                   f"MinReached={eval_stats['min_targets_reached_per_episode'][i]}, "
                   f"AvgPerf={eval_stats['avg_performance_per_episode'][i]:.2f}")
@@ -1514,6 +1617,7 @@ def evaluate_multi_agent_policy_batched(
         avg_return_no_bid = np.mean(eval_stats["episode_returns_no_bid"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_priority_sum = np.mean(eval_stats["reached_priority_sum_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
@@ -1526,6 +1630,7 @@ def evaluate_multi_agent_policy_batched(
         print(f"  Average Return (no bid penalty): {avg_return_no_bid:.2f}")
         print(f"  Average Length: {avg_length:.1f}")
         print(f"  Average Targets: {avg_targets:.2f}/{A}")
+        print(f"  Average Reached Priority Sum: {avg_priority_sum:.2f}")
         print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
@@ -1565,6 +1670,9 @@ def evaluate_single_agent_policy(
         "expired_targets_per_episode": [],
         "min_targets_reached_per_episode": [],
         "targets_reached_count_per_episode": [],
+        "reached_priority_sum_per_episode": [],
+        "reached_priority_sum_per_target_per_episode": [],
+        "reached_count_by_priority_per_episode": [],
         "episode_data_list": [],
         "expired_count_per_target_per_episode": [],
         "avg_expired_per_episode": [],
@@ -1587,6 +1695,8 @@ def evaluate_single_agent_policy(
         truncated = False
 
         targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)
+        reached_priority_sum = np.zeros(env.num_agents, dtype=np.int32)
+        reached_count_by_priority = np.zeros(4, dtype=np.int32)
         expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
 
         while not (terminated or truncated):
@@ -1622,6 +1732,11 @@ def evaluate_single_agent_policy(
                 for target_idx in range(env.num_agents):
                     if just_reached[target_idx]:
                         targets_reached_count[target_idx] += 1
+            priorities_just_reached = info.get("target_priorities_just_reached")
+            if isinstance(priorities_just_reached, torch.Tensor):
+                reached_priorities = priorities_just_reached[0].detach().cpu().numpy()
+                reached_priority_sum += reached_priorities
+                reached_count_by_priority += np.bincount(reached_priorities, minlength=5)[1:5]
 
             step_count += 1
 
@@ -1636,6 +1751,9 @@ def evaluate_single_agent_policy(
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
         eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
         eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
+        eval_stats["reached_priority_sum_per_episode"].append(int(reached_priority_sum.sum()))
+        eval_stats["reached_priority_sum_per_target_per_episode"].append(reached_priority_sum.tolist())
+        eval_stats["reached_count_by_priority_per_episode"].append(reached_count_by_priority.tolist())
         eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
         eval_stats["avg_expired_per_episode"].append(float(np.mean(expired_targets_count)))
         eval_stats["max_expired_per_episode"].append(float(np.max(expired_targets_count)))
@@ -1653,6 +1771,7 @@ def evaluate_single_agent_policy(
         if verbose:
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
                   f"Length={step_count}, Targets={targets_reached}/{env.num_agents}, "
+                  f"PrioritySum={int(reached_priority_sum.sum())}, "
                   f"Expired={episode_expired_count}, MinReached={min_targets_reached}, "
                   f"AvgPerf={float(np.mean(performance)):.2f}")
 
@@ -1660,6 +1779,7 @@ def evaluate_single_agent_policy(
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_priority_sum = np.mean(eval_stats["reached_priority_sum_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
@@ -1671,6 +1791,7 @@ def evaluate_single_agent_policy(
         print(f"  Average Return: {avg_return:.2f}")
         print(f"  Average Length: {avg_length:.1f}")
         print(f"  Average Targets: {avg_targets:.2f}/{env.num_agents}")
+        print(f"  Average Reached Priority Sum: {avg_priority_sum:.2f}")
         print(f"  Average Expired: {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
@@ -1719,6 +1840,8 @@ def evaluate_single_agent_policy_batched(
     returns = torch.zeros(N, device=device)
     lengths = torch.zeros(N, dtype=torch.long, device=device)
     targets_reached_count = torch.zeros(N, A, dtype=torch.long, device=device)
+    reached_priority_sum = torch.zeros(N, A, dtype=torch.long, device=device)
+    reached_count_by_priority = torch.zeros(N, 4, dtype=torch.long, device=device)
     expired_count = torch.zeros(N, A, dtype=torch.long, device=device)
 
     active = torch.ones(N, dtype=torch.bool, device=device)
@@ -1744,12 +1867,22 @@ def evaluate_single_agent_policy_batched(
         tjr = info.get("targets_just_reached")
         if isinstance(tjr, torch.Tensor):
             targets_reached_count += (tjr.long() * active.unsqueeze(1).long())
+        priorities_just_reached = info.get("target_priorities_just_reached")
+        if isinstance(priorities_just_reached, torch.Tensor):
+            active_priorities = priorities_just_reached.long() * active.unsqueeze(1).long()
+            reached_priority_sum += active_priorities
+            for priority in range(1, 5):
+                reached_count_by_priority[:, priority - 1] += (
+                    (active_priorities == priority) & active.unsqueeze(1)
+                ).sum(dim=1)
 
         active = active & ~done
 
     returns_cpu = returns.cpu().tolist()
     lengths_cpu = lengths.cpu().tolist()
     targets_reached_cpu = targets_reached_count.cpu().numpy()
+    reached_priority_cpu = reached_priority_sum.cpu().numpy()
+    reached_count_by_priority_cpu = reached_count_by_priority.cpu().numpy()
     expired_cpu = expired_count.cpu().numpy()
 
     eval_stats = {
@@ -1759,6 +1892,9 @@ def evaluate_single_agent_policy_batched(
         "expired_targets_per_episode": [],
         "min_targets_reached_per_episode": [],
         "targets_reached_count_per_episode": [],
+        "reached_priority_sum_per_episode": [],
+        "reached_priority_sum_per_target_per_episode": [],
+        "reached_count_by_priority_per_episode": [],
         "episode_data_list": [],  # empty — video not supported in batched mode
         "expired_count_per_target_per_episode": [],
         "avg_expired_per_episode": [],
@@ -1771,6 +1907,8 @@ def evaluate_single_agent_policy_batched(
 
     for i in range(N):
         trc = targets_reached_cpu[i]  # (A,) numpy
+        priority_sum = reached_priority_cpu[i]
+        priority_counts = reached_count_by_priority_cpu[i]
         ec = expired_cpu[i]           # (A,) numpy
         performance = trc - ec
 
@@ -1784,6 +1922,9 @@ def evaluate_single_agent_policy_batched(
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
         eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
         eval_stats["targets_reached_count_per_episode"].append(trc.tolist())
+        eval_stats["reached_priority_sum_per_episode"].append(int(priority_sum.sum()))
+        eval_stats["reached_priority_sum_per_target_per_episode"].append(priority_sum.tolist())
+        eval_stats["reached_count_by_priority_per_episode"].append(priority_counts.tolist())
         eval_stats["expired_count_per_target_per_episode"].append(ec.tolist())
         eval_stats["avg_expired_per_episode"].append(float(np.mean(ec)))
         eval_stats["max_expired_per_episode"].append(float(np.max(ec)))
@@ -1797,6 +1938,7 @@ def evaluate_single_agent_policy_batched(
             print(f"  Episode {i + 1}: Return={eval_stats['episode_returns'][i]:.2f}, "
                   f"Length={eval_stats['episode_lengths'][i]}, "
                   f"Targets={eval_stats['targets_reached_per_episode'][i]}/{A}, "
+                  f"PrioritySum={eval_stats['reached_priority_sum_per_episode'][i]}, "
                   f"Expired={eval_stats['expired_targets_per_episode'][i]}, "
                   f"MinReached={eval_stats['min_targets_reached_per_episode'][i]}, "
                   f"AvgPerf={eval_stats['avg_performance_per_episode'][i]:.2f}")
@@ -1804,6 +1946,7 @@ def evaluate_single_agent_policy_batched(
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_priority_sum = np.mean(eval_stats["reached_priority_sum_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
@@ -1815,6 +1958,7 @@ def evaluate_single_agent_policy_batched(
         print(f"  Average Return: {avg_return:.2f}")
         print(f"  Average Length: {avg_length:.1f}")
         print(f"  Average Targets: {avg_targets:.2f}/{A}")
+        print(f"  Average Reached Priority Sum: {avg_priority_sum:.2f}")
         print(f"  Average Expired: {avg_expired:.2f} +/- {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} +/- {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")

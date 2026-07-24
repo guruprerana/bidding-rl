@@ -220,6 +220,10 @@ def evaluate_experiment(exp_dir: Path, device: torch.device) -> None:
     avg_return      = float(np.mean(eval_stats["episode_returns"]))
     avg_length      = float(np.mean(eval_stats["episode_lengths"]))
     avg_targets     = float(np.mean(eval_stats["targets_reached_per_episode"]))
+    avg_priority_sum = float(np.mean(eval_stats["reached_priority_sum_per_episode"]))
+    avg_reached_count_by_priority = np.mean(
+        eval_stats["reached_count_by_priority_per_episode"], axis=0
+    ).tolist()
     avg_expired     = float(np.mean(eval_stats["expired_targets_per_episode"]))
     avg_min_reached = float(np.mean(eval_stats["min_targets_reached_per_episode"]))
     avg_avg_perf    = float(np.mean(eval_stats["avg_performance_per_episode"]))
@@ -236,6 +240,8 @@ def evaluate_experiment(exp_dir: Path, device: torch.device) -> None:
         "std_return":              float(np.std(eval_stats["episode_returns"])),
         "avg_length":              avg_length,
         "avg_targets_reached":     avg_targets,
+        "avg_reached_priority_sum": avg_priority_sum,
+        "avg_reached_count_by_priority": avg_reached_count_by_priority,
         "avg_expired":             avg_expired,
         "avg_min_targets_reached": avg_min_reached,
         "success_rate":            success_rate,
@@ -250,6 +256,11 @@ def evaluate_experiment(exp_dir: Path, device: torch.device) -> None:
         "returns":               [float(r) for r in eval_stats["episode_returns"]],
         "lengths":               [int(l)   for l in eval_stats["episode_lengths"]],
         "targets_reached":       [int(t)   for t in eval_stats["targets_reached_per_episode"]],
+        "reached_priority_sum":  [int(p) for p in eval_stats["reached_priority_sum_per_episode"]],
+        "reached_priority_sum_per_target": eval_stats[
+            "reached_priority_sum_per_target_per_episode"
+        ],
+        "reached_count_by_priority": eval_stats["reached_count_by_priority_per_episode"],
         "expired_targets":       [int(e)   for e in eval_stats["expired_targets_per_episode"]],
         "min_targets_reached":   [int(m)   for m in eval_stats["min_targets_reached_per_episode"]],
         "avg_performance":       [float(p) for p in eval_stats["avg_performance_per_episode"]],

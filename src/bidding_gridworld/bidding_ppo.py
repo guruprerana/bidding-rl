@@ -173,7 +173,7 @@ class SharedAgent(nn.Module):
 
         if self.use_target_attention_pooling:
             encoder_sizes = target_encoder_hidden_sizes if target_encoder_hidden_sizes is not None else (64, 64)
-            target_feat_dim = 6 if self.include_target_reached else 5
+            target_feat_dim = 7 if self.include_target_reached else 6
             self.target_pool = MaskedAttentionPooling(
                 input_dim=target_feat_dim,
                 embed_dim=target_embed_dim,
@@ -225,7 +225,7 @@ class SharedAgent(nn.Module):
 
         if self.attention_pooling_layout == "centralized":
             target_block = x[:, 2:-1]
-            block_width = 4 if self.include_target_reached else 3
+            block_width = 5 if self.include_target_reached else 4
             if target_block.shape[1] % block_width != 0:
                 raise ValueError(f"Invalid centralized obs layout for attention pooling (obs_dim={obs_dim}).")
             num_targets = target_block.shape[1] // block_width
@@ -233,18 +233,20 @@ class SharedAgent(nn.Module):
             if self.include_target_reached:
                 target_reached = target_block[:, 2 * num_targets: 3 * num_targets].reshape(-1, num_targets, 1)
                 target_counters = target_block[:, 3 * num_targets: 4 * num_targets].reshape(-1, num_targets, 1)
+                target_priorities = target_block[:, 4 * num_targets:5 * num_targets].reshape(-1, num_targets, 1)
             else:
                 target_reached = None
                 target_counters = target_block[:, 2 * num_targets: 3 * num_targets].reshape(-1, num_targets, 1)
+                target_priorities = target_block[:, 3 * num_targets:4 * num_targets].reshape(-1, num_targets, 1)
         elif self.attention_pooling_layout == "visible":
             if self.include_target_reached:
+                if (obs_dim - 8) % 4 != 0:
+                    raise ValueError(f"Invalid visible-targets obs layout for attention pooling (obs_dim={obs_dim}).")
+                visible_targets = (obs_dim - 8) // 4
+            else:
                 if (obs_dim - 7) % 3 != 0:
                     raise ValueError(f"Invalid visible-targets obs layout for attention pooling (obs_dim={obs_dim}).")
                 visible_targets = (obs_dim - 7) // 3
-            else:
-                if (obs_dim - 6) % 2 != 0:
-                    raise ValueError(f"Invalid visible-targets obs layout for attention pooling (obs_dim={obs_dim}).")
-                visible_targets = (obs_dim - 6) // 2
             num_targets = visible_targets + 1
 
             own_pos = x[:, 2:4].reshape(-1, 1, 2)
@@ -264,22 +266,34 @@ class SharedAgent(nn.Module):
                 else:
                     target_reached = own_reached
                 own_counter = x[:, 5 + 3 * visible_targets:6 + 3 * visible_targets].reshape(-1, 1, 1)
+                own_priority = x[:, 6 + 3 * visible_targets:7 + 3 * visible_targets].reshape(-1, 1, 1)
+                vis_priority_start = 7 + 3 * visible_targets
             else:
                 target_reached = None
                 own_counter = x[:, 4 + 2 * visible_targets:5 + 2 * visible_targets].reshape(-1, 1, 1)
+                own_priority = x[:, 5 + 2 * visible_targets:6 + 2 * visible_targets].reshape(-1, 1, 1)
+                vis_priority_start = 6 + 2 * visible_targets
             if visible_targets > 0:
                 zeros = torch.zeros((x.shape[0], visible_targets, 1), device=x.device, dtype=x.dtype)
                 target_counters = torch.cat([own_counter, zeros], dim=1)
+                vis_priorities = x[
+                    :, vis_priority_start:vis_priority_start + visible_targets
+                ].reshape(-1, visible_targets, 1)
+                target_priorities = torch.cat([own_priority, vis_priorities], dim=1)
             else:
                 target_counters = own_counter
+                target_priorities = own_priority
         else:
             raise ValueError(f"Unknown attention pooling layout: {self.attention_pooling_layout}")
 
         rel_pos = target_pos - agent_pos.unsqueeze(1)
         if self.include_target_reached:
-            target_feats = torch.cat([target_pos, rel_pos, target_reached, target_counters], dim=-1)
+            target_feats = torch.cat(
+                [target_pos, rel_pos, target_reached, target_counters, target_priorities],
+                dim=-1,
+            )
         else:
-            target_feats = torch.cat([target_pos, rel_pos, target_counters], dim=-1)
+            target_feats = torch.cat([target_pos, rel_pos, target_counters, target_priorities], dim=-1)
         pooled = self.target_pool(target_feats)
         own_feats = target_feats[:, 0, :]
         return torch.cat([agent_pos, window_steps, own_feats, pooled], dim=-1)

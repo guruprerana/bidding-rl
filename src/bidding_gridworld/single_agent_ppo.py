@@ -130,10 +130,10 @@ class SingleAgent(nn.Module):
 
     Single-agent observation layout (with include_target_reached):
       [agent_pos(2), target_pos(2*T), targets_reached(T),
-       target_counters(T), window_steps(1), relative_counts(T)]
+       target_counters(T), target_priorities(T), window_steps(1), relative_counts(T)]
     Without include_target_reached (moving targets):
       [agent_pos(2), target_pos(2*T), target_counters(T),
-       window_steps(1), relative_counts(T)]
+       target_priorities(T), window_steps(1), relative_counts(T)]
     """
 
     def __init__(
@@ -158,7 +158,7 @@ class SingleAgent(nn.Module):
         if self.use_target_attention_pooling:
             encoder_sizes = target_encoder_hidden_sizes if target_encoder_hidden_sizes is not None else (64, 64)
             # Single-agent has an extra relative_count feature compared to multi-agent
-            target_feat_dim = 7 if self.include_target_reached else 6
+            target_feat_dim = 8 if self.include_target_reached else 7
             self.target_pool = MaskedAttentionPooling(
                 input_dim=target_feat_dim,
                 embed_dim=target_embed_dim,
@@ -199,22 +199,30 @@ class SingleAgent(nn.Module):
         agent_pos = x[:, :2]  # (B, 2)
 
         if self.include_target_reached:
-            # [agent_pos(2), target_pos(2*T), targets_reached(T), target_counters(T), window_steps(1), relative_counts(T)]
+            # [agent_pos(2), target_pos(2*T), reached(T), counters(T), priorities(T), window(1), counts(T)]
             target_pos = x[:, 2:2 + 2 * T].reshape(-1, T, 2)
             targets_reached = x[:, 2 + 2 * T:2 + 3 * T].reshape(-1, T, 1)
             target_counters = x[:, 2 + 3 * T:2 + 4 * T].reshape(-1, T, 1)
+            target_priorities = x[:, 2 + 4 * T:2 + 5 * T].reshape(-1, T, 1)
+            window_steps = x[:, 2 + 5 * T:2 + 5 * T + 1]
+            relative_counts = x[:, 2 + 5 * T + 1:2 + 6 * T + 1].reshape(-1, T, 1)
+            rel_pos = target_pos - agent_pos.unsqueeze(1)
+            target_feats = torch.cat(
+                [target_pos, rel_pos, targets_reached, target_counters, target_priorities, relative_counts],
+                dim=-1,
+            )
+        else:
+            # [agent_pos(2), target_pos(2*T), counters(T), priorities(T), window(1), counts(T)]
+            target_pos = x[:, 2:2 + 2 * T].reshape(-1, T, 2)
+            target_counters = x[:, 2 + 2 * T:2 + 3 * T].reshape(-1, T, 1)
+            target_priorities = x[:, 2 + 3 * T:2 + 4 * T].reshape(-1, T, 1)
             window_steps = x[:, 2 + 4 * T:2 + 4 * T + 1]
             relative_counts = x[:, 2 + 4 * T + 1:2 + 5 * T + 1].reshape(-1, T, 1)
             rel_pos = target_pos - agent_pos.unsqueeze(1)
-            target_feats = torch.cat([target_pos, rel_pos, targets_reached, target_counters, relative_counts], dim=-1)
-        else:
-            # [agent_pos(2), target_pos(2*T), target_counters(T), window_steps(1), relative_counts(T)]
-            target_pos = x[:, 2:2 + 2 * T].reshape(-1, T, 2)
-            target_counters = x[:, 2 + 2 * T:2 + 3 * T].reshape(-1, T, 1)
-            window_steps = x[:, 2 + 3 * T:2 + 3 * T + 1]
-            relative_counts = x[:, 2 + 3 * T + 1:2 + 4 * T + 1].reshape(-1, T, 1)
-            rel_pos = target_pos - agent_pos.unsqueeze(1)
-            target_feats = torch.cat([target_pos, rel_pos, target_counters, relative_counts], dim=-1)
+            target_feats = torch.cat(
+                [target_pos, rel_pos, target_counters, target_priorities, relative_counts],
+                dim=-1,
+            )
 
         pooled = self.target_pool(target_feats)          # (B, embed_dim)
         own_feats = target_feats[:, 0, :]               # (B, target_feat_dim)
@@ -317,10 +325,10 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
         self.args.minibatch_size = int(self.args.batch_size // self.args.num_minibatches)
 
         # Calculate expected observation dimension components for single-agent mode
-        # Base: 2 (agent pos) + 2*num_targets (target pos) + num_targets (step counters) +
-        #       1 (window steps) + num_targets (relative counts) [+ num_targets (reached flags)]
+        # Base: agent/target positions, counters, priorities, window, relative counts,
+        # and reached flags for the static-target variant.
         include_reached = not self.args.moving_targets
-        expected_dim = 2 + 2 * self.args.num_targets + self.args.num_targets + 1 + self.args.num_targets
+        expected_dim = 2 + 2 * self.args.num_targets + 3 * self.args.num_targets + 1
         if include_reached:
             expected_dim += self.args.num_targets
 

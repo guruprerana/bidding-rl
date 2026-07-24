@@ -43,7 +43,7 @@ def main():
     MOVING_TARGETS = True  # Set to True for moving targets
 
     # Experiment settings
-    EXPERIMENT_NAME = "gridw_multiagent_noattn"  # Leave empty for default name with timestamp
+    EXPERIMENT_NAME = "gridw_multiagent_priority_attn_s1825"  # Leave empty for default name with timestamp
     CHECKPOINT_FREQ = 10  # Save checkpoint every N iterations
     EVAL_FREQ = 10  # Evaluate every N iterations
     NUM_EVAL_EPISODES = 20  # Number of episodes per evaluation
@@ -55,7 +55,8 @@ def main():
     # Environment parameters
     GRID_SIZE = 30
     NUM_AGENTS = 8  # For multi-agent: number of bidding agents; For single-agent: number of targets
-    TARGET_REWARD = 50.0
+    # E[priority] = 2.5, so coefficient 20 preserves the original mean feeding reward of 50.
+    TARGET_REWARD = 20.0
     MAX_STEPS = 2000  # Maximum steps per episode during training
     EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
     DISTANCE_REWARD_SCALE = 0.6
@@ -74,7 +75,7 @@ def main():
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
     DIRECTION_CHANGE_PROB = 0.1
-    TARGET_MOVE_INTERVAL = 2
+    TARGET_MOVE_INTERVAL = 5
 
     # Training parameters
     NUM_ITERATIONS = 400
@@ -94,11 +95,11 @@ def main():
     VF_COEF = 1.0
     MAX_GRAD_NORM = 0.5
     TARGET_KL = None
-    SEED = 1
+    SEED = 1825
     # Network architecture
     ACTOR_HIDDEN_SIZES = [128, 128, 128, 128]
     CRITIC_HIDDEN_SIZES = [256, 256, 256, 256]
-    USE_TARGET_ATTENTION_POOLING = False
+    USE_TARGET_ATTENTION_POOLING = True
     TARGET_EMBED_DIM = 64
     TARGET_ENCODER_HIDDEN_SIZES = [64, 64]
 

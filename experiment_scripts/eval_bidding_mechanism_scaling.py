@@ -102,10 +102,10 @@ def build_agent(config: dict, device: str) -> SharedAgent:
 
     # Compute per-agent obs dim matching BiddingGridworld's formula
     if visible_targets is None:
-        per_agent_obs_dim = 3 + (4 if include_reached else 3) * num_agents
+        per_agent_obs_dim = 3 + (5 if include_reached else 4) * num_agents
     else:
         per_agent_obs_dim = (
-            7 + 3 * visible_targets if include_reached else 6 + 2 * visible_targets
+            8 + 4 * visible_targets if include_reached else 7 + 3 * visible_targets
         )
 
     agent = SharedAgent(
@@ -220,6 +220,12 @@ def evaluate_for_num_agents(
             "avg_length": float(np.mean(eval_stats["episode_lengths"])),
             "std_length": float(np.std(eval_stats["episode_lengths"])),
             "avg_targets_reached": float(np.mean(eval_stats["targets_reached_per_episode"])),
+            "avg_reached_priority_sum": float(
+                np.mean(eval_stats["reached_priority_sum_per_episode"])
+            ),
+            "avg_reached_count_by_priority": np.mean(
+                eval_stats["reached_count_by_priority_per_episode"], axis=0
+            ).tolist(),
             "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
             "avg_expired_targets": float(np.mean(eval_stats["expired_targets_per_episode"])),
             "avg_min_targets_reached": float(
@@ -237,6 +243,15 @@ def evaluate_for_num_agents(
             ],
             "lengths": [int(l) for l in eval_stats["episode_lengths"]],
             "targets_reached": [int(t) for t in eval_stats["targets_reached_per_episode"]],
+            "reached_priority_sum": [
+                int(p) for p in eval_stats["reached_priority_sum_per_episode"]
+            ],
+            "reached_priority_sum_per_target": eval_stats[
+                "reached_priority_sum_per_target_per_episode"
+            ],
+            "reached_count_by_priority": eval_stats[
+                "reached_count_by_priority_per_episode"
+            ],
             "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
             "min_targets_reached": [
                 int(m) for m in eval_stats["min_targets_reached_per_episode"]

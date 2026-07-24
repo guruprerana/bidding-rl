@@ -85,6 +85,8 @@ def summarise(stats: dict, num_agents: int) -> dict:
     returns = stats["episode_returns"]
     lengths = stats["episode_lengths"]
     targets = stats["targets_reached_per_episode"]
+    priority_sums = stats["reached_priority_sum_per_episode"]
+    priority_counts = stats["reached_count_by_priority_per_episode"]
     expired = stats["expired_targets_per_episode"]
     min_reached = stats["min_targets_reached_per_episode"]
     success_rate = sum(1 for t in targets if t == num_agents) / len(targets)
@@ -99,6 +101,8 @@ def summarise(stats: dict, num_agents: int) -> dict:
         "std_return": float(np.std(returns)),
         "avg_length": float(np.mean(lengths)),
         "avg_targets_reached": float(np.mean(targets)),
+        "avg_reached_priority_sum": float(np.mean(priority_sums)),
+        "avg_reached_count_by_priority": np.mean(priority_counts, axis=0).tolist(),
         "avg_expired": float(np.mean(expired)),
         "std_expired": float(np.std(expired)),
         "avg_min_reached": float(np.mean(min_reached)),

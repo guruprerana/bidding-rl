@@ -6,13 +6,15 @@ Manhattan step at a time) but differ in how they choose which target to
 pursue.
 
 Observation layout (single_agent_mode=True, moving_targets=True):
-  obs = [agent_pos(2), target_pos(2*n), target_counters(n), window_steps(1), relative_counts(n)]
+  obs = [agent_pos(2), target_pos(2*n), target_counters(n),
+         target_priorities(n), window_steps(1), relative_counts(n)]
   - agent_pos      = obs[0:2] * (grid_size - 1)         → int [row, col]
   - target_pos     = obs[2:2+2n].reshape(n,2) * (grid_size-1)  → int (n,2)
   - counter_norm   = obs[2+2n:2+3n]                     → float in [0,1]
                      (0=just spawned, 1=at expiry)
-  - window_steps   = obs[2+3n]                           → float
-  - relative_counts= obs[3+3n:3+4n]                     → float
+  - priority_norm  = obs[2+3n:2+4n]                     → float in {0.25,0.5,0.75,1}
+  - window_steps   = obs[2+4n]                           → float
+  - relative_counts= obs[3+4n:3+5n]                     → float
 
 Actions (directions):
   0 = col - 1 (left)
@@ -198,6 +200,9 @@ def evaluate_algorithmic_policy(
         "expired_targets_per_episode": [],
         "min_targets_reached_per_episode": [],
         "targets_reached_count_per_episode": [],
+        "reached_priority_sum_per_episode": [],
+        "reached_priority_sum_per_target_per_episode": [],
+        "reached_count_by_priority_per_episode": [],
         "expired_count_per_target_per_episode": [],
         "avg_expired_per_episode": [],
         "max_expired_per_episode": [],
@@ -217,6 +222,8 @@ def evaluate_algorithmic_policy(
         truncated = False
 
         targets_reached_count = np.zeros(env.num_agents, dtype=np.int32)
+        reached_priority_sum = np.zeros(env.num_agents, dtype=np.int32)
+        reached_count_by_priority = np.zeros(4, dtype=np.int32)
         expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
         targets_just_reached = None
 
@@ -245,6 +252,11 @@ def evaluate_algorithmic_policy(
                 targets_just_reached = tjr
             else:
                 targets_just_reached = None
+            priorities_just_reached = info.get("target_priorities_just_reached")
+            if isinstance(priorities_just_reached, torch.Tensor):
+                reached_priorities = priorities_just_reached[0].detach().cpu().numpy()
+                reached_priority_sum += reached_priorities
+                reached_count_by_priority += np.bincount(reached_priorities, minlength=5)[1:5]
 
             step_count += 1
 
@@ -259,6 +271,9 @@ def evaluate_algorithmic_policy(
         eval_stats["expired_targets_per_episode"].append(episode_expired_count)
         eval_stats["min_targets_reached_per_episode"].append(min_targets_reached)
         eval_stats["targets_reached_count_per_episode"].append(targets_reached_count.tolist())
+        eval_stats["reached_priority_sum_per_episode"].append(int(reached_priority_sum.sum()))
+        eval_stats["reached_priority_sum_per_target_per_episode"].append(reached_priority_sum.tolist())
+        eval_stats["reached_count_by_priority_per_episode"].append(reached_count_by_priority.tolist())
         eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
         eval_stats["avg_expired_per_episode"].append(float(np.mean(expired_targets_count)))
         eval_stats["max_expired_per_episode"].append(float(np.max(expired_targets_count)))
@@ -270,6 +285,7 @@ def evaluate_algorithmic_policy(
         if verbose:
             print(f"  Episode {episode_idx + 1}: Return={episode_return:.2f}, "
                   f"Length={step_count}, Targets={targets_reached}/{env.num_agents}, "
+                  f"PrioritySum={int(reached_priority_sum.sum())}, "
                   f"Expired={episode_expired_count}, MinReached={min_targets_reached}, "
                   f"AvgPerf={float(np.mean(performance)):.2f}")
 
@@ -277,6 +293,7 @@ def evaluate_algorithmic_policy(
         avg_return = np.mean(eval_stats["episode_returns"])
         avg_length = np.mean(eval_stats["episode_lengths"])
         avg_targets = np.mean(eval_stats["targets_reached_per_episode"])
+        avg_priority_sum = np.mean(eval_stats["reached_priority_sum_per_episode"])
         avg_expired = np.mean(eval_stats["expired_targets_per_episode"])
         avg_min_reached = np.mean(eval_stats["min_targets_reached_per_episode"])
         avg_avg_perf = np.mean(eval_stats["avg_performance_per_episode"])
@@ -288,6 +305,7 @@ def evaluate_algorithmic_policy(
         print(f"  Average Return:      {avg_return:.2f}")
         print(f"  Average Length:      {avg_length:.1f}")
         print(f"  Average Targets:     {avg_targets:.2f}/{env.num_agents}")
+        print(f"  Average Priority Sum:{avg_priority_sum:>10.2f}")
         print(f"  Average Expired:     {avg_expired:.2f} ± {np.std(eval_stats['expired_targets_per_episode']):.2f}")
         print(f"  Average Min Reached: {avg_min_reached:.2f} ± {np.std(eval_stats['min_targets_reached_per_episode']):.2f}")
         print(f"  Avg Performance (reaches-exp): {avg_avg_perf:.2f}")
