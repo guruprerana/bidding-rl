@@ -69,7 +69,9 @@ def ppo_update_step(
     vf_coef: float,
     max_grad_norm: float,
     norm_adv: bool = True,
-    clip_vloss: bool = True
+    clip_vloss: bool = True,
+    action_value_fn=None,
+    auxiliary_loss_fn=None,
 ) -> dict:
     """
     Perform a single PPO update step.
@@ -94,7 +96,9 @@ def ppo_update_step(
         Dictionary of loss metrics
     """
     # Get new predictions
-    _, newlogprob, entropy, newvalue = agent.get_action_and_value(obs, actions)
+    if action_value_fn is None:
+        action_value_fn = agent.get_action_and_value
+    _, newlogprob, entropy, newvalue = action_value_fn(obs, actions)
     logratio = newlogprob - logprobs
     ratio = logratio.exp()
 
@@ -132,7 +136,17 @@ def ppo_update_step(
     entropy_loss = entropy.mean()
 
     # Total loss
-    loss = pg_loss - ent_coef * entropy_loss + v_loss * vf_coef
+    auxiliary_loss = (
+        auxiliary_loss_fn(agent, obs)
+        if auxiliary_loss_fn is not None
+        else torch.zeros((), device=obs.device)
+    )
+    loss = (
+        pg_loss
+        - ent_coef * entropy_loss
+        + v_loss * vf_coef
+        + auxiliary_loss
+    )
 
     # Optimization step
     optimizer.zero_grad()
@@ -147,6 +161,138 @@ def ppo_update_step(
         "old_approx_kl": old_approx_kl.item(),
         "approx_kl": approx_kl.item(),
         "clipfrac": clipfrac.item(),
+        "auxiliary_loss": auxiliary_loss.item(),
+    }
+
+
+def factorized_auction_ppo_update_step(
+    agent,
+    optimizer,
+    obs: torch.Tensor,
+    actions: torch.Tensor,
+    old_direction_logprobs: torch.Tensor,
+    old_bid_logprobs: torch.Tensor,
+    direction_mask: torch.Tensor,
+    bid_mask: torch.Tensor,
+    advantages: torch.Tensor,
+    returns: torch.Tensor,
+    values: torch.Tensor,
+    clip_coef: float,
+    ent_coef: float,
+    vf_coef: float,
+    max_grad_norm: float,
+    norm_adv: bool,
+    clip_vloss: bool,
+):
+    """PPO update with causal masks for auction action components.
+
+    A direction contributes only when that agent controlled the shared body.
+    A bid contributes only when the environment actually held an auction.
+    This avoids policy gradients through actions ignored by the transition.
+    """
+
+    def masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        mask = mask.to(value.dtype)
+        return (value * mask).sum() / mask.sum().clamp_min(1.0)
+
+    def masked_advantage(
+        value: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        if not norm_adv:
+            return value
+        mask_f = mask.to(value.dtype)
+        count = mask_f.sum().clamp_min(1.0)
+        mean = (value * mask_f).sum() / count
+        variance = ((value - mean).square() * mask_f).sum() / count
+        return (value - mean) / torch.sqrt(variance + 1e-8)
+
+    (
+        _,
+        direction_logprobs,
+        bid_logprobs,
+        direction_entropy,
+        bid_entropy,
+        newvalue,
+    ) = agent.get_factorized_action_and_value(obs, actions)
+
+    direction_adv = masked_advantage(advantages, direction_mask)
+    bid_adv = masked_advantage(advantages, bid_mask)
+
+    direction_logratio = direction_logprobs - old_direction_logprobs
+    direction_ratio = direction_logratio.exp()
+    direction_pg_1 = -direction_adv * direction_ratio
+    direction_pg_2 = -direction_adv * torch.clamp(
+        direction_ratio, 1 - clip_coef, 1 + clip_coef
+    )
+    direction_pg = masked_mean(
+        torch.maximum(direction_pg_1, direction_pg_2), direction_mask
+    )
+
+    bid_logratio = bid_logprobs - old_bid_logprobs
+    bid_ratio = bid_logratio.exp()
+    bid_pg_1 = -bid_adv * bid_ratio
+    bid_pg_2 = -bid_adv * torch.clamp(
+        bid_ratio, 1 - clip_coef, 1 + clip_coef
+    )
+    bid_pg = masked_mean(torch.maximum(bid_pg_1, bid_pg_2), bid_mask)
+    pg_loss = direction_pg + bid_pg
+
+    newvalue = newvalue.view(-1)
+    if clip_vloss:
+        value_loss = (newvalue - returns).square()
+        value_clipped = values + torch.clamp(
+            newvalue - values, -clip_coef, clip_coef
+        )
+        clipped_loss = (value_clipped - returns).square()
+        v_loss = 0.5 * torch.maximum(value_loss, clipped_loss).mean()
+    else:
+        v_loss = 0.5 * (newvalue - returns).square().mean()
+
+    entropy_loss = masked_mean(
+        direction_entropy, direction_mask
+    ) + masked_mean(bid_entropy, bid_mask)
+    loss = pg_loss - ent_coef * entropy_loss + vf_coef * v_loss
+
+    optimizer.zero_grad()
+    loss.backward()
+    nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+    optimizer.step()
+
+    active_count = (
+        direction_mask.to(torch.float32).sum()
+        + bid_mask.to(torch.float32).sum()
+    ).clamp_min(1.0)
+    with torch.no_grad():
+        old_approx_kl = (
+            masked_mean(-direction_logratio, direction_mask)
+            + masked_mean(-bid_logratio, bid_mask)
+        )
+        approx_kl = (
+            masked_mean(
+                (direction_ratio - 1.0) - direction_logratio,
+                direction_mask,
+            )
+            + masked_mean((bid_ratio - 1.0) - bid_logratio, bid_mask)
+        )
+        direction_clipped = (
+            (direction_ratio - 1.0).abs() > clip_coef
+        ).to(torch.float32)
+        bid_clipped = ((bid_ratio - 1.0).abs() > clip_coef).to(torch.float32)
+        clipfrac = (
+            (direction_clipped * direction_mask).sum()
+            + (bid_clipped * bid_mask).sum()
+        ) / active_count
+
+    return {
+        "pg_loss": pg_loss.item(),
+        "direction_pg_loss": direction_pg.item(),
+        "bid_pg_loss": bid_pg.item(),
+        "v_loss": v_loss.item(),
+        "entropy_loss": entropy_loss.item(),
+        "old_approx_kl": old_approx_kl.item(),
+        "approx_kl": approx_kl.item(),
+        "clipfrac": clipfrac.item(),
+        "auxiliary_loss": 0.0,
     }
 
 

@@ -103,6 +103,8 @@ def summarise(stats: dict, num_agents: int) -> dict:
         "avg_targets_reached": float(np.mean(targets)),
         "avg_reached_priority_sum": float(np.mean(priority_sums)),
         "avg_reached_count_by_priority": np.mean(priority_counts, axis=0).tolist(),
+        "avg_battery_depletions": float(np.mean(stats["battery_depletions_per_episode"])),
+        "avg_battery_recharges": float(np.mean(stats["battery_recharges_per_episode"])),
         "avg_expired": float(np.mean(expired)),
         "std_expired": float(np.std(expired)),
         "avg_min_reached": float(np.mean(min_reached)),

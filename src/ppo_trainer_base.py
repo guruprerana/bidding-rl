@@ -10,7 +10,38 @@ import numpy as np
 import torch
 import wandb
 
-from ppo_utils import compute_gae, ppo_update_step, compute_explained_variance, format_duration
+from ppo_utils import (
+    compute_gae,
+    ppo_update_step,
+    factorized_auction_ppo_update_step,
+    compute_explained_variance,
+    format_duration,
+)
+
+
+def mix_bidder_rewards(
+    individual_rewards: torch.Tensor,
+    other_reward_fraction: float,
+    preserve_team_scale: bool = False,
+) -> torch.Tensor:
+    """Give each bidder its own reward plus a fraction of all other rewards.
+
+    A fraction of zero is fully selfish, while one exactly recovers the
+    cooperative team reward broadcast used by ``shared_team`` credit.
+    """
+    if not 0.0 <= other_reward_fraction <= 1.0:
+        raise ValueError("other_reward_fraction must be between 0 and 1")
+    team_reward = individual_rewards.sum(dim=1, keepdim=True)
+    mixed = individual_rewards + other_reward_fraction * (
+        team_reward - individual_rewards
+    )
+    if preserve_team_scale:
+        num_bidders = individual_rewards.shape[1]
+        mixed = mixed * (
+            num_bidders
+            / (1.0 + other_reward_fraction * (num_bidders - 1))
+        )
+    return mixed
 
 
 class PPOTrainerBase:
@@ -124,6 +155,8 @@ class SingleAgentPPOTrainerBase(PPOTrainerBase):
                 next_done = (terminations | truncations).to(self.device, dtype=torch.float32)
                 rewards[step] = reward.view(-1)
                 self._on_rollout_step(infos, global_step)
+                if torch.any(next_done > 0):
+                    next_obs = self.envs.partial_reset(next_done.bool())
 
             with torch.no_grad():
                 next_value = self.agent.get_value(next_obs).reshape(args.num_envs)
@@ -219,6 +252,10 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
         obs = torch.zeros((args.num_steps, args.num_envs, args.num_agents, self.obs_dim)).to(self.device)
         actions = torch.zeros((args.num_steps, args.num_envs, args.num_agents, self.num_action_components)).to(self.device)
         logprobs = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
+        direction_logprobs = torch.zeros_like(logprobs)
+        bid_logprobs = torch.zeros_like(logprobs)
+        direction_masks = torch.zeros_like(logprobs, dtype=torch.bool)
+        bid_masks = torch.zeros_like(logprobs, dtype=torch.bool)
         rewards = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
         dones = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
         values = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
@@ -227,6 +264,14 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
         start_time = time.time()
         next_obs, _ = self.envs.reset(seed=self.args.seed)
         next_done = torch.zeros((args.num_envs, args.num_agents)).to(self.device)
+        policy_action_value_fn = getattr(
+            self,
+            "policy_action_value_fn",
+            self.agent.get_action_and_value,
+        )
+        factorized_auction_ppo = getattr(
+            args, "factorized_auction_ppo", False
+        )
 
         for iteration in range(start_iteration, args.num_iterations + 1):
             iteration_start = time.time()
@@ -244,20 +289,81 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
 
                 with torch.no_grad():
                     flat_obs = next_obs.reshape(-1, self.obs_dim)
-                    action, logprob, _, value = self.agent.get_action_and_value(flat_obs)
+                    if factorized_auction_ppo:
+                        (
+                            action,
+                            direction_logprob,
+                            bid_logprob,
+                            _,
+                            _,
+                            value,
+                        ) = self.agent.get_factorized_action_and_value(flat_obs)
+                        logprob = direction_logprob + bid_logprob
+                    else:
+                        action, logprob, _, value = policy_action_value_fn(flat_obs)
                     action = action.reshape(args.num_envs, args.num_agents, self.num_action_components)
                     logprob = logprob.reshape(args.num_envs, args.num_agents)
+                    if factorized_auction_ppo:
+                        direction_logprob = direction_logprob.reshape(
+                            args.num_envs, args.num_agents
+                        )
+                        bid_logprob = bid_logprob.reshape(
+                            args.num_envs, args.num_agents
+                        )
                     value = value.reshape(args.num_envs, args.num_agents)
                     values[step] = value
 
                 actions[step] = action
                 logprobs[step] = logprob
+                if factorized_auction_ppo:
+                    direction_logprobs[step] = direction_logprob
+                    bid_logprobs[step] = bid_logprob
 
                 next_obs, reward, terminations, truncations, infos = self.envs.step(action)
+                if factorized_auction_ppo:
+                    agent_indices = torch.arange(
+                        args.num_agents, device=self.device
+                    ).unsqueeze(0)
+                    direction_masks[step] = (
+                        infos["winning_agent"].unsqueeze(1)
+                        == agent_indices
+                    )
+                    bid_masks[step] = infos["is_bidding_round"].unsqueeze(1)
+                if (
+                    getattr(args, "bid_credit_assignment", "individual")
+                    == "controller_team"
+                ):
+                    reward = infos[
+                        "bid_policy_controller_team_rewards"
+                    ][:, :args.num_agents]
+                elif (
+                    getattr(args, "bid_credit_assignment", "individual")
+                    == "shared_team"
+                ):
+                    # Cooperative policy gradient: every bidder receives the
+                    # same global reward, so every learned bid in the joint
+                    # auction is credited for the resulting team transition.
+                    # This is especially useful for bid-only specialization,
+                    # where navigation is frozen and only auction allocation
+                    # is being optimized.
+                    reward = reward.sum(dim=1, keepdim=True).expand(
+                        -1, args.num_agents
+                    )
+                elif (
+                    getattr(args, "bid_credit_assignment", "individual")
+                    == "mixed_team"
+                ):
+                    reward = mix_bidder_rewards(
+                        reward,
+                        getattr(args, "bid_other_reward_fraction", 1.0),
+                        getattr(args, "bid_mixed_reward_normalize", False),
+                    )
                 next_done_scalar = terminations | truncations
                 next_done = next_done_scalar.unsqueeze(1).expand(-1, args.num_agents).to(self.device, dtype=torch.float32)
                 rewards[step] = reward
                 self._on_rollout_step(infos, global_step)
+                if torch.any(next_done_scalar):
+                    next_obs = self.envs.partial_reset(next_done_scalar)
 
             with torch.no_grad():
                 flat_next_obs = next_obs.reshape(-1, self.obs_dim)
@@ -273,6 +379,10 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
 
             b_obs = obs.reshape(-1, self.obs_dim)
             b_logprobs = logprobs.reshape(-1)
+            b_direction_logprobs = direction_logprobs.reshape(-1)
+            b_bid_logprobs = bid_logprobs.reshape(-1)
+            b_direction_masks = direction_masks.reshape(-1)
+            b_bid_masks = bid_masks.reshape(-1)
             b_actions = actions.reshape(-1, self.num_action_components)
             b_advantages = advantages.reshape(-1)
             b_returns = returns.reshape(-1)
@@ -284,22 +394,44 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
                 for start in range(0, args.batch_size, args.minibatch_size):
                     end = start + args.minibatch_size
                     mb_inds = b_inds[start:end]
-                    metrics = ppo_update_step(
-                        self.agent,
-                        self.optimizer,
-                        b_obs[mb_inds],
-                        b_actions[mb_inds],
-                        b_logprobs[mb_inds],
-                        b_advantages[mb_inds],
-                        b_returns[mb_inds],
-                        b_values[mb_inds],
-                        args.clip_coef,
-                        args.ent_coef,
-                        args.vf_coef,
-                        args.max_grad_norm,
-                        args.norm_adv,
-                        args.clip_vloss,
-                    )
+                    if factorized_auction_ppo:
+                        metrics = factorized_auction_ppo_update_step(
+                            self.agent,
+                            self.optimizer,
+                            b_obs[mb_inds],
+                            b_actions[mb_inds],
+                            b_direction_logprobs[mb_inds],
+                            b_bid_logprobs[mb_inds],
+                            b_direction_masks[mb_inds],
+                            b_bid_masks[mb_inds],
+                            b_advantages[mb_inds],
+                            b_returns[mb_inds],
+                            b_values[mb_inds],
+                            args.clip_coef,
+                            args.ent_coef,
+                            args.vf_coef,
+                            args.max_grad_norm,
+                            args.norm_adv,
+                            args.clip_vloss,
+                        )
+                    else:
+                        metrics = ppo_update_step(
+                            self.agent,
+                            self.optimizer,
+                            b_obs[mb_inds],
+                            b_actions[mb_inds],
+                            b_logprobs[mb_inds],
+                            b_advantages[mb_inds],
+                            b_returns[mb_inds],
+                            b_values[mb_inds],
+                            args.clip_coef,
+                            args.ent_coef,
+                            args.vf_coef,
+                            args.max_grad_norm,
+                            args.norm_adv,
+                            args.clip_vloss,
+                            action_value_fn=policy_action_value_fn,
+                        )
                     clipfracs.append(metrics["clipfrac"])
                 if args.target_kl is not None and metrics["approx_kl"] > args.target_kl:
                     break

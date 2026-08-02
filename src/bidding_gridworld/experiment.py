@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,23 @@ from bidding_gridworld.bidding_ppo import PPOTrainer
 from bidding_gridworld.single_agent_ppo import SingleAgentPPOTrainer
 
 
+@contextmanager
+def isolated_torch_rng(seed: int):
+    """Use a reproducible policy-sampling stream without perturbing training."""
+    cpu_state = torch.get_rng_state()
+    cuda_initialized = torch.cuda.is_available() and torch.cuda.is_initialized()
+    cuda_states = torch.cuda.get_rng_state_all() if cuda_initialized else None
+    torch.manual_seed(seed)
+    if cuda_initialized:
+        torch.cuda.manual_seed_all(seed)
+    try:
+        yield
+    finally:
+        torch.set_rng_state(cpu_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+
+
 class PPOMovingTargetsExperiment:
     """Experiment wrapper for PPO training with periodic evaluation and checkpointing."""
 
@@ -40,6 +58,10 @@ class PPOMovingTargetsExperiment:
         eval_max_steps: int = 600,
         eval_num_agents: int | None = None,
         eval_num_targets: int | None = None,
+        deterministic_eval: bool = False,
+        eval_seed: int | None = None,
+        policy_sample_seed: int | None = None,
+        final_model_in_log_dir: bool = False,
     ):
         """
         Initialize the experiment.
@@ -57,6 +79,12 @@ class PPOMovingTargetsExperiment:
             eval_max_steps: Maximum steps per episode during evaluation
             eval_num_agents: Optional override for number of agents/targets during eval (multi-agent only)
             eval_num_targets: Optional override for number of targets during eval (single-agent only)
+            deterministic_eval: Use highest-logit actions instead of sampling
+                the trained policy during evaluation.
+            eval_seed: Optional held-out environment seed. Defaults to the
+                training seed for backward compatibility.
+            policy_sample_seed: Optional isolated action-sampling seed.
+                Defaults to the evaluation seed.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if not experiment_name:
@@ -74,6 +102,10 @@ class PPOMovingTargetsExperiment:
         self.eval_max_steps = eval_max_steps
         self.eval_num_agents = eval_num_agents
         self.eval_num_targets = eval_num_targets
+        self.deterministic_eval = deterministic_eval
+        self.eval_seed = eval_seed
+        self.policy_sample_seed = policy_sample_seed
+        self.final_model_in_log_dir = final_model_in_log_dir
 
         # Create directory structure
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -96,7 +128,7 @@ class PPOMovingTargetsExperiment:
         print("📦 Logging codebase to wandb...")
 
         # Get project root (parent of logs directory)
-        project_root = self.log_dir.parent.parent
+        project_root = Path(__file__).resolve().parents[2]
 
         # Create wandb artifact
         artifact = wandb.Artifact(
@@ -138,12 +170,33 @@ class PPOMovingTargetsExperiment:
         # Save model
         model_path = checkpoint_dir / "agent.pt"
         torch.save(trainer.agent.state_dict(), str(model_path))
+        if getattr(trainer, "charging_agent", None) is not None:
+            charging_model_path = checkpoint_dir / "charging_agent.pt"
+            torch.save(
+                trainer.charging_agent.state_dict(),
+                str(charging_model_path),
+            )
 
         # Save checkpoint info
         checkpoint_info = {
             "iteration": iteration,
             "global_step": global_step,
             "timestamp": datetime.now().isoformat(),
+            "feeder_warm_start": getattr(
+                trainer, "feeder_warm_start_report", None
+            ),
+            "feeder_freeze_iterations": getattr(
+                trainer.args, "feeder_freeze_iterations", 0
+            ),
+            "feeder_finetune_learning_rate": getattr(
+                trainer.args, "feeder_finetune_learning_rate", None
+            ),
+            "charging_behavior_cloning": getattr(
+                trainer, "charging_bc_report", None
+            ),
+            "charging_bc_refresh": getattr(
+                trainer, "charging_bc_refresh_report", None
+            ),
         }
         info_path = checkpoint_dir / "checkpoint_info.json"
         with open(info_path, 'w') as f:
@@ -154,6 +207,8 @@ class PPOMovingTargetsExperiment:
         # Save to wandb
         if trainer.args.track:
             wandb.save(str(model_path))
+            if getattr(trainer, "charging_agent", None) is not None:
+                wandb.save(str(charging_model_path))
 
     def evaluate_policy(
         self,
@@ -197,12 +252,69 @@ class PPOMovingTargetsExperiment:
             visible_targets=trainer.args.visible_targets,
             single_agent_mode=False,
             bidding_mechanism=trainer.args.bidding_mechanism,
+            use_target_priorities=trainer.args.use_target_priorities,
+            programmatic_bidding=trainer.args.programmatic_bidding,
+            battery_capacity=trainer.args.battery_capacity,
+            recharge_station_positions=trainer.args.recharge_station_positions,
+            moving_recharge_stations=getattr(
+                trainer.args, "moving_recharge_stations", False
+            ),
+            recharge_station_direction_change_prob=getattr(
+                trainer.args,
+                "recharge_station_direction_change_prob",
+                0.1,
+            ),
+            recharge_station_move_interval=getattr(
+                trainer.args, "recharge_station_move_interval", 5
+            ),
+            movement_energy_cost=trainer.args.movement_energy_cost,
+            battery_depletion_penalty=trainer.args.battery_depletion_penalty,
+            charging_agent_enabled=trainer.args.charging_agent_enabled,
+            charging_low_battery_threshold=trainer.args.charging_low_battery_threshold,
+            charging_distance_reward_scale=trainer.args.charging_distance_reward_scale,
+            charging_recharge_bonus=trainer.args.charging_recharge_bonus,
+            charging_depletion_penalty=trainer.args.charging_depletion_penalty,
+            charging_high_battery_control_penalty=(
+                trainer.args.charging_high_battery_control_penalty
+            ),
+            feeder_low_battery_control_penalty=(
+                trainer.args.feeder_low_battery_control_penalty
+            ),
+            charging_low_battery_bid_boost=(
+                trainer.args.charging_low_battery_bid_boost
+            ),
+            charging_bid_boost_threshold=getattr(
+                trainer.args, "charging_bid_boost_threshold", None
+            ),
+            charging_activation_margin=trainer.args.charging_activation_margin,
+            charging_release_window_on_recharge=(
+                trainer.args.charging_release_window_on_recharge
+            ),
+            charging_programmatic_navigation=(
+                trainer.args.charging_programmatic_navigation
+            ),
+            charging_reserve_features_enabled=getattr(
+                trainer.args, "charging_reserve_features_enabled", False
+            ),
+            charging_nearest_station_features_enabled=getattr(
+                trainer.args,
+                "charging_nearest_station_features_enabled",
+                False,
+            ),
+        )
+        evaluation_seed = (
+            trainer.args.seed if self.eval_seed is None else self.eval_seed
+        )
+        policy_sample_seed = (
+            evaluation_seed
+            if self.policy_sample_seed is None
+            else self.policy_sample_seed
         )
         eval_env = BiddingGridworld(
             env_config,
             num_envs=self.num_eval_episodes,
             device=trainer.device,
-            seed=trainer.args.seed,
+            seed=evaluation_seed,
         )
 
         # Create batched policy wrapper function
@@ -214,17 +326,62 @@ class PPOMovingTargetsExperiment:
             N_envs, n_agents, obs_dim = obs_tensor.shape
             obs_flat = obs_tensor.reshape(N_envs * n_agents, obs_dim)
             with torch.no_grad():
-                action, _, _, _ = trainer.agent.get_action_and_value(obs_flat)
-            return action.reshape(N_envs, n_agents, -1)
+                if trainer.args.programmatic_bidding != "none":
+                    action_fn = trainer.agent.get_direction_action_and_value
+                elif trainer.args.bid_only_ppo:
+                    action_fn = (
+                        trainer.agent.get_bid_action_and_value_with_direction
+                    )
+                else:
+                    action_fn = trainer.agent.get_action_and_value
+                action, _, _, _ = action_fn(
+                    obs_flat, deterministic=self.deterministic_eval
+                )
+                feeder_action = action.reshape(N_envs, n_agents, -1)
+                if trainer.charging_agent is None:
+                    return feeder_action
+                charging_obs = eval_env.get_charging_observation()
+                charging_action_fn = (
+                    trainer.charging_agent.get_bid_action_and_value
+                    if trainer.args.charging_programmatic_navigation
+                    else trainer.charging_agent.get_action_and_value
+                )
+                charging_action, _, _, _ = charging_action_fn(
+                    charging_obs,
+                    deterministic=self.deterministic_eval,
+                    **(
+                        {
+                            "deterministic_direction": True,
+                        }
+                        if (
+                            not trainer.args.charging_programmatic_navigation
+                            and getattr(
+                                trainer.args,
+                                "charging_greedy_navigation_eval",
+                                False,
+                            )
+                        )
+                        else {}
+                    ),
+                )
+                return torch.cat(
+                    [feeder_action, charging_action.unsqueeze(1)], dim=1
+                )
 
         # Run batched evaluation
-        eval_stats = evaluate_multi_agent_policy_batched(
-            env=eval_env,
-            policy_fn=policy_fn,
-            num_episodes=self.num_eval_episodes,
-            target_expiry_penalty=trainer.args.target_expiry_penalty,
-            verbose=True
-        )
+        with isolated_torch_rng(policy_sample_seed):
+            eval_stats = evaluate_multi_agent_policy_batched(
+                env=eval_env,
+                policy_fn=policy_fn,
+                num_episodes=self.num_eval_episodes,
+                target_expiry_penalty=trainer.args.target_expiry_penalty,
+                verbose=True,
+                capture_episode_count=(
+                    min(self.num_video_episodes, self.num_eval_episodes)
+                    if create_videos
+                    else 0
+                ),
+            )
 
         episode_data_list = eval_stats.get("episode_data_list", [])
         if create_videos:
@@ -265,6 +422,19 @@ class PPOMovingTargetsExperiment:
         avg_bid_counts = {}
         for bid_val in range(bid_upper_bound + 1):
             avg_bid_counts[bid_val] = float(np.mean([bc.get(bid_val, 0) for bc in all_bid_counts]))
+        all_charging_bid_counts = eval_stats.get(
+            "charging_bid_counts_per_episode", []
+        )
+        avg_charging_bid_counts = {}
+        for bid_val in range(bid_upper_bound + 1):
+            avg_charging_bid_counts[bid_val] = float(
+                np.mean(
+                    [
+                        bc.get(bid_val, 0)
+                        for bc in all_charging_bid_counts
+                    ]
+                )
+            )
 
         # Average control timesteps per agent across episodes
         all_control_steps = eval_stats.get("control_steps_per_agent_per_episode", [])
@@ -272,6 +442,120 @@ class PPOMovingTargetsExperiment:
             np.array(all_control_steps).mean(axis=0).tolist()
             if all_control_steps else []
         )
+        all_depletions_per_agent = eval_stats.get(
+            "battery_depletions_per_agent_per_episode", []
+        )
+        avg_depletions_per_agent = (
+            np.array(all_depletions_per_agent).mean(axis=0).tolist()
+            if all_depletions_per_agent
+            else []
+        )
+        avg_battery_depletions = float(
+            np.mean(eval_stats["battery_depletions_per_episode"])
+        )
+        avg_battery_recharges = float(
+            np.mean(eval_stats["battery_recharges_per_episode"])
+        )
+        charging_navigation_steps = np.asarray(
+            eval_stats["charging_navigation_steps_per_episode"],
+            dtype=float,
+        )
+        charging_optimal_direction_steps = np.asarray(
+            eval_stats["charging_optimal_direction_steps_per_episode"],
+            dtype=float,
+        )
+        charging_optimal_direction_rate = float(
+            np.mean(
+                np.divide(
+                    charging_optimal_direction_steps,
+                    charging_navigation_steps,
+                    out=np.zeros_like(charging_navigation_steps),
+                    where=charging_navigation_steps > 0,
+                )
+            )
+        )
+        charging_activation_steps = float(
+            np.mean(eval_stats["charging_activation_steps_per_episode"])
+        )
+        charging_activation_fraction = float(
+            np.mean(
+                np.divide(
+                    np.asarray(
+                        eval_stats["charging_activation_steps_per_episode"],
+                        dtype=float,
+                    ),
+                    np.asarray(eval_stats["episode_lengths"], dtype=float),
+                    out=np.zeros(self.num_eval_episodes, dtype=float),
+                    where=np.asarray(eval_stats["episode_lengths"]) > 0,
+                )
+            )
+        )
+        active_auctions = np.asarray(
+            eval_stats["charging_active_auction_steps_per_episode"],
+            dtype=float,
+        )
+        active_auction_wins = np.asarray(
+            eval_stats["charging_active_auction_wins_per_episode"],
+            dtype=float,
+        )
+        active_feeder_max_bid_sum = np.asarray(
+            eval_stats[
+                "charging_active_feeder_max_bid_sum_per_episode"
+            ],
+            dtype=float,
+        )
+        active_feeder_tie_or_outbid = np.asarray(
+            eval_stats[
+                "charging_active_feeder_tie_or_outbid_steps_per_episode"
+            ],
+            dtype=float,
+        )
+        charging_active_auction_win_rate = float(
+            np.mean(
+                np.divide(
+                    active_auction_wins,
+                    active_auctions,
+                    out=np.zeros_like(active_auctions),
+                    where=active_auctions > 0,
+                )
+            )
+        )
+        charging_active_avg_feeder_max_bid = float(
+            np.mean(
+                np.divide(
+                    active_feeder_max_bid_sum,
+                    active_auctions,
+                    out=np.zeros_like(active_auctions),
+                    where=active_auctions > 0,
+                )
+            )
+        )
+        charging_active_feeder_tie_or_outbid_rate = float(
+            np.mean(
+                np.divide(
+                    active_feeder_tie_or_outbid,
+                    active_auctions,
+                    out=np.zeros_like(active_auctions),
+                    where=active_auctions > 0,
+                )
+            )
+        )
+        charging_control_steps = 0.0
+        charging_control_fraction = 0.0
+        if trainer.args.charging_agent_enabled and all_control_steps:
+            control_arr = np.asarray(all_control_steps, dtype=float)
+            charging_control_steps = float(control_arr[:, -1].mean())
+            total_control = control_arr.sum(axis=1)
+            charging_control_fraction = float(
+                np.mean(
+                    np.divide(
+                        control_arr[:, -1],
+                        total_control,
+                        out=np.zeros_like(total_control),
+                        where=total_control > 0,
+                    )
+                )
+            )
 
         # Log to wandb
         if trainer.args.track:
@@ -284,6 +568,26 @@ class PPOMovingTargetsExperiment:
                 "eval/avg_expired_targets": avg_expired,
                 "eval/avg_min_targets_reached": avg_min_reached,
                 "eval/success_rate": success_rate,
+                "eval/avg_battery_depletions": avg_battery_depletions,
+                "eval/avg_battery_recharges": avg_battery_recharges,
+                "eval/charging_optimal_direction_rate": (
+                    charging_optimal_direction_rate
+                ),
+                "eval/charging_activation_steps": charging_activation_steps,
+                "eval/charging_activation_fraction": (
+                    charging_activation_fraction
+                ),
+                "eval/charging_active_auction_win_rate": (
+                    charging_active_auction_win_rate
+                ),
+                "eval/charging_active_avg_feeder_max_bid": (
+                    charging_active_avg_feeder_max_bid
+                ),
+                "eval/charging_active_feeder_tie_or_outbid_rate": (
+                    charging_active_feeder_tie_or_outbid_rate
+                ),
+                "eval/charging_control_steps": charging_control_steps,
+                "eval/charging_control_fraction": charging_control_fraction,
             }, step=global_step)
 
         # Save eval stats to local JSON file
@@ -293,6 +597,28 @@ class PPOMovingTargetsExperiment:
         eval_summary = {
             "iteration": iteration,
             "global_step": global_step,
+            "policy_action_selection": (
+                "logit_argmax" if self.deterministic_eval else "sampled"
+            ),
+            "charging_navigation_action_selection": (
+                "programmatic"
+                if trainer.args.charging_programmatic_navigation
+                else (
+                    "logit_argmax"
+                    if getattr(
+                        trainer.args,
+                        "charging_greedy_navigation_eval",
+                        False,
+                    )
+                    else (
+                        "logit_argmax"
+                        if self.deterministic_eval
+                        else "sampled"
+                    )
+                )
+            ),
+            "environment_seed": evaluation_seed,
+            "policy_sample_seed": policy_sample_seed,
             "num_episodes": self.num_eval_episodes,
             "num_agents": eval_num_agents,
             "train_num_agents": trainer.args.num_agents,
@@ -304,6 +630,26 @@ class PPOMovingTargetsExperiment:
                 "avg_targets_reached": float(avg_targets),
                 "avg_reached_priority_sum": float(avg_priority_sum),
                 "avg_reached_count_by_priority": avg_reached_count_by_priority,
+                "avg_battery_depletions": avg_battery_depletions,
+                "avg_battery_recharges": avg_battery_recharges,
+                "avg_charging_optimal_direction_rate": (
+                    charging_optimal_direction_rate
+                ),
+                "avg_charging_activation_steps": charging_activation_steps,
+                "avg_charging_activation_fraction": (
+                    charging_activation_fraction
+                ),
+                "avg_charging_active_auction_win_rate": (
+                    charging_active_auction_win_rate
+                ),
+                "avg_charging_active_feeder_max_bid": (
+                    charging_active_avg_feeder_max_bid
+                ),
+                "avg_charging_active_feeder_tie_or_outbid_rate": (
+                    charging_active_feeder_tie_or_outbid_rate
+                ),
+                "avg_charging_control_steps": charging_control_steps,
+                "avg_charging_control_fraction": charging_control_fraction,
                 "avg_expired_targets": float(avg_expired),
                 "avg_min_targets_reached": float(avg_min_reached),
                 "success_rate": float(success_rate),
@@ -316,7 +662,11 @@ class PPOMovingTargetsExperiment:
                 "avg_expired_per_target": expired_arr.mean(axis=0).tolist(),
                 "avg_performance_per_target": perf_arr.mean(axis=0).tolist(),
                 "avg_bid_counts": avg_bid_counts,
+                "avg_charging_bid_counts": avg_charging_bid_counts,
                 "avg_control_timesteps_per_agent": avg_control_steps_per_agent,
+                "avg_battery_depletions_per_agent": (
+                    avg_depletions_per_agent
+                ),
             },
             "per_episode_data": {
                 "returns": [float(r) for r in eval_stats["episode_returns"]],
@@ -332,6 +682,32 @@ class PPOMovingTargetsExperiment:
                 "reached_count_by_priority": eval_stats[
                     "reached_count_by_priority_per_episode"
                 ],
+                "battery_depletions": eval_stats["battery_depletions_per_episode"],
+                "battery_depletions_per_agent": eval_stats.get(
+                    "battery_depletions_per_agent_per_episode", []
+                ),
+                "battery_recharges": eval_stats["battery_recharges_per_episode"],
+                "charging_navigation_steps": eval_stats[
+                    "charging_navigation_steps_per_episode"
+                ],
+                "charging_optimal_direction_steps": eval_stats[
+                    "charging_optimal_direction_steps_per_episode"
+                ],
+                "charging_activation_steps": (
+                    eval_stats["charging_activation_steps_per_episode"]
+                ),
+                "charging_active_auction_steps": eval_stats[
+                    "charging_active_auction_steps_per_episode"
+                ],
+                "charging_active_auction_wins": eval_stats[
+                    "charging_active_auction_wins_per_episode"
+                ],
+                "charging_active_feeder_max_bid_sum": eval_stats[
+                    "charging_active_feeder_max_bid_sum_per_episode"
+                ],
+                "charging_active_feeder_tie_or_outbid_steps": eval_stats[
+                    "charging_active_feeder_tie_or_outbid_steps_per_episode"
+                ],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
                 "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
                 "avg_performance": [float(p) for p in eval_stats["avg_performance_per_episode"]],
@@ -339,6 +715,10 @@ class PPOMovingTargetsExperiment:
                 "expired_count_per_target": eval_stats["expired_count_per_target_per_episode"],
                 "targets_reached_count": eval_stats["targets_reached_count_per_episode"],
                 "bid_counts": [dict(sorted(bc.items())) for bc in all_bid_counts],
+                "charging_bid_counts": [
+                    dict(sorted(bc.items()))
+                    for bc in all_charging_bid_counts
+                ],
                 "control_steps_per_agent": all_control_steps,
             }
         }
@@ -392,12 +772,39 @@ class PPOMovingTargetsExperiment:
             visible_targets=None,
             single_agent_mode=True,
             reward_decay_factor=trainer.args.reward_decay_factor,
+            urgency_weighted_scalarization=(
+                trainer.args.urgency_weighted_scalarization
+            ),
+            use_target_priorities=trainer.args.use_target_priorities,
+            battery_capacity=trainer.args.battery_capacity,
+            recharge_station_positions=trainer.args.recharge_station_positions,
+            moving_recharge_stations=getattr(
+                trainer.args, "moving_recharge_stations", False
+            ),
+            recharge_station_direction_change_prob=getattr(
+                trainer.args,
+                "recharge_station_direction_change_prob",
+                0.1,
+            ),
+            recharge_station_move_interval=getattr(
+                trainer.args, "recharge_station_move_interval", 5
+            ),
+            movement_energy_cost=trainer.args.movement_energy_cost,
+            battery_depletion_penalty=trainer.args.battery_depletion_penalty,
+        )
+        evaluation_seed = (
+            trainer.args.seed if self.eval_seed is None else self.eval_seed
+        )
+        policy_sample_seed = (
+            evaluation_seed
+            if self.policy_sample_seed is None
+            else self.policy_sample_seed
         )
         eval_env = BiddingGridworld(
             env_config,
             num_envs=self.num_eval_episodes,
             device=trainer.device,
-            seed=trainer.args.seed,
+            seed=evaluation_seed,
         )
 
         # Create batched policy wrapper function
@@ -407,17 +814,20 @@ class PPOMovingTargetsExperiment:
             obs_tensor = obs if torch.is_tensor(obs) else torch.tensor(obs, dtype=torch.float32)
             obs_tensor = obs_tensor.to(trainer.device)
             with torch.no_grad():
-                action, _, _, _ = trainer.agent.get_action_and_value(obs_tensor)
+                action, _, _, _ = trainer.agent.get_action_and_value(
+                    obs_tensor, deterministic=self.deterministic_eval
+                )
             return action
 
         # Run batched evaluation
-        eval_stats = evaluate_single_agent_policy_batched(
-            env=eval_env,
-            policy_fn=policy_fn,
-            num_episodes=self.num_eval_episodes,
-            target_expiry_penalty=trainer.args.target_expiry_penalty,
-            verbose=True
-        )
+        with isolated_torch_rng(policy_sample_seed):
+            eval_stats = evaluate_single_agent_policy_batched(
+                env=eval_env,
+                policy_fn=policy_fn,
+                num_episodes=self.num_eval_episodes,
+                target_expiry_penalty=trainer.args.target_expiry_penalty,
+                verbose=True,
+            )
 
         episode_data_list = eval_stats.get("episode_data_list", [])
         if create_videos:
@@ -467,9 +877,17 @@ class PPOMovingTargetsExperiment:
         reached_arr = np.array(eval_stats["targets_reached_count_per_episode"], dtype=float)
         expired_arr = np.array(eval_stats["expired_count_per_target_per_episode"], dtype=float)
         perf_arr    = reached_arr - expired_arr
+        total_reaches = reached_arr.sum(axis=1)
+        total_expiries = expired_arr.sum(axis=1)
+        total_performance = total_reaches - total_expiries
         eval_summary = {
             "iteration": iteration,
             "global_step": global_step,
+            "policy_action_selection": (
+                "logit_argmax" if self.deterministic_eval else "sampled"
+            ),
+            "environment_seed": evaluation_seed,
+            "policy_sample_seed": policy_sample_seed,
             "num_episodes": self.num_eval_episodes,
             "num_targets": eval_num_targets,
             "train_num_targets": trainer.args.num_targets,
@@ -480,12 +898,24 @@ class PPOMovingTargetsExperiment:
                 "avg_targets_reached": float(avg_targets),
                 "avg_reached_priority_sum": float(avg_priority_sum),
                 "avg_reached_count_by_priority": avg_reached_count_by_priority,
+                "avg_battery_depletions": float(
+                    np.mean(eval_stats["battery_depletions_per_episode"])
+                ),
+                "avg_battery_recharges": float(
+                    np.mean(eval_stats["battery_recharges_per_episode"])
+                ),
                 "avg_expired_targets": float(avg_expired),
                 "avg_min_targets_reached": float(avg_min_reached),
                 "success_rate": float(success_rate),
                 "std_return": float(np.std(eval_stats["episode_returns"])),
                 "std_length": float(np.std(eval_stats["episode_lengths"])),
                 "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
+                "avg_total_reaches": float(np.mean(total_reaches)),
+                "std_total_reaches": float(np.std(total_reaches)),
+                "avg_total_expiries": float(np.mean(total_expiries)),
+                "std_total_expiries": float(np.std(total_expiries)),
+                "avg_total_performance": float(np.mean(total_performance)),
+                "std_total_performance": float(np.std(total_performance)),
                 "avg_avg_performance": float(np.mean(eval_stats["avg_performance_per_episode"])),
                 "avg_min_performance": float(np.mean(eval_stats["min_performance_per_episode"])),
                 "avg_reached_per_target": reached_arr.mean(axis=0).tolist(),
@@ -505,12 +935,17 @@ class PPOMovingTargetsExperiment:
                 "reached_count_by_priority": eval_stats[
                     "reached_count_by_priority_per_episode"
                 ],
+                "battery_depletions": eval_stats["battery_depletions_per_episode"],
+                "battery_recharges": eval_stats["battery_recharges_per_episode"],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
                 "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
                 "avg_performance": [float(p) for p in eval_stats["avg_performance_per_episode"]],
                 "min_performance": [float(p) for p in eval_stats["min_performance_per_episode"]],
                 "expired_count_per_target": eval_stats["expired_count_per_target_per_episode"],
                 "targets_reached_count": eval_stats["targets_reached_count_per_episode"],
+                "total_reaches": total_reaches.astype(int).tolist(),
+                "total_expiries": total_expiries.astype(int).tolist(),
+                "total_performance": total_performance.astype(int).tolist(),
             }
         }
 
@@ -597,7 +1032,11 @@ class PPOMovingTargetsExperiment:
         print(f"Evaluation episodes: {self.num_eval_episodes} (saving videos for first {self.num_video_episodes})\n")
 
         trainer.train()
-        trainer.save_model()
+        trainer.save_model(
+            str(self.log_dir / "models")
+            if self.final_model_in_log_dir
+            else None
+        )
         trainer.cleanup()
 
         print(f"\n✅ Training complete! Results saved to {self.log_dir}")

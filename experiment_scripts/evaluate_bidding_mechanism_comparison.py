@@ -77,6 +77,10 @@ def _build_multi_agent_env_config(cfg: dict) -> BiddingGridworldConfig:
         visible_targets=cfg.get("visible_targets", None),
         single_agent_mode=False,
         bidding_mechanism=cfg.get("bidding_mechanism", "all_pay"),
+        battery_capacity=cfg.get("battery_capacity"),
+        recharge_station_positions=cfg.get("recharge_station_positions"),
+        movement_energy_cost=cfg.get("movement_energy_cost", 1),
+        battery_depletion_penalty=cfg.get("battery_depletion_penalty", 0.0),
     )
 
 
@@ -100,6 +104,10 @@ def _build_single_agent_env_config(cfg: dict) -> BiddingGridworldConfig:
         visible_targets=None,
         single_agent_mode=True,
         reward_decay_factor=cfg.get("reward_decay_factor", 0.0),
+        battery_capacity=cfg.get("battery_capacity"),
+        recharge_station_positions=cfg.get("recharge_station_positions"),
+        movement_energy_cost=cfg.get("movement_energy_cost", 1),
+        battery_depletion_penalty=cfg.get("battery_depletion_penalty", 0.0),
     )
 
 
@@ -121,6 +129,11 @@ def _build_multi_agent_agent(cfg: dict, obs_dim: int, device: torch.device) -> S
         target_encoder_hidden_sizes=cfg.get("target_encoder_hidden_sizes", [64, 64]),
         attention_pooling_layout="centralized" if visible_targets is None else "visible",
         include_target_reached=not moving_targets,
+        energy_feature_dim=(
+            0
+            if cfg.get("battery_capacity") is None
+            else 1 + 2 * len(cfg.get("recharge_station_positions") or [])
+        ),
     ).to(device)
     agent.set_bid_head(bid_upper_bound)
     if window_bidding:
@@ -139,6 +152,11 @@ def _build_single_agent_agent(cfg: dict, obs_dim: int, device: torch.device) -> 
         target_embed_dim=cfg.get("target_embed_dim", 64),
         target_encoder_hidden_sizes=cfg.get("target_encoder_hidden_sizes", [64, 64]),
         include_target_reached=not moving_targets,
+        energy_feature_dim=(
+            0
+            if cfg.get("battery_capacity") is None
+            else 1 + 2 * len(cfg.get("recharge_station_positions") or [])
+        ),
     ).to(device)
 
 
@@ -242,6 +260,8 @@ def evaluate_experiment(exp_dir: Path, device: torch.device) -> None:
         "avg_targets_reached":     avg_targets,
         "avg_reached_priority_sum": avg_priority_sum,
         "avg_reached_count_by_priority": avg_reached_count_by_priority,
+        "avg_battery_depletions": float(np.mean(eval_stats["battery_depletions_per_episode"])),
+        "avg_battery_recharges": float(np.mean(eval_stats["battery_recharges_per_episode"])),
         "avg_expired":             avg_expired,
         "avg_min_targets_reached": avg_min_reached,
         "success_rate":            success_rate,
@@ -261,6 +281,8 @@ def evaluate_experiment(exp_dir: Path, device: torch.device) -> None:
             "reached_priority_sum_per_target_per_episode"
         ],
         "reached_count_by_priority": eval_stats["reached_count_by_priority_per_episode"],
+        "battery_depletions": eval_stats["battery_depletions_per_episode"],
+        "battery_recharges": eval_stats["battery_recharges_per_episode"],
         "expired_targets":       [int(e)   for e in eval_stats["expired_targets_per_episode"]],
         "min_targets_reached":   [int(m)   for m in eval_stats["min_targets_reached_per_episode"]],
         "avg_performance":       [float(p) for p in eval_stats["avg_performance_per_episode"]],

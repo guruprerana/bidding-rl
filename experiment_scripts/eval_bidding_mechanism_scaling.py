@@ -99,14 +99,21 @@ def build_agent(config: dict, device: str) -> SharedAgent:
     visible_targets = config.get("visible_targets")
     include_reached = not moving_targets
     window_bidding = config.get("window_bidding", False)
+    energy_feature_dim = (
+        0
+        if config.get("battery_capacity") is None
+        else 1 + 2 * len(config.get("recharge_station_positions") or [])
+    )
 
     # Compute per-agent obs dim matching BiddingGridworld's formula
     if visible_targets is None:
-        per_agent_obs_dim = 3 + (5 if include_reached else 4) * num_agents
+        per_agent_obs_dim = (
+            3 + (5 if include_reached else 4) * num_agents + energy_feature_dim
+        )
     else:
         per_agent_obs_dim = (
             8 + 4 * visible_targets if include_reached else 7 + 3 * visible_targets
-        )
+        ) + energy_feature_dim
 
     agent = SharedAgent(
         obs_dim=per_agent_obs_dim,
@@ -119,6 +126,7 @@ def build_agent(config: dict, device: str) -> SharedAgent:
         target_encoder_hidden_sizes=config.get("target_encoder_hidden_sizes"),
         attention_pooling_layout="centralized" if visible_targets is None else "visible",
         include_target_reached=include_reached,
+        energy_feature_dim=energy_feature_dim,
     )
     agent.set_bid_head(config["bid_upper_bound"])
     if window_bidding:
@@ -167,6 +175,10 @@ def evaluate_for_num_agents(
         visible_targets=config.get("visible_targets"),
         single_agent_mode=False,
         bidding_mechanism=config["bidding_mechanism"],
+        battery_capacity=config.get("battery_capacity"),
+        recharge_station_positions=config.get("recharge_station_positions"),
+        movement_energy_cost=config.get("movement_energy_cost", 1),
+        battery_depletion_penalty=config.get("battery_depletion_penalty", 0.0),
     )
     eval_env = BiddingGridworld(env_config, num_envs=1, device=device, seed=seed)
 
@@ -226,6 +238,12 @@ def evaluate_for_num_agents(
             "avg_reached_count_by_priority": np.mean(
                 eval_stats["reached_count_by_priority_per_episode"], axis=0
             ).tolist(),
+            "avg_battery_depletions": float(
+                np.mean(eval_stats["battery_depletions_per_episode"])
+            ),
+            "avg_battery_recharges": float(
+                np.mean(eval_stats["battery_recharges_per_episode"])
+            ),
             "std_targets_reached": float(np.std(eval_stats["targets_reached_per_episode"])),
             "avg_expired_targets": float(np.mean(eval_stats["expired_targets_per_episode"])),
             "avg_min_targets_reached": float(
@@ -252,6 +270,8 @@ def evaluate_for_num_agents(
             "reached_count_by_priority": eval_stats[
                 "reached_count_by_priority_per_episode"
             ],
+            "battery_depletions": eval_stats["battery_depletions_per_episode"],
+            "battery_recharges": eval_stats["battery_recharges_per_episode"],
             "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
             "min_targets_reached": [
                 int(m) for m in eval_stats["min_targets_reached_per_episode"]
