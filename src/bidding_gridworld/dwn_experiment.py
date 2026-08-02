@@ -133,6 +133,10 @@ class DWNExperiment:
             window_penalty=0.0,
             visible_targets=args.visible_targets,
             single_agent_mode=False,
+            battery_capacity=args.battery_capacity,
+            recharge_station_positions=args.recharge_station_positions,
+            movement_energy_cost=args.movement_energy_cost,
+            battery_depletion_penalty=args.battery_depletion_penalty,
         )
         eval_env = BiddingGridworld(
             env_config,
@@ -220,6 +224,12 @@ class DWNExperiment:
                 "avg_targets_reached": float(avg_targets),
                 "avg_reached_priority_sum": float(avg_priority_sum),
                 "avg_reached_count_by_priority": avg_reached_count_by_priority,
+                "avg_battery_depletions": float(
+                    np.mean(eval_stats["battery_depletions_per_episode"])
+                ),
+                "avg_battery_recharges": float(
+                    np.mean(eval_stats["battery_recharges_per_episode"])
+                ),
                 "avg_expired_targets": float(avg_expired),
                 "avg_min_targets_reached": float(avg_min_reached),
                 "success_rate": float(success_rate),
@@ -240,6 +250,8 @@ class DWNExperiment:
                 "reached_count_by_priority": eval_stats[
                     "reached_count_by_priority_per_episode"
                 ],
+                "battery_depletions": eval_stats["battery_depletions_per_episode"],
+                "battery_recharges": eval_stats["battery_recharges_per_episode"],
                 "expired_targets": [int(e) for e in eval_stats["expired_targets_per_episode"]],
                 "min_targets_reached": [int(m) for m in eval_stats["min_targets_reached_per_episode"]],
             },

@@ -203,6 +203,8 @@ def evaluate_algorithmic_policy(
         "reached_priority_sum_per_episode": [],
         "reached_priority_sum_per_target_per_episode": [],
         "reached_count_by_priority_per_episode": [],
+        "battery_depletions_per_episode": [],
+        "battery_recharges_per_episode": [],
         "expired_count_per_target_per_episode": [],
         "avg_expired_per_episode": [],
         "max_expired_per_episode": [],
@@ -226,6 +228,8 @@ def evaluate_algorithmic_policy(
         reached_count_by_priority = np.zeros(4, dtype=np.int32)
         expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
         targets_just_reached = None
+        battery_depletions = 0
+        battery_recharges = 0
 
         while not (terminated or truncated):
             direction = policy.act(obs[0].cpu().numpy() if torch.is_tensor(obs) else obs[0],
@@ -257,6 +261,8 @@ def evaluate_algorithmic_policy(
                 reached_priorities = priorities_just_reached[0].detach().cpu().numpy()
                 reached_priority_sum += reached_priorities
                 reached_count_by_priority += np.bincount(reached_priorities, minlength=5)[1:5]
+            battery_depletions += int(info["battery_depleted"][0].item())
+            battery_recharges += int(info["battery_recharged"][0].item())
 
             step_count += 1
 
@@ -274,6 +280,8 @@ def evaluate_algorithmic_policy(
         eval_stats["reached_priority_sum_per_episode"].append(int(reached_priority_sum.sum()))
         eval_stats["reached_priority_sum_per_target_per_episode"].append(reached_priority_sum.tolist())
         eval_stats["reached_count_by_priority_per_episode"].append(reached_count_by_priority.tolist())
+        eval_stats["battery_depletions_per_episode"].append(battery_depletions)
+        eval_stats["battery_recharges_per_episode"].append(battery_recharges)
         eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
         eval_stats["avg_expired_per_episode"].append(float(np.mean(expired_targets_count)))
         eval_stats["max_expired_per_episode"].append(float(np.max(expired_targets_count)))

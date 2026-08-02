@@ -8,6 +8,7 @@ from typing import Optional, Dict, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 import wandb
 
@@ -53,6 +54,10 @@ class SingleAgentArgs:
     """penalty for not reaching target within expiry_steps"""
     reward_decay_factor: float = 0.0
     """reward decay based on relative target count (0.0 = no decay)"""
+    urgency_weighted_scalarization: bool = False
+    """weight dense per-target rewards by normalized inverse time-to-live"""
+    use_target_priorities: bool = True
+    """include sampled target priorities in observations and completion rewards"""
     moving_targets: bool = False
     """whether to use moving targets variant"""
     direction_change_prob: float = 0.1
@@ -63,6 +68,36 @@ class SingleAgentArgs:
     """whether to shape reward toward nearest unreached target instead of summing over all"""
     nearest_expiry_shaping: bool = False
     """whether to shape reward toward the unreached target nearest to expiry instead of summing over all"""
+    battery_capacity: Optional[int] = None
+    """shared robot battery capacity; None disables recharge mechanics"""
+    recharge_station_positions: Optional[Tuple[Tuple[int, int], ...]] = None
+    """fixed recharge-station (row, col) positions"""
+    moving_recharge_stations: bool = False
+    """whether recharge stations follow independent stochastic random walks"""
+    recharge_station_direction_change_prob: float = 0.1
+    """probability of changing station direction at each movement"""
+    recharge_station_move_interval: int = 5
+    """environment steps between recharge-station movements"""
+    movement_energy_cost: int = 1
+    """battery units consumed by each successful movement"""
+    battery_depletion_penalty: float = 0.0
+    """penalty applied when depletion triggers a tow"""
+    charging_low_battery_threshold: int = 20
+    """battery threshold used to scale assisted charging rewards"""
+    charging_distance_reward_scale: float = 0.0
+    """reserve-aware reward scale for progress toward a recharge station"""
+    charging_recharge_bonus: float = 0.0
+    """assisted reward for recharging below the low-battery threshold"""
+    charging_depletion_penalty: float = 0.0
+    """additional assisted penalty when the battery depletes"""
+    charging_activation_margin: Optional[int] = None
+    """activate charging support when reserve is within this margin"""
+    charging_bc_updates: int = 0
+    """number of station-navigation behavior-cloning updates before PPO"""
+    charging_bc_batch_size: int = 4096
+    """number of synthetic unsafe-reserve observations per BC update"""
+    charging_bc_learning_rate: float = 3e-3
+    """learning rate for charging navigation behavior cloning"""
 
     # Network architecture
     actor_hidden_sizes: Tuple[int, ...] = (128, 128, 128)
@@ -146,11 +181,15 @@ class SingleAgent(nn.Module):
         target_embed_dim: int = 64,
         target_encoder_hidden_sizes=None,
         include_target_reached: bool = True,
+        include_target_priority: bool = True,
+        energy_feature_dim: int = 0,
     ):
         super().__init__()
         self.use_target_attention_pooling = use_target_attention_pooling
         self.include_target_reached = include_target_reached
+        self.include_target_priority = include_target_priority
         self.num_targets = num_targets
+        self.energy_feature_dim = energy_feature_dim
 
         actor_sizes = list(actor_hidden_sizes) if actor_hidden_sizes is not None else [128, 128, 128]
         critic_sizes = list(critic_hidden_sizes) if critic_hidden_sizes is not None else [256, 256, 256]
@@ -158,13 +197,17 @@ class SingleAgent(nn.Module):
         if self.use_target_attention_pooling:
             encoder_sizes = target_encoder_hidden_sizes if target_encoder_hidden_sizes is not None else (64, 64)
             # Single-agent has an extra relative_count feature compared to multi-agent
-            target_feat_dim = 8 if self.include_target_reached else 7
+            target_feat_dim = (
+                7 if self.include_target_reached else 6
+            ) + int(self.include_target_priority)
             self.target_pool = MaskedAttentionPooling(
                 input_dim=target_feat_dim,
                 embed_dim=target_embed_dim,
                 hidden_sizes=encoder_sizes,
             )
-            self.encoded_obs_dim = 3 + target_feat_dim + target_embed_dim  # agent_pos + window + own + pooled
+            self.encoded_obs_dim = (
+                3 + self.energy_feature_dim + target_feat_dim + target_embed_dim
+            )
         else:
             self.encoded_obs_dim = obs_dim
 
@@ -197,48 +240,48 @@ class SingleAgent(nn.Module):
 
         T = self.num_targets
         agent_pos = x[:, :2]  # (B, 2)
+        energy_features = (
+            x[:, -self.energy_feature_dim:]
+            if self.energy_feature_dim > 0
+            else x[:, :0]
+        )
 
+        cursor = 2
+        target_pos = x[:, cursor:cursor + 2 * T].reshape(-1, T, 2)
+        cursor += 2 * T
+        target_parts = [target_pos, target_pos - agent_pos.unsqueeze(1)]
         if self.include_target_reached:
-            # [agent_pos(2), target_pos(2*T), reached(T), counters(T), priorities(T), window(1), counts(T)]
-            target_pos = x[:, 2:2 + 2 * T].reshape(-1, T, 2)
-            targets_reached = x[:, 2 + 2 * T:2 + 3 * T].reshape(-1, T, 1)
-            target_counters = x[:, 2 + 3 * T:2 + 4 * T].reshape(-1, T, 1)
-            target_priorities = x[:, 2 + 4 * T:2 + 5 * T].reshape(-1, T, 1)
-            window_steps = x[:, 2 + 5 * T:2 + 5 * T + 1]
-            relative_counts = x[:, 2 + 5 * T + 1:2 + 6 * T + 1].reshape(-1, T, 1)
-            rel_pos = target_pos - agent_pos.unsqueeze(1)
-            target_feats = torch.cat(
-                [target_pos, rel_pos, targets_reached, target_counters, target_priorities, relative_counts],
-                dim=-1,
-            )
-        else:
-            # [agent_pos(2), target_pos(2*T), counters(T), priorities(T), window(1), counts(T)]
-            target_pos = x[:, 2:2 + 2 * T].reshape(-1, T, 2)
-            target_counters = x[:, 2 + 2 * T:2 + 3 * T].reshape(-1, T, 1)
-            target_priorities = x[:, 2 + 3 * T:2 + 4 * T].reshape(-1, T, 1)
-            window_steps = x[:, 2 + 4 * T:2 + 4 * T + 1]
-            relative_counts = x[:, 2 + 4 * T + 1:2 + 5 * T + 1].reshape(-1, T, 1)
-            rel_pos = target_pos - agent_pos.unsqueeze(1)
-            target_feats = torch.cat(
-                [target_pos, rel_pos, target_counters, target_priorities, relative_counts],
-                dim=-1,
-            )
+            target_parts.append(x[:, cursor:cursor + T].reshape(-1, T, 1))
+            cursor += T
+        target_parts.append(x[:, cursor:cursor + T].reshape(-1, T, 1))
+        cursor += T
+        if self.include_target_priority:
+            target_parts.append(x[:, cursor:cursor + T].reshape(-1, T, 1))
+            cursor += T
+        window_steps = x[:, cursor:cursor + 1]
+        cursor += 1
+        target_parts.append(x[:, cursor:cursor + T].reshape(-1, T, 1))
+        target_feats = torch.cat(target_parts, dim=-1)
 
         pooled = self.target_pool(target_feats)          # (B, embed_dim)
         own_feats = target_feats[:, 0, :]               # (B, target_feat_dim)
-        return torch.cat([agent_pos, window_steps, own_feats, pooled], dim=-1)
+        return torch.cat(
+            [agent_pos, energy_features, window_steps, own_feats, pooled], dim=-1
+        )
 
     def get_value(self, x):
         """Get value estimate for given observation."""
         return self.critic(self._encode_obs(x))
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_value(self, x, action=None, deterministic=False):
         """
         Get action and value for given observation.
 
         Args:
             x: Observation tensor (can be batched)
             action: If provided, compute log prob for this action. Otherwise sample new action.
+            deterministic: When no action is provided, choose the highest-logit
+                action for evaluation instead of sampling.
 
         Returns:
             action: Sampled or provided action (direction only)
@@ -250,11 +293,120 @@ class SingleAgent(nn.Module):
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
-            action = probs.sample()
+            action = logits.argmax(dim=-1) if deterministic else probs.sample()
         log_prob = probs.log_prob(action)
         entropy = probs.entropy()
         value = self.critic(x)
         return action, log_prob, entropy, value
+
+
+def pretrain_single_agent_charging_navigation(
+    agent: SingleAgent,
+    env: BiddingGridworld,
+    updates: int,
+    batch_size: int,
+    learning_rate: float,
+    activation_margin: int,
+    seed: int,
+) -> Dict:
+    """Clone nearest-station directions on unsafe-reserve observations."""
+    if updates < 0:
+        raise ValueError("charging_bc_updates must be non-negative")
+    if batch_size <= 0:
+        raise ValueError("charging_bc_batch_size must be positive")
+    if learning_rate <= 0:
+        raise ValueError("charging_bc_learning_rate must be positive")
+    if activation_margin < 0:
+        raise ValueError("charging activation margin must be non-negative")
+    if updates == 0:
+        return {"updates": 0}
+    if not env.battery_enabled:
+        raise ValueError("charging navigation BC requires battery_capacity")
+
+    bc_env = BiddingGridworld(
+        env.config,
+        num_envs=batch_size,
+        device=env.device,
+        seed=seed,
+    )
+    parameters = list(agent.actor.parameters())
+    if agent.use_target_attention_pooling:
+        parameters += list(agent.target_pool.parameters())
+    optimizer = optim.Adam(parameters, lr=learning_rate, eps=1e-5)
+    final_loss = 0.0
+    final_accuracy = 0.0
+    final_active_fraction = 0.0
+
+    try:
+        for _ in range(updates):
+            bc_env.reset()
+            bc_env.agent_pos = torch.randint(
+                0,
+                env.config.grid_size,
+                (batch_size, 2),
+                generator=bc_env.gen,
+                device=env.device,
+                dtype=torch.int32,
+            )
+            bc_env.battery_level = torch.randint(
+                1,
+                int(env.config.battery_capacity) + 1,
+                (batch_size,),
+                generator=bc_env.gen,
+                device=env.device,
+                dtype=torch.int32,
+            )
+            if env.config.moving_recharge_stations:
+                bc_env.current_recharge_station_pos = torch.randint(
+                    0,
+                    env.config.grid_size,
+                    (batch_size, bc_env.num_recharge_stations, 2),
+                    generator=bc_env.gen,
+                    device=env.device,
+                    dtype=torch.int32,
+                )
+
+            energy_required = bc_env._nearest_recharge_energy_requirement(
+                bc_env.agent_pos
+            )
+            active = (
+                bc_env.battery_level <= energy_required + activation_margin
+            ) & (energy_required > 0)
+            obs = bc_env._get_observation()
+            targets = bc_env._direction_to_nearest_recharge_station(
+                bc_env.agent_pos
+            )
+            logits = agent.actor(agent._encode_obs(obs))
+            if not torch.any(active):
+                continue
+            loss = F.cross_entropy(logits[active], targets[active])
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+            with torch.no_grad():
+                final_loss = float(loss.item())
+                final_accuracy = float(
+                    (logits[active].argmax(dim=-1) == targets[active])
+                    .to(torch.float32)
+                    .mean()
+                    .item()
+                )
+                final_active_fraction = float(
+                    active.to(torch.float32).mean().item()
+                )
+    finally:
+        bc_env.close()
+
+    return {
+        "updates": updates,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "activation_margin": activation_margin,
+        "final_loss": final_loss,
+        "final_direction_accuracy": final_accuracy,
+        "final_active_fraction": final_active_fraction,
+    }
 
 
 class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
@@ -272,6 +424,7 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
         """
         super().__init__(args, callbacks=callbacks)
         self.obs_dim = None
+        self.charging_bc_report = None
 
     def setup(self):
         """Setup environments, agent, and optimizer."""
@@ -295,8 +448,34 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
             visible_targets=None,
             single_agent_mode=True,
             reward_decay_factor=self.args.reward_decay_factor,
+            urgency_weighted_scalarization=(
+                self.args.urgency_weighted_scalarization
+            ),
+            use_target_priorities=self.args.use_target_priorities,
             nearest_target_shaping=self.args.nearest_target_shaping,
             nearest_expiry_shaping=self.args.nearest_expiry_shaping,
+            battery_capacity=self.args.battery_capacity,
+            recharge_station_positions=self.args.recharge_station_positions,
+            moving_recharge_stations=self.args.moving_recharge_stations,
+            recharge_station_direction_change_prob=(
+                self.args.recharge_station_direction_change_prob
+            ),
+            recharge_station_move_interval=(
+                self.args.recharge_station_move_interval
+            ),
+            movement_energy_cost=self.args.movement_energy_cost,
+            battery_depletion_penalty=self.args.battery_depletion_penalty,
+            charging_low_battery_threshold=(
+                self.args.charging_low_battery_threshold
+            ),
+            charging_distance_reward_scale=(
+                self.args.charging_distance_reward_scale
+            ),
+            charging_recharge_bonus=self.args.charging_recharge_bonus,
+            charging_depletion_penalty=(
+                self.args.charging_depletion_penalty
+            ),
+            charging_activation_margin=self.args.charging_activation_margin,
         )
         self.envs = BiddingGridworld(
             env_config,
@@ -317,9 +496,33 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
             target_embed_dim=self.args.target_embed_dim,
             target_encoder_hidden_sizes=self.args.target_encoder_hidden_sizes,
             include_target_reached=include_reached,
+            include_target_priority=self.args.use_target_priorities,
+            energy_feature_dim=self.envs.energy_feature_dim,
         ).to(self.device)
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.args.learning_rate, eps=1e-5)
+
+        activation_margin = (
+            0
+            if self.args.charging_activation_margin is None
+            else self.args.charging_activation_margin
+        )
+        self.charging_bc_report = pretrain_single_agent_charging_navigation(
+            self.agent,
+            self.envs,
+            updates=self.args.charging_bc_updates,
+            batch_size=self.args.charging_bc_batch_size,
+            learning_rate=self.args.charging_bc_learning_rate,
+            activation_margin=activation_margin,
+            seed=self.args.seed + 100_000,
+        )
+        if self.args.charging_bc_updates:
+            print(
+                "   Charging navigation BC: "
+                f"updates={self.args.charging_bc_updates}, "
+                "direction_accuracy="
+                f"{self.charging_bc_report['final_direction_accuracy']:.3f}"
+            )
 
         self.args.batch_size = int(self.args.num_envs * self.args.num_steps)
         self.args.minibatch_size = int(self.args.batch_size // self.args.num_minibatches)
@@ -331,11 +534,18 @@ class SingleAgentPPOTrainer(SingleAgentPPOTrainerBase):
         expected_dim = 2 + 2 * self.args.num_targets + 3 * self.args.num_targets + 1
         if include_reached:
             expected_dim += self.args.num_targets
+        if not self.args.use_target_priorities:
+            expected_dim -= self.args.num_targets
+        expected_dim += self.envs.energy_feature_dim
 
         print(f"🚀 Single-Agent PPO Trainer initialized")
         print(f"   Device: {self.device}")
         print(f"   Observation dim: {self.obs_dim} (expected: {expected_dim})")
         print(f"   Includes relative target counts (count - min_count) for fair pursuit")
+        print(
+            "   Urgency-weighted scalarization: "
+            f"{self.args.urgency_weighted_scalarization}"
+        )
         print(f"   Target attention pooling: {self.args.use_target_attention_pooling}")
         if self.args.use_target_attention_pooling:
             print(f"   Target embed dim: {self.args.target_embed_dim}")

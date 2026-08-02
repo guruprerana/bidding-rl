@@ -135,6 +135,10 @@ class GridworldDWNArgs:
     direction_change_prob: float = 0.1
     target_move_interval: int = 1
     visible_targets: Optional[int] = None
+    battery_capacity: Optional[int] = None
+    recharge_station_positions: Optional[tuple[tuple[int, int], ...]] = None
+    movement_energy_cost: int = 1
+    battery_depletion_penalty: float = 0.0
 
     # DWN core
     gamma: float = 0.99
@@ -240,6 +244,10 @@ class GridworldDWNTrainer:
             window_penalty=0.0,
             visible_targets=args.visible_targets,
             single_agent_mode=False,
+            battery_capacity=args.battery_capacity,
+            recharge_station_positions=args.recharge_station_positions,
+            movement_energy_cost=args.movement_energy_cost,
+            battery_depletion_penalty=args.battery_depletion_penalty,
         )
         self.envs = BiddingGridworld(
             env_config,

@@ -37,10 +37,36 @@ class BiddingGridworldConfig:
     visible_targets: Optional[int]
     single_agent_mode: bool = False
     reward_decay_factor: float = 0.0
+    urgency_weighted_scalarization: bool = False
+    use_target_priorities: bool = True
     bidding_mechanism: str = "all_pay"
     nearest_target_shaping: bool = False
     nearest_expiry_shaping: bool = False
+    programmatic_bidding: str = "none"
+    # "none" | "nearest_target". The latter uses a one-hot bid from the
+    # bidder whose assigned target is currently closest to the shared body.
     # "all_pay" | "winner_pays" | "winner_pays_others_reward"
+    battery_capacity: Optional[int] = None
+    recharge_station_positions: Optional[Tuple[Tuple[int, int], ...]] = None
+    moving_recharge_stations: bool = False
+    recharge_station_direction_change_prob: float = 0.1
+    recharge_station_move_interval: int = 5
+    movement_energy_cost: int = 1
+    battery_depletion_penalty: float = 0.0
+    charging_agent_enabled: bool = False
+    charging_low_battery_threshold: int = 20
+    charging_distance_reward_scale: float = 0.0
+    charging_recharge_bonus: float = 0.0
+    charging_depletion_penalty: float = 0.0
+    charging_high_battery_control_penalty: float = 0.0
+    feeder_low_battery_control_penalty: float = 0.0
+    charging_low_battery_bid_boost: int = 0
+    charging_bid_boost_threshold: Optional[int] = None
+    charging_activation_margin: Optional[int] = None
+    charging_release_window_on_recharge: bool = False
+    charging_programmatic_navigation: bool = False
+    charging_reserve_features_enabled: bool = False
+    charging_nearest_station_features_enabled: bool = False
 
 
 class BiddingGridworld:
@@ -62,6 +88,10 @@ class BiddingGridworld:
         self.num_envs = num_envs
         self.grid_size = config.grid_size
         self.num_agents = config.num_agents
+        self.num_bidders = config.num_agents + int(config.charging_agent_enabled)
+        self.charging_agent_idx = (
+            config.num_agents if config.charging_agent_enabled else None
+        )
         self.window_bidding = config.window_bidding
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.gen = torch.Generator(device=self.device)
@@ -79,10 +109,116 @@ class BiddingGridworld:
         self.window_steps_remaining = None
         self.step_count = None
         self.previous_distances = None
+        self.battery_level = None
 
         # Moving-target state
         self.target_directions = None
         self.target_move_counters = None
+
+        # Per-environment recharge-station state. The fixed template remains in
+        # recharge_station_pos for checkpoint/config compatibility.
+        self.current_recharge_station_pos = None
+        self.recharge_station_directions = None
+        self.recharge_station_move_counters = None
+
+        self.battery_enabled = config.battery_capacity is not None
+        self.single_agent_charging_support_enabled = (
+            config.single_agent_mode
+            and (
+                config.charging_distance_reward_scale > 0
+                or config.charging_recharge_bonus > 0
+                or config.charging_depletion_penalty > 0
+            )
+        )
+        self.recharge_station_pos = self._build_recharge_station_positions()
+        self.num_recharge_stations = int(self.recharge_station_pos.shape[0])
+        self.energy_feature_dim = 1 + 2 * self.num_recharge_stations if self.battery_enabled else 0
+        self.charging_reserve_feature_dim = (
+            2 if config.charging_reserve_features_enabled else 0
+        )
+        self.charging_nearest_station_feature_dim = (
+            2 if config.charging_nearest_station_features_enabled else 0
+        )
+        self.charging_obs_dim = (
+            5
+            + 3 * self.num_recharge_stations
+            + self.charging_reserve_feature_dim
+            + self.charging_nearest_station_feature_dim
+        )
+        if config.charging_agent_enabled and not self.battery_enabled:
+            raise ValueError("charging_agent_enabled requires battery_capacity")
+        if self.single_agent_charging_support_enabled and not self.battery_enabled:
+            raise ValueError(
+                "single-agent charging support requires battery_capacity"
+            )
+        if config.action_window < 1:
+            raise ValueError("action_window must be positive")
+        if config.programmatic_bidding not in {"none", "nearest_target"}:
+            raise ValueError(
+                "programmatic_bidding must be 'none' or 'nearest_target'"
+            )
+        if (
+            config.programmatic_bidding != "none"
+            and config.bid_upper_bound < 1
+        ):
+            raise ValueError(
+                "programmatic_bidding requires bid_upper_bound >= 1"
+            )
+        if config.urgency_weighted_scalarization:
+            if not config.single_agent_mode:
+                raise ValueError(
+                    "urgency_weighted_scalarization requires single_agent_mode"
+                )
+            if config.target_expiry_steps is None:
+                raise ValueError(
+                    "urgency_weighted_scalarization requires target_expiry_steps"
+                )
+            if config.nearest_target_shaping or config.nearest_expiry_shaping:
+                raise ValueError(
+                    "urgency-weighted scalarization uses dense per-target shaping "
+                    "and is incompatible with nearest-target shaping"
+                )
+        if (
+            (config.charging_agent_enabled or self.single_agent_charging_support_enabled)
+            and not 0 < config.charging_low_battery_threshold <= int(config.battery_capacity)
+        ):
+            raise ValueError(
+                "charging_low_battery_threshold must be in [1, battery_capacity]"
+            )
+        if config.charging_low_battery_bid_boost < 0:
+            raise ValueError("charging_low_battery_bid_boost must be non-negative")
+        if (
+            config.charging_bid_boost_threshold is not None
+            and (
+                config.battery_capacity is None
+                or not 0
+                <= config.charging_bid_boost_threshold
+                <= int(config.battery_capacity)
+            )
+        ):
+            raise ValueError(
+                "charging_bid_boost_threshold must be in "
+                "[0, battery_capacity]"
+            )
+        if config.feeder_low_battery_control_penalty < 0:
+            raise ValueError(
+                "feeder_low_battery_control_penalty must be non-negative"
+            )
+        if (
+            config.charging_activation_margin is not None
+            and config.charging_activation_margin < 0
+        ):
+            raise ValueError("charging_activation_margin must be non-negative")
+        if not 0.0 <= config.recharge_station_direction_change_prob <= 1.0:
+            raise ValueError(
+                "recharge_station_direction_change_prob must be in [0, 1]"
+            )
+        if config.recharge_station_move_interval < 1:
+            raise ValueError("recharge_station_move_interval must be positive")
+        if config.moving_recharge_stations and not self.battery_enabled:
+            raise ValueError(
+                "moving_recharge_stations requires battery_capacity"
+            )
 
         # Precompute position cache for reset sampling (exclude (0,0))
         self._reset_positions = self._build_reset_positions()
@@ -105,19 +241,34 @@ class BiddingGridworld:
 
         include_reached = not self.config.moving_targets
         if self.config.single_agent_mode:
-            base_dim = 3 + (6 if include_reached else 5) * self.config.num_agents
+            base_dim = (
+                3
+                + (6 if include_reached else 5) * self.config.num_agents
+                + self.energy_feature_dim
+            )
+            if not self.config.use_target_priorities:
+                base_dim -= self.config.num_agents
             self.obs_dim = base_dim
             self.obs_shape = (self.num_envs, self.obs_dim)
             self.per_agent_obs_dim = None
         else:
             if self.config.visible_targets is None:
-                self.per_agent_obs_dim = 3 + (5 if include_reached else 4) * self.config.num_agents
+                target_block_width = (5 if include_reached else 4) - int(
+                    not self.config.use_target_priorities
+                )
+                self.per_agent_obs_dim = (
+                    3
+                    + target_block_width * self.config.num_agents
+                    + self.energy_feature_dim
+                )
             else:
                 self.per_agent_obs_dim = (
                     8 + 4 * self.config.visible_targets
                     if include_reached
                     else 7 + 3 * self.config.visible_targets
-                )
+                ) + self.energy_feature_dim
+                if not self.config.use_target_priorities:
+                    self.per_agent_obs_dim -= self.config.visible_targets + 1
             self.obs_dim = None
             self.obs_shape = (self.num_envs, self.config.num_agents, self.per_agent_obs_dim)
 
@@ -142,6 +293,36 @@ class BiddingGridworld:
         self.targets_reached_count = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.int32)
         self.target_counters = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.int32)
         self.target_priorities = self._sample_target_priorities()
+        if self.battery_enabled:
+            self.battery_level = torch.full(
+                (self.num_envs,),
+                int(cfg.battery_capacity),
+                device=device,
+                dtype=torch.int32,
+            )
+            self.current_recharge_station_pos = (
+                self.recharge_station_pos.unsqueeze(0)
+                .expand(self.num_envs, -1, -1)
+                .clone()
+            )
+            self.recharge_station_directions = torch.randint(
+                0,
+                4,
+                (self.num_envs, self.num_recharge_stations),
+                generator=self.gen,
+                device=device,
+                dtype=torch.int32,
+            )
+            self.recharge_station_move_counters = torch.zeros(
+                (self.num_envs, self.num_recharge_stations),
+                device=device,
+                dtype=torch.int32,
+            )
+        else:
+            self.battery_level = None
+            self.current_recharge_station_pos = None
+            self.recharge_station_directions = None
+            self.recharge_station_move_counters = None
         self.window_agent = torch.full((self.num_envs,), -1, device=device, dtype=torch.int32)
         self.window_steps_remaining = torch.zeros((self.num_envs,), device=device, dtype=torch.int32)
         self.step_count = torch.zeros((self.num_envs,), device=device, dtype=torch.int32)
@@ -163,11 +344,18 @@ class BiddingGridworld:
         Step the environment with batched actions.
 
         action shape:
-        - multi-agent: (num_envs, num_agents, 2) or (num_envs, num_agents, 3) if window_bidding
+        - multi-agent: (num_envs, num_bidders, 2) or (num_envs, num_bidders, 3)
+          if window_bidding. num_bidders includes the optional charging agent.
         - single-agent: (num_envs,) or (num_envs, 1)
         """
         cfg = self.config
         device = self.device
+
+        urgency_weights = (
+            self._urgency_weights()
+            if cfg.urgency_weighted_scalarization
+            else None
+        )
 
         self.step_count = self.step_count + 1
 
@@ -181,7 +369,74 @@ class BiddingGridworld:
         else:
             action = action.to(torch.int64)
             action_dir = action[..., 0]
+            programmatic_charging_direction = None
+            if (
+                cfg.charging_agent_enabled
+                and cfg.charging_programmatic_navigation
+            ):
+                action_dir = action_dir.clone()
+                programmatic_charging_direction = (
+                    self._direction_to_nearest_recharge_station(
+                        self.agent_pos
+                    )
+                )
+                action_dir[:, self.charging_agent_idx] = (
+                    programmatic_charging_direction
+                )
             bids = action[..., 1]
+            if cfg.programmatic_bidding == "nearest_target":
+                nearest_target = self._compute_distances().argmin(dim=1)
+                bids = torch.zeros_like(bids)
+                bids.scatter_(
+                    1,
+                    nearest_target.unsqueeze(1),
+                    torch.ones(
+                        (self.num_envs, 1),
+                        device=device,
+                        dtype=bids.dtype,
+                    ),
+                )
+            effective_bids = bids
+            charging_bid_active = (
+                torch.ones(
+                    self.num_envs, device=device, dtype=torch.bool
+                )
+                if cfg.charging_agent_enabled
+                else None
+            )
+            if (
+                cfg.charging_agent_enabled
+                and cfg.charging_activation_margin is not None
+            ):
+                charging_bid_active = self.battery_level <= (
+                    self._nearest_recharge_energy_requirement(self.agent_pos)
+                    + cfg.charging_activation_margin
+                )
+                effective_bids = bids.clone()
+                effective_bids[:, self.charging_agent_idx] = torch.where(
+                    charging_bid_active,
+                    effective_bids[:, self.charging_agent_idx],
+                    torch.zeros_like(effective_bids[:, self.charging_agent_idx]),
+                )
+            if (
+                cfg.charging_agent_enabled
+                and cfg.charging_low_battery_bid_boost > 0
+            ):
+                if effective_bids is bids:
+                    effective_bids = bids.clone()
+                boost_threshold = (
+                    cfg.charging_low_battery_threshold
+                    if cfg.charging_bid_boost_threshold is None
+                    else cfg.charging_bid_boost_threshold
+                )
+                boost_active = (
+                    self.battery_level
+                    <= boost_threshold
+                ) & (effective_bids[:, self.charging_agent_idx] > 0)
+                effective_bids[:, self.charging_agent_idx] += (
+                    boost_active.to(effective_bids.dtype)
+                    * cfg.charging_low_battery_bid_boost
+                )
             action_window = action[..., 2] if cfg.window_bidding else None
 
             in_window = self.window_steps_remaining > 0
@@ -193,10 +448,12 @@ class BiddingGridworld:
                     in_window, self.window_steps_remaining - 1, self.window_steps_remaining
                 )
 
-            max_bid = bids.max(dim=1).values
+            max_bid = effective_bids.max(dim=1).values
             has_bid = (max_bid > 0) | (cfg.bid_upper_bound == 0)
-            winners_mask = bids == max_bid.unsqueeze(1)
-            rand = torch.rand(bids.shape, device=device, generator=self.gen)
+            winners_mask = effective_bids == max_bid.unsqueeze(1)
+            rand = torch.rand(
+                effective_bids.shape, device=device, generator=self.gen
+            )
             rand = torch.where(winners_mask, rand, torch.full_like(rand, -1.0))
             winner = rand.argmax(dim=1).to(torch.int32)
             winner_long = winner.to(torch.int64)
@@ -253,17 +510,91 @@ class BiddingGridworld:
         else:
             move_dir = action_dir.gather(1, winning_agent.clamp(min=0).to(torch.int64).view(-1, 1)).squeeze(1)
 
-        new_pos = self._move_position(self.agent_pos, move_dir)
+        previous_agent_pos = self.agent_pos
+        battery_before_step = (
+            self.battery_level.clone() if self.battery_enabled else None
+        )
+        previous_station_distance = (
+            self._nearest_recharge_distance(previous_agent_pos)
+            if (
+                self.config.charging_agent_enabled
+                or self.single_agent_charging_support_enabled
+            )
+            else None
+        )
+        if cfg.charging_agent_enabled:
+            optimal_charging_direction = (
+                self._direction_to_nearest_recharge_station(
+                    previous_agent_pos
+                )
+            )
+            charging_navigation_active = (
+                (winning_agent == self.charging_agent_idx)
+                & (previous_station_distance > 0)
+            )
+            charging_direction_optimal = charging_navigation_active & (
+                action_dir[:, self.charging_agent_idx]
+                == optimal_charging_direction
+            )
+        else:
+            optimal_charging_direction = None
+            charging_navigation_active = None
+            charging_direction_optimal = None
+        new_pos = self._move_position(previous_agent_pos, move_dir)
         self.agent_pos = torch.where(move_mask.unsqueeze(-1), new_pos, self.agent_pos)
+
+        if self.battery_enabled:
+            moved = move_mask & (self.agent_pos != previous_agent_pos).any(dim=-1)
+            energy_used = moved.to(torch.int32) * int(cfg.movement_energy_cost)
+            self.battery_level = torch.clamp(self.battery_level - energy_used, min=0)
+            battery_before_recharge = self.battery_level.clone()
+            at_recharge_station = self._at_recharge_station(self.agent_pos)
+            battery_recharged = at_recharge_station & (
+                self.battery_level < int(cfg.battery_capacity)
+            )
+            self.battery_level = torch.where(
+                at_recharge_station,
+                torch.full_like(self.battery_level, int(cfg.battery_capacity)),
+                self.battery_level,
+            )
+            battery_depleted = (self.battery_level <= 0) & (~at_recharge_station)
+        else:
+            battery_before_recharge = None
+            at_recharge_station = torch.zeros(
+                self.num_envs, device=device, dtype=torch.bool
+            )
+            battery_depleted = torch.zeros(
+                self.num_envs, device=device, dtype=torch.bool
+            )
+            battery_recharged = torch.zeros(
+                self.num_envs, device=device, dtype=torch.bool
+            )
 
         # Targets reached
         targets_just_reached = self._positions_equal(self.agent_pos, self.target_pos) & (self.targets_reached == 0)
+        effective_target_priorities = (
+            self.target_priorities
+            if cfg.use_target_priorities
+            else torch.ones_like(self.target_priorities)
+        )
         target_priorities_just_reached = (
-            self.target_priorities * targets_just_reached.to(self.target_priorities.dtype)
+            effective_target_priorities
+            * targets_just_reached.to(effective_target_priorities.dtype)
         )
         self.targets_reached = torch.where(targets_just_reached, torch.ones_like(self.targets_reached), self.targets_reached)
         self.targets_reached_count = self.targets_reached_count + targets_just_reached.to(torch.int32)
         self.target_counters = torch.where(targets_just_reached, torch.zeros_like(self.target_counters), self.target_counters)
+
+        if torch.any(battery_depleted):
+            tow_pos = self._nearest_recharge_station(self.agent_pos)
+            self.agent_pos = torch.where(
+                battery_depleted.unsqueeze(-1), tow_pos, self.agent_pos
+            )
+            self.battery_level = torch.where(
+                battery_depleted,
+                torch.full_like(self.battery_level, int(cfg.battery_capacity)),
+                self.battery_level,
+            )
 
         # Target expiry
         if cfg.target_expiry_steps is not None:
@@ -315,20 +646,74 @@ class BiddingGridworld:
                 rewards = rewards + (
                     targets_just_reached.to(torch.float32)
                     * cfg.target_reward
-                    * self.target_priorities.to(torch.float32)
+                    * effective_target_priorities.to(torch.float32)
                     * decay
                 ).sum(dim=1)
             else:
                 rewards = rewards + (
                     targets_just_reached.to(torch.float32)
                     * cfg.target_reward
-                    * self.target_priorities.to(torch.float32)
+                    * effective_target_priorities.to(torch.float32)
                 ).sum(dim=1)
 
             if cfg.target_expiry_penalty > 0:
                 rewards = rewards - cfg.target_expiry_penalty * targets_expired.to(torch.float32).sum(dim=1)
+            if cfg.battery_depletion_penalty > 0:
+                rewards = rewards - cfg.battery_depletion_penalty * battery_depleted.to(torch.float32)
+            if self.single_agent_charging_support_enabled:
+                current_station_distance = self._nearest_recharge_distance(
+                    self.agent_pos
+                )
+                activation_margin = (
+                    0
+                    if cfg.charging_activation_margin is None
+                    else cfg.charging_activation_margin
+                )
+                charging_active = battery_before_step <= (
+                    previous_station_distance * int(cfg.movement_energy_cost)
+                    + activation_margin
+                )
+                threshold = float(cfg.charging_low_battery_threshold)
+                urgency = torch.clamp(
+                    (threshold - battery_before_step.to(torch.float32))
+                    / threshold,
+                    min=0.0,
+                    max=1.0,
+                )
+                station_progress = (
+                    previous_station_distance - current_station_distance
+                ).to(torch.float32)
+                rewards = rewards + (
+                    cfg.charging_distance_reward_scale
+                    * urgency
+                    * station_progress
+                    * charging_active.to(torch.float32)
+                )
+                rewards = rewards + (
+                    cfg.charging_recharge_bonus
+                    * (
+                        (
+                            int(cfg.battery_capacity)
+                            - battery_before_recharge
+                        ).to(torch.float32)
+                        / float(cfg.battery_capacity)
+                    )
+                    * battery_recharged.to(torch.float32)
+                    * (
+                        battery_before_recharge
+                        <= cfg.charging_low_battery_threshold
+                    ).to(torch.float32)
+                )
+                rewards = rewards - (
+                    cfg.charging_depletion_penalty
+                    * battery_depleted.to(torch.float32)
+                )
         else:
-            rewards = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.float32)
+            rewards = torch.zeros(
+                (self.num_envs, self.num_bidders),
+                device=device,
+                dtype=torch.float32,
+            )
             bid_net_effect = torch.zeros_like(rewards)
             if torch.any(apply_bid_penalty) and bids is not None:
                 bids_f = bids.to(torch.float32)
@@ -340,7 +725,11 @@ class BiddingGridworld:
                     bid_net_effect = bid_net_effect - effect
                 else:
                     # Build winner mask: (num_envs, num_agents), 1.0 only at winning agent index
-                    winner_mask = torch.zeros((self.num_envs, cfg.num_agents), device=device, dtype=torch.float32)
+                    winner_mask = torch.zeros(
+                        (self.num_envs, self.num_bidders),
+                        device=device,
+                        dtype=torch.float32,
+                    )
                     valid_win = winning_agent >= 0
                     if torch.any(valid_win):
                         idx = winning_agent.clamp(min=0).long().view(-1, 1)
@@ -369,15 +758,119 @@ class BiddingGridworld:
 
             if cfg.distance_reward_scale > 0:
                 dist_improve = (self.previous_distances - current_distances).to(torch.float32)
-                rewards = rewards + cfg.distance_reward_scale * dist_improve * (self.targets_reached == 0).to(torch.float32)
+                rewards[:, :cfg.num_agents] += (
+                    cfg.distance_reward_scale
+                    * dist_improve
+                    * (self.targets_reached == 0).to(torch.float32)
+                )
 
-            rewards = rewards + (
+            rewards[:, :cfg.num_agents] += (
                 cfg.target_reward
-                * self.target_priorities.to(torch.float32)
+                * effective_target_priorities.to(torch.float32)
                 * targets_just_reached.to(torch.float32)
             )
             if cfg.target_expiry_penalty > 0:
-                rewards = rewards - cfg.target_expiry_penalty * targets_expired.to(torch.float32)
+                rewards[:, :cfg.num_agents] -= (
+                    cfg.target_expiry_penalty * targets_expired.to(torch.float32)
+                )
+            if cfg.battery_depletion_penalty > 0 and torch.any(battery_depleted):
+                valid_controller = battery_depleted & (winning_agent >= 0)
+                if torch.any(valid_controller):
+                    controller_idx = winning_agent.clamp(min=0).to(torch.int64).view(-1, 1)
+                    penalty = (
+                        -cfg.battery_depletion_penalty
+                        * valid_controller.to(torch.float32)
+                    ).view(-1, 1)
+                    rewards = rewards.scatter_add(1, controller_idx, penalty)
+
+            if cfg.charging_agent_enabled:
+                charging_controls = winning_agent == self.charging_agent_idx
+                feeder_controls = (
+                    (winning_agent >= 0)
+                    & (winning_agent < cfg.num_agents)
+                )
+                feeder_charging_conflict = (
+                    feeder_controls & charging_bid_active
+                )
+                if (
+                    cfg.feeder_low_battery_control_penalty > 0
+                    and torch.any(feeder_charging_conflict)
+                ):
+                    feeder_idx = winning_agent.clamp(min=0).to(
+                        torch.int64
+                    ).view(-1, 1)
+                    feeder_penalty = (
+                        -cfg.feeder_low_battery_control_penalty
+                        * feeder_charging_conflict.to(torch.float32)
+                    ).view(-1, 1)
+                    rewards = rewards.scatter_add(
+                        1, feeder_idx, feeder_penalty
+                    )
+                threshold = float(cfg.charging_low_battery_threshold)
+                urgency = torch.clamp(
+                    (threshold - battery_before_step.to(torch.float32)) / threshold,
+                    min=0.0,
+                    max=1.0,
+                )
+                current_station_distance = self._nearest_recharge_distance(
+                    self.agent_pos
+                )
+                station_progress = (
+                    previous_station_distance - current_station_distance
+                ).to(torch.float32)
+                charging_reward = (
+                    cfg.charging_distance_reward_scale
+                    * urgency
+                    * station_progress
+                    * charging_controls.to(torch.float32)
+                )
+                charging_reward += (
+                    cfg.charging_recharge_bonus
+                    * (
+                        (
+                            int(cfg.battery_capacity)
+                            - battery_before_recharge
+                        ).to(torch.float32)
+                        / float(cfg.battery_capacity)
+                    )
+                    * battery_recharged.to(torch.float32)
+                    * (
+                        battery_before_recharge
+                        <= cfg.charging_low_battery_threshold
+                    ).to(torch.float32)
+                    * charging_controls.to(torch.float32)
+                )
+                charging_reward -= (
+                    cfg.charging_depletion_penalty
+                    * battery_depleted.to(torch.float32)
+                )
+                charging_reward -= (
+                    cfg.charging_high_battery_control_penalty
+                    * (
+                        battery_before_step
+                        > cfg.charging_low_battery_threshold
+                    ).to(torch.float32)
+                    * charging_controls.to(torch.float32)
+                )
+                rewards[:, self.charging_agent_idx] += charging_reward
+
+            if (
+                cfg.charging_agent_enabled
+                and cfg.charging_release_window_on_recharge
+            ):
+                release_charging_window = battery_recharged & (
+                    winning_agent == self.charging_agent_idx
+                )
+                self.window_steps_remaining = torch.where(
+                    release_charging_window,
+                    torch.zeros_like(self.window_steps_remaining),
+                    self.window_steps_remaining,
+                )
+                self.window_agent = torch.where(
+                    release_charging_window,
+                    torch.full_like(self.window_agent, -1),
+                    self.window_agent,
+                )
 
         # Per-objective (per-target) rewards for DWN and similar multi-objective methods
         if cfg.single_agent_mode:
@@ -392,17 +885,24 @@ class BiddingGridworld:
                 per_obj = per_obj + (
                     targets_just_reached.to(torch.float32)
                     * cfg.target_reward
-                    * self.target_priorities.to(torch.float32)
+                    * effective_target_priorities.to(torch.float32)
                     * decay
                 )
             else:
                 per_obj = per_obj + (
                     targets_just_reached.to(torch.float32)
                     * cfg.target_reward
-                    * self.target_priorities.to(torch.float32)
+                    * effective_target_priorities.to(torch.float32)
                 )
             if cfg.target_expiry_penalty > 0:
                 per_obj = per_obj - cfg.target_expiry_penalty * targets_expired.to(torch.float32)
+            if urgency_weights is not None:
+                rewards = (urgency_weights * per_obj).sum(dim=1)
+                if cfg.battery_depletion_penalty > 0:
+                    rewards = rewards - (
+                        cfg.battery_depletion_penalty
+                        * battery_depleted.to(torch.float32)
+                    )
 
         self.previous_distances = current_distances
 
@@ -415,23 +915,85 @@ class BiddingGridworld:
             terminated = all_targets_reached.to(torch.bool)
             truncated = (self.step_count >= cfg.max_steps) & (~terminated)
 
+        if cfg.moving_recharge_stations:
+            self._move_recharge_stations()
+
         obs = self._get_observation()
         info = {
             "winning_agent": winning_agent,
             "bids": bids,
+            "effective_bids": (
+                effective_bids if not cfg.single_agent_mode else None
+            ),
             "window_agent": self.window_agent,
             "window_steps_remaining": self.window_steps_remaining,
             "bid_penalty_applied": apply_bid_penalty,
             "targets_just_reached": targets_just_reached,
             "target_priorities_just_reached": target_priorities_just_reached,
             "targets_just_expired": targets_expired,
+            "battery_level": self.battery_level,
+            "battery_depleted": battery_depleted,
+            "battery_recharged": battery_recharged,
+            "at_recharge_station": at_recharge_station,
+            "recharge_station_positions": (
+                self.current_recharge_station_pos.clone()
+                if self.battery_enabled
+                else None
+            ),
+            "charging_agent_idx": self.charging_agent_idx,
+            "charging_bid_active": (
+                charging_bid_active if not cfg.single_agent_mode else None
+            ),
+            "programmatic_charging_direction": (
+                programmatic_charging_direction
+                if not cfg.single_agent_mode
+                else None
+            ),
+            "optimal_charging_direction": optimal_charging_direction,
+            "charging_navigation_active": charging_navigation_active,
+            "charging_direction_optimal": charging_direction_optimal,
         }
         if cfg.single_agent_mode:
             info["per_objective_rewards"] = per_obj
+            info["urgency_weights"] = urgency_weights
         else:
             info["is_bidding_round"] = ~in_window
-            info["reward_no_bid_sum"] = (rewards - bid_net_effect).sum(dim=1)
+            reward_without_bid = rewards - bid_net_effect
+            info["reward_no_bid_sum"] = reward_without_bid.sum(dim=1)
+            bid_policy_rewards = bid_net_effect.clone()
+            valid_controller = winning_agent >= 0
+            if torch.any(valid_controller):
+                controller_index = winning_agent.clamp(min=0).long().view(-1, 1)
+                controller_team_reward = (
+                    reward_without_bid.sum(dim=1)
+                    * valid_controller.to(torch.float32)
+                ).view(-1, 1)
+                bid_policy_rewards.scatter_add_(
+                    1, controller_index, controller_team_reward
+                )
+            info["bid_policy_controller_team_rewards"] = bid_policy_rewards
         return obs, rewards, terminated, truncated, info
+
+    def _urgency_weights(self) -> torch.Tensor:
+        """Return normalized inverse-TTL weights for active targets.
+
+        Weights describe the state in which the action is selected. Reached
+        static targets receive zero weight; all active targets have at least
+        one remaining step, avoiding a singularity at expiry.
+        """
+        expiry_steps = int(self.config.target_expiry_steps)
+        active = self.targets_reached == 0
+        time_to_live = torch.clamp(
+            expiry_steps - self.target_counters,
+            min=1,
+        ).to(torch.float32)
+        inverse_ttl = active.to(torch.float32) / time_to_live
+        normalizer = inverse_ttl.sum(dim=1, keepdim=True)
+        return torch.where(
+            normalizer > 0,
+            inverse_ttl / normalizer.clamp_min(torch.finfo(torch.float32).tiny),
+            torch.zeros_like(inverse_ttl),
+        )
 
     def _get_centralized_observation_tensor(self) -> torch.Tensor:
         """Build centralized observation tensor for all envs."""
@@ -449,43 +1011,31 @@ class BiddingGridworld:
             counter_denom = float(cfg.max_steps)
         counter_denom = max(counter_denom, 1.0)
         target_counters = self.target_counters.to(torch.float32) / counter_denom
-        target_priorities = self.target_priorities.to(torch.float32) / 4.0
+        energy_features = self._get_energy_features()
 
         window_denom = float(max(cfg.action_window, 1))
         window_steps = (self.window_steps_remaining.to(torch.float32) / window_denom).unsqueeze(-1)
 
+        target_parts = [agent_pos, target_pos.reshape(self.num_envs, -1)]
         if include_reached:
-            base_obs = torch.cat(
-                [
-                    agent_pos,
-                    target_pos.reshape(self.num_envs, -1),
-                    targets_reached,
-                    target_counters,
-                    target_priorities,
-                    window_steps,
-                ],
-                dim=-1,
+            target_parts.append(targets_reached)
+        target_parts.append(target_counters)
+        if cfg.use_target_priorities:
+            target_parts.append(
+                self.target_priorities.to(torch.float32) / 4.0
             )
-        else:
-            base_obs = torch.cat(
-                [
-                    agent_pos,
-                    target_pos.reshape(self.num_envs, -1),
-                    target_counters,
-                    target_priorities,
-                    window_steps,
-                ],
-                dim=-1,
-            )
+        target_obs = torch.cat(target_parts, dim=-1)
 
         if cfg.single_agent_mode:
             min_count = self.targets_reached_count.min(dim=1).values
             count_denom = float(max(cfg.num_agents, 1))
             relative = (self.targets_reached_count - min_count.unsqueeze(1)).to(torch.float32)
             relative = torch.clamp(relative / count_denom, 0.0, 1.0)
-            base_obs = torch.cat([base_obs, relative], dim=-1)
+            return torch.cat(
+                [target_obs, window_steps, relative, energy_features], dim=-1
+            )
 
-        return base_obs
+        return torch.cat([target_obs, energy_features, window_steps], dim=-1)
 
     def _get_centralized_observation(self) -> np.ndarray:
         """Return centralized observation on CPU (for evaluation/visualization)."""
@@ -513,92 +1063,70 @@ class BiddingGridworld:
         counter_denom = max(counter_denom, 1.0)
         target_counters = self.target_counters.to(torch.float32) / counter_denom
         target_priorities = self.target_priorities.to(torch.float32) / 4.0
+        energy_features = self._get_energy_features()
 
         window_denom = float(max(cfg.action_window, 1))
         window_steps = self.window_steps_remaining.to(torch.float32) / window_denom
         window_steps = window_steps.unsqueeze(-1)
 
         if cfg.single_agent_mode:
+            base_parts = [agent_pos, target_pos.reshape(self.num_envs, -1)]
             if include_reached:
-                base_obs = torch.cat(
-                    [
-                        agent_pos,
-                        target_pos.reshape(self.num_envs, -1),
-                        targets_reached,
-                        target_counters,
-                        target_priorities,
-                        window_steps,
-                    ],
-                    dim=-1,
-                )
-            else:
-                base_obs = torch.cat(
-                    [
-                        agent_pos,
-                        target_pos.reshape(self.num_envs, -1),
-                        target_counters,
-                        target_priorities,
-                        window_steps,
-                    ],
-                    dim=-1,
-                )
+                base_parts.append(targets_reached)
+            base_parts.append(target_counters)
+            if cfg.use_target_priorities:
+                base_parts.append(target_priorities)
+            base_parts.append(window_steps)
+            base_obs = torch.cat(base_parts, dim=-1)
             min_count = self.targets_reached_count.min(dim=1).values
             count_denom = float(max(cfg.num_agents, 1))
             relative = (self.targets_reached_count - min_count.unsqueeze(1)).to(torch.float32)
             relative = torch.clamp(relative / count_denom, 0.0, 1.0)
-            return torch.cat([base_obs, relative], dim=-1)
+            return torch.cat([base_obs, relative, energy_features], dim=-1)
 
         if cfg.visible_targets is None:
             reordered_pos = target_pos[:, self._reorder_idx, :].reshape(self.num_envs, cfg.num_agents, -1)
             reordered_counters = target_counters[:, self._reorder_idx]
             reordered_priorities = target_priorities[:, self._reorder_idx]
+            common_parts = [
+                agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                reordered_pos,
+            ]
             if include_reached:
                 reordered_reached = targets_reached[:, self._reorder_idx]
-                return torch.cat(
-                    [agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                     reordered_pos,
-                     reordered_reached,
-                     reordered_counters,
-                     reordered_priorities,
-                     window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1)],
-                    dim=-1,
-                )
-            return torch.cat(
-                [agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                 reordered_pos,
-                 reordered_counters,
-                 reordered_priorities,
-                 window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1)],
-                dim=-1,
+                common_parts.append(reordered_reached)
+            common_parts.append(reordered_counters)
+            if cfg.use_target_priorities:
+                common_parts.append(reordered_priorities)
+            common_parts.extend(
+                [
+                    energy_features.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                    window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                ]
             )
+            return torch.cat(common_parts, dim=-1)
 
         if cfg.visible_targets == 0:
             own_pos = target_pos  # (num_envs, num_agents, 2) — each agent reads its own slice
             own_counter = target_counters.unsqueeze(-1)  # (num_envs, num_agents, 1)
             own_priority = target_priorities.unsqueeze(-1)
+            own_parts = [
+                agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                own_pos,
+            ]
             if include_reached:
                 own_reached = targets_reached.unsqueeze(-1)  # (num_envs, num_agents, 1)
-                return torch.cat(
-                    [
-                        agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                        own_pos,
-                        own_reached,
-                        own_counter,
-                        own_priority,
-                        window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                    ],
-                    dim=-1,
-                )
-            return torch.cat(
+                own_parts.append(own_reached)
+            own_parts.append(own_counter)
+            if cfg.use_target_priorities:
+                own_parts.append(own_priority)
+            own_parts.extend(
                 [
-                    agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                    own_pos,
-                    own_counter,
-                    own_priority,
+                    energy_features.unsqueeze(1).expand(-1, cfg.num_agents, -1),
                     window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                ],
-                dim=-1,
+                ]
             )
+            return torch.cat(own_parts, dim=-1)
 
         # Per-agent observations with visible nearest targets
         distances = self._compute_distances().to(torch.float32)
@@ -616,33 +1144,125 @@ class BiddingGridworld:
         priority_exp = target_priorities.unsqueeze(1).expand(-1, cfg.num_agents, -1)
         vis_priorities = priority_exp.gather(2, idx)
 
+        visible_parts = [
+            agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+            own_pos,
+            vis_pos,
+        ]
         if include_reached:
             targets_reached_exp = targets_reached.unsqueeze(1).expand(-1, cfg.num_agents, -1)
             vis_reached = targets_reached_exp.gather(2, idx)
             own_reached = targets_reached.unsqueeze(-1)
-            return torch.cat(
-                [
-                    agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                    own_pos,
-                    vis_pos,
-                    own_reached,
-                    vis_reached,
-                    own_counter,
-                    own_priority,
-                    vis_priorities,
-                    window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                ],
-                dim=-1,
+            visible_parts.extend([own_reached, vis_reached])
+        visible_parts.append(own_counter)
+        if cfg.use_target_priorities:
+            visible_parts.extend([own_priority, vis_priorities])
+        visible_parts.extend(
+            [
+                energy_features.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+            ]
+        )
+        return torch.cat(visible_parts, dim=-1)
+
+    def _get_energy_features(self) -> torch.Tensor:
+        """Return normalized shared battery and recharge-station features."""
+        if not self.battery_enabled:
+            return torch.empty(
+                (self.num_envs, 0), device=self.device, dtype=torch.float32
             )
+        battery = (
+            self.battery_level.to(torch.float32) / float(self.config.battery_capacity)
+        ).unsqueeze(-1)
+        denom = float(self.config.grid_size - 1) if self.config.grid_size > 1 else 1.0
+        stations = (
+            self._batched_recharge_station_positions().to(torch.float32)
+            / denom
+        ).reshape(self.num_envs, -1)
+        return torch.cat([battery, stations], dim=-1)
+
+    def get_charging_observation(self) -> torch.Tensor:
+        """Return the compact observation used by the optional charging policy."""
+        if not self.config.charging_agent_enabled:
+            raise RuntimeError("Charging observations require charging_agent_enabled")
+
+        denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
+        agent_pos = self.agent_pos.to(torch.float32) / denom
+        battery = (
+            self.battery_level.to(torch.float32)
+            / float(self.config.battery_capacity)
+        ).unsqueeze(-1)
+        station_positions = self._batched_recharge_station_positions()
+        physical_station_distances = (
+            station_positions - self.agent_pos.unsqueeze(1)
+        ).abs().sum(dim=-1)
+        if self.config.charging_reserve_features_enabled:
+            grid_energy_diameter = float(
+                max(
+                    2
+                    * (self.grid_size - 1)
+                    * int(self.config.movement_energy_cost),
+                    1,
+                )
+            )
+            physical_battery = (
+                self.battery_level.to(torch.float32) / grid_energy_diameter
+            ).unsqueeze(-1)
+            reserve_slack = (
+                self.battery_level.to(torch.float32)
+                - (
+                    physical_station_distances.min(dim=1).values
+                    * int(self.config.movement_energy_cost)
+                ).to(torch.float32)
+            ).div(grid_energy_diameter).unsqueeze(-1)
+            reserve_features = torch.cat(
+                [physical_battery, reserve_slack], dim=-1
+            )
+        else:
+            reserve_features = torch.empty(
+                (self.num_envs, 0),
+                device=self.device,
+                dtype=torch.float32,
+            )
+        nearest_station_idx = physical_station_distances.argmin(dim=1)
+        nearest_station = station_positions.gather(
+            1,
+            nearest_station_idx.view(-1, 1, 1).expand(-1, 1, 2),
+        ).squeeze(1)
+        if self.config.charging_nearest_station_features_enabled:
+            nearest_station_features = (
+                nearest_station.to(torch.float32)
+                - self.agent_pos.to(torch.float32)
+            ) / denom
+        else:
+            nearest_station_features = torch.empty(
+                (self.num_envs, 0),
+                device=self.device,
+                dtype=torch.float32,
+            )
+        relative_stations = (
+            station_positions.to(torch.float32)
+            - self.agent_pos.unsqueeze(1).to(torch.float32)
+        ) / denom
+        station_distances = relative_stations.abs().sum(dim=-1) / 2.0
+        window_denom = float(max(self.config.action_window, 1))
+        window_steps = (
+            self.window_steps_remaining.to(torch.float32) / window_denom
+        ).unsqueeze(-1)
+        charging_controls_window = (
+            (self.window_agent == self.charging_agent_idx)
+            & (self.window_steps_remaining > 0)
+        ).to(torch.float32).unsqueeze(-1)
         return torch.cat(
             [
-                agent_pos.unsqueeze(1).expand(-1, cfg.num_agents, -1),
-                own_pos,
-                vis_pos,
-                own_counter,
-                own_priority,
-                vis_priorities,
-                window_steps.unsqueeze(1).expand(-1, cfg.num_agents, -1),
+                agent_pos,
+                battery,
+                reserve_features,
+                nearest_station_features,
+                relative_stations.reshape(self.num_envs, -1),
+                station_distances,
+                window_steps,
+                charging_controls_window,
             ],
             dim=-1,
         )
@@ -771,6 +1391,12 @@ class BiddingGridworld:
 
     def _sample_target_priorities(self) -> torch.Tensor:
         """Sample integer feeding priorities uniformly from 1 through 4."""
+        if not self.config.use_target_priorities:
+            return torch.ones(
+                (self.num_envs, self.config.num_agents),
+                device=self.device,
+                dtype=torch.int32,
+            )
         return torch.randint(
             1,
             5,
@@ -780,6 +1406,160 @@ class BiddingGridworld:
             dtype=torch.int32,
         )
 
+    def _move_recharge_stations(self) -> None:
+        """Advance independent bounded random walks for recharge stations."""
+        cfg = self.config
+        self.recharge_station_move_counters += 1
+        should_move = (
+            self.recharge_station_move_counters
+            >= cfg.recharge_station_move_interval
+        )
+        self.recharge_station_move_counters = torch.where(
+            should_move,
+            torch.zeros_like(self.recharge_station_move_counters),
+            self.recharge_station_move_counters,
+        )
+        if not torch.any(should_move):
+            return
+
+        if cfg.recharge_station_direction_change_prob > 0:
+            change = (
+                torch.rand(
+                    self.recharge_station_directions.shape,
+                    device=self.device,
+                    generator=self.gen,
+                )
+                < cfg.recharge_station_direction_change_prob
+            ) & should_move
+            new_directions = torch.randint(
+                0,
+                4,
+                self.recharge_station_directions.shape,
+                generator=self.gen,
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self.recharge_station_directions = torch.where(
+                change, new_directions, self.recharge_station_directions
+            )
+
+        current = self.current_recharge_station_pos
+        proposed = self._move_position(
+            current, self.recharge_station_directions
+        )
+        hit_wall = (proposed == current).all(dim=-1) & should_move
+        if torch.any(hit_wall):
+            valid_directions = self._valid_directions_mask(current)
+            random_scores = torch.rand(
+                valid_directions.shape,
+                device=self.device,
+                generator=self.gen,
+            ).masked_fill(~valid_directions, -1.0)
+            replacement_directions = random_scores.argmax(dim=-1).to(
+                torch.int32
+            )
+            self.recharge_station_directions = torch.where(
+                hit_wall,
+                replacement_directions,
+                self.recharge_station_directions,
+            )
+            proposed = self._move_position(
+                current, self.recharge_station_directions
+            )
+
+        self.current_recharge_station_pos = torch.where(
+            should_move.unsqueeze(-1), proposed, current
+        )
+
+    def _build_recharge_station_positions(self) -> torch.Tensor:
+        """Validate and materialize fixed recharge-station coordinates."""
+        cfg = self.config
+        if cfg.battery_capacity is None:
+            return torch.empty((0, 2), device=self.device, dtype=torch.int32)
+        if cfg.battery_capacity <= 0:
+            raise ValueError("battery_capacity must be positive when battery mode is enabled")
+        if cfg.movement_energy_cost <= 0:
+            raise ValueError("movement_energy_cost must be positive")
+
+        positions = cfg.recharge_station_positions
+        if not positions:
+            raise ValueError(
+                "recharge_station_positions must contain at least one station "
+                "when battery mode is enabled"
+            )
+        station_pos = torch.tensor(positions, device=self.device, dtype=torch.int32)
+        if station_pos.ndim != 2 or station_pos.shape[1] != 2:
+            raise ValueError("recharge_station_positions must be a sequence of (row, col) pairs")
+        if torch.any(station_pos < 0) or torch.any(station_pos >= cfg.grid_size):
+            raise ValueError("recharge station positions must lie within the grid")
+        if torch.unique(station_pos, dim=0).shape[0] != station_pos.shape[0]:
+            raise ValueError("recharge station positions must be unique")
+        return station_pos
+
+    def _at_recharge_station(self, positions: torch.Tensor) -> torch.Tensor:
+        """Return whether each batched position occupies any recharge station."""
+        if not self.battery_enabled:
+            return torch.zeros(positions.shape[0], device=self.device, dtype=torch.bool)
+        matches = (
+            positions.unsqueeze(1)
+            == self._batched_recharge_station_positions()
+        )
+        return matches.all(dim=-1).any(dim=1)
+
+    def _batched_recharge_station_positions(self) -> torch.Tensor:
+        """Return current station coordinates with shape (env, station, 2)."""
+        if self.current_recharge_station_pos is not None:
+            return self.current_recharge_station_pos
+        return self.recharge_station_pos.unsqueeze(0).expand(
+            self.num_envs, -1, -1
+        )
+
+    def _nearest_recharge_station(self, positions: torch.Tensor) -> torch.Tensor:
+        """Return the nearest station to each position using Manhattan distance."""
+        distances = self._recharge_station_distances(positions)
+        nearest_idx = distances.argmin(dim=1)
+        stations = self._batched_recharge_station_positions()
+        return stations.gather(
+            1, nearest_idx.view(-1, 1, 1).expand(-1, 1, 2)
+        ).squeeze(1)
+
+    def _recharge_station_distances(self, positions: torch.Tensor) -> torch.Tensor:
+        return (
+            positions.unsqueeze(1)
+            - self._batched_recharge_station_positions()
+        ).abs().sum(dim=-1)
+
+    def _nearest_recharge_distance(self, positions: torch.Tensor) -> torch.Tensor:
+        return self._recharge_station_distances(positions).min(dim=1).values
+
+    def _nearest_recharge_energy_requirement(
+        self, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """Return battery units needed for a shortest path to a station."""
+        return (
+            self._nearest_recharge_distance(positions)
+            * int(self.config.movement_energy_cost)
+        )
+
+    def _direction_to_nearest_recharge_station(
+        self, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """Return a deterministic shortest-path direction to a nearest station."""
+        delta = self._nearest_recharge_station(positions) - positions
+        return torch.where(
+            delta[:, 1] < 0,
+            torch.zeros_like(delta[:, 1], dtype=torch.int64),
+            torch.where(
+                delta[:, 1] > 0,
+                torch.ones_like(delta[:, 1], dtype=torch.int64),
+                torch.where(
+                    delta[:, 0] < 0,
+                    torch.full_like(delta[:, 0], 2, dtype=torch.int64),
+                    torch.full_like(delta[:, 0], 3, dtype=torch.int64),
+                ),
+            ),
+        )
+
     def _build_reset_positions(self) -> torch.Tensor:
         """Build a cached grid of positions excluding (0,0) for reset sampling."""
         grid = torch.arange(self.config.grid_size, device=self.device, dtype=torch.int32)
@@ -787,6 +1567,41 @@ class BiddingGridworld:
         positions = torch.stack([rows, cols], dim=-1).reshape(-1, 2)
         mask = ~((positions[:, 0] == 0) & (positions[:, 1] == 0))
         return positions[mask].to(torch.int32)
+
+    def get_render_state(self) -> Dict[str, Any]:
+        """Return exact batched state needed by rollout visualizations."""
+        return {
+            "agent_positions": self.agent_pos.detach().cpu().numpy().copy(),
+            "target_positions": self.target_pos.detach().cpu().numpy().copy(),
+            "target_priorities": self.target_priorities.detach()
+            .cpu()
+            .numpy()
+            .copy(),
+            "target_counters": self.target_counters.detach().cpu().numpy().copy(),
+            "targets_reached_count": self.targets_reached_count.detach()
+            .cpu()
+            .numpy()
+            .copy(),
+            "battery_levels": (
+                self.battery_level.detach().cpu().numpy().copy()
+                if self.battery_level is not None
+                else None
+            ),
+            "recharge_station_positions": (
+                self._batched_recharge_station_positions()
+                .detach()
+                .cpu()
+                .numpy()
+                .copy()
+                if self.battery_enabled
+                else None
+            ),
+            "window_agents": self.window_agent.detach().cpu().numpy().copy(),
+            "window_steps_remaining": self.window_steps_remaining.detach()
+            .cpu()
+            .numpy()
+            .copy(),
+        }
 
     def create_single_agent_gif(
         self,
@@ -959,196 +1774,629 @@ class BiddingGridworld:
         self,
         episode_data: Dict[str, Any],
         output_path: Path,
-        fps: int = 1
+        fps: int = 10,
+        frame_stride: int = 1,
     ) -> None:
-        """Create a video of a multi-agent competition episode."""
-        grid_size_inches = min(10, max(6, self.grid_size * 0.15))
-        info_width = 5
-        fig = plt.figure(figsize=(grid_size_inches + info_width, grid_size_inches))
+        """Create a multi-agent MP4 rollout for the active environment mode."""
+        import matplotlib.patches as mpatches
 
-        gs = fig.add_gridspec(1, 2, width_ratios=[grid_size_inches, info_width], wspace=0.15)
+        if fps <= 0:
+            raise ValueError("fps must be positive")
+        if frame_stride <= 0:
+            raise ValueError("frame_stride must be positive")
+
+        render_states = episode_data.get("render_states", [])
+        if not render_states:
+            render_states = self._legacy_render_states(episode_data)
+        if not render_states:
+            raise ValueError("episode_data contains no renderable states")
+
+        actions_list = episode_data.get("actions", [])
+        rewards_list = episode_data.get("rewards", [])
+        details = episode_data.get("step_details", [])
+        cumulative_priority = []
+        cumulative_reaches = []
+        cumulative_expired = []
+        cumulative_recharges = []
+        cumulative_depletions = []
+        priority_total = reaches_total = expired_total = 0
+        recharge_total = depletion_total = 0
+        for frame_idx in range(len(render_states)):
+            detail = details[frame_idx] if frame_idx < len(details) else {}
+            reached_priorities = detail.get(
+                "target_priorities_just_reached", []
+            )
+            priority_total += int(sum(reached_priorities))
+            reaches_total += sum(int(value > 0) for value in reached_priorities)
+            expired_total += sum(
+                bool(value) for value in detail.get("targets_just_expired", [])
+            )
+            recharge_total += int(detail.get("battery_recharged", False))
+            depletion_total += int(detail.get("battery_depleted", False))
+            cumulative_priority.append(priority_total)
+            cumulative_reaches.append(reaches_total)
+            cumulative_expired.append(expired_total)
+            cumulative_recharges.append(recharge_total)
+            cumulative_depletions.append(depletion_total)
+
+        identity_colors = [
+            "#3569A8",
+            "#C43C39",
+            "#8E5BA6",
+            "#2F8A62",
+            "#D17A22",
+            "#B44E83",
+            "#607D3B",
+            "#6D5B4B",
+        ]
+        priority_colors = {
+            1: "#9ECAE1",
+            2: "#74C476",
+            3: "#FDBE6F",
+            4: "#E6550D",
+        }
+        direction_labels = {0: "LEFT", 1: "RIGHT", 2: "UP", 3: "DOWN"}
+        direction_delta = {
+            0: (-0.8, 0.0),
+            1: (0.8, 0.0),
+            2: (0.0, -0.8),
+            3: (0.0, 0.8),
+        }
+
+        fig = plt.figure(figsize=(13.8, 8.2), facecolor="#F4F6F8")
+        gs = fig.add_gridspec(
+            1, 2, width_ratios=[8.2, 5.0], wspace=0.08
+        )
         grid_ax = fig.add_subplot(gs[0])
         info_ax = fig.add_subplot(gs[1])
 
-        def animate(frame):
+        def draw_frame(frame_idx: int) -> np.ndarray:
             grid_ax.clear()
             info_ax.clear()
+            snapshot = render_states[frame_idx]
+            detail = details[frame_idx] if frame_idx < len(details) else {}
+            actions = (
+                actions_list[frame_idx]
+                if frame_idx < len(actions_list)
+                else {}
+            )
+            agent_row, agent_col = snapshot["agent_position"]
+            target_positions = snapshot["target_positions"]
+            priorities = snapshot["target_priorities"]
+            battery = snapshot.get("battery_level")
+            battery_after = detail.get("battery_level_after", battery)
+            stations = snapshot.get("recharge_station_positions", [])
+            winning_agent = int(detail.get("winning_agent", -1))
+            charging_idx = self.charging_agent_idx
 
-            if frame >= len(episode_data["states"]):
-                return
-
-            state = episode_data["states"][frame]
-            denom = float(self.grid_size - 1) if self.grid_size > 1 else 1.0
-            agent_row = int(state[0] * denom)
-            agent_col = int(state[1] * denom)
-
-            target_positions = []
-            targets_reached = []
-            include_reached = not self.config.moving_targets
-            for i in range(self.num_agents):
-                target_idx = 2 + i * 2
-                target_positions.append((int(state[target_idx] * denom),
-                                       int(state[target_idx + 1] * denom)))
-                if include_reached:
-                    target_reached_idx = 2 + 2 * self.num_agents + i
-                    targets_reached.append(int(state[target_reached_idx]))
-                else:
-                    targets_reached.append(0)
-
-            step_detail = episode_data["step_details"][frame] if frame < len(episode_data["step_details"]) else None
-            actions = episode_data["actions"][frame] if frame < len(episode_data["actions"]) else None
-            rewards = episode_data["rewards"][frame] if frame < len(episode_data["rewards"]) else None
-
+            grid_ax.set_facecolor("#FFFFFF")
             grid_ax.set_xlim(-0.5, self.grid_size - 0.5)
-            grid_ax.set_ylim(-0.5, self.grid_size - 0.5)
-            grid_ax.set_aspect('equal')
+            grid_ax.set_ylim(self.grid_size - 0.5, -0.5)
+            grid_ax.set_aspect("equal")
+            grid_ax.set_xticks(range(0, self.grid_size, 5))
+            grid_ax.set_yticks(range(0, self.grid_size, 5))
+            grid_ax.tick_params(labelsize=8, colors="#5C6670")
+            grid_ax.grid(
+                which="major", color="#DCE1E5", linewidth=0.7, alpha=0.8
+            )
+            for spine in grid_ax.spines.values():
+                spine.set_color("#AAB2B9")
 
-            for i in range(self.grid_size + 1):
-                grid_ax.axhline(i - 0.5, color='lightgray', linewidth=0.5)
-                grid_ax.axvline(i - 0.5, color='lightgray', linewidth=0.5)
+            for station_idx, (row, col) in enumerate(stations):
+                grid_ax.scatter(
+                    [col],
+                    [row],
+                    marker="D",
+                    s=185,
+                    facecolor="#38B7C4",
+                    edgecolor="#075B66",
+                    linewidth=1.8,
+                    zorder=3,
+                )
+                grid_ax.text(
+                    col,
+                    row,
+                    f"S{station_idx + 1}",
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="white",
+                    fontweight="bold",
+                    zorder=4,
+                )
 
-            stick_colors = ['royalblue', 'crimson', 'darkorange', 'forestgreen', 'purple', 'deeppink', 'teal', 'saddlebrown', 'mediumvioletred', 'steelblue', 'olivedrab', 'coral']
-            edge_colors = ['blue', 'red', 'orange', 'green', 'purple']
-            winning_agent = step_detail.get("winning_agent", -1) if step_detail else None
-
-            cat_expressions = ['😸', '😺', '😼', '😽', '🙀', '😹', '😻', '😾', '😿', '🐱', '😺', '😸']
-
-            _scale = 15 / self.grid_size
-            _cat_fontsize = max(6, int(18 * _scale))
-            _robot_s = 0.32 * _scale
-
-            def draw_cat(ax, cx, cy, color, idx=0):
-                expr = cat_expressions[idx % len(cat_expressions)]
-                ax.text(cx, cy, expr, ha='center', va='center', fontsize=_cat_fontsize, color=color, zorder=5)
-
-            def draw_robot(ax, cx, cy, s=_robot_s):
-                import matplotlib.patches as mpatches
-                ax.plot([cx, cx], [cy - s*1.05, cy - s*0.72], color='#444', linewidth=1.5, zorder=4)
-                ax.add_patch(plt.Circle((cx, cy - s*1.12), s*0.08, facecolor='#FF4444', edgecolor='#444', linewidth=1, zorder=5))
-                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.42, cy - s*0.70), s*0.84, s*0.60,
-                             boxstyle='round,pad=0.02', facecolor='#A8C8E8', edgecolor='#444', linewidth=1.5, zorder=4))
-                for ex in [cx - s*0.15, cx + s*0.15]:
-                    ax.add_patch(plt.Circle((ex, cy - s*0.42), s*0.10, facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
-                    ax.add_patch(plt.Circle((ex + s*0.03, cy - s*0.44), s*0.04, facecolor='white', linewidth=0, zorder=6))
-                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.18, cy - s*0.22), s*0.36, s*0.10,
-                             boxstyle='round,pad=0.01', facecolor='#1144AA', edgecolor='#444', linewidth=1, zorder=5))
-                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.46, cy + s*0.02), s*0.92, s*0.68,
-                             boxstyle='round,pad=0.02', facecolor='#88AACC', edgecolor='#444', linewidth=1.5, zorder=4))
-                ax.add_patch(mpatches.FancyBboxPatch((cx - s*0.26, cy + s*0.12), s*0.52, s*0.36,
-                             boxstyle='round,pad=0.01', facecolor='#CCDDE8', edgecolor='#666', linewidth=1, zorder=5))
-                for bx, bc in [(cx - s*0.10, '#FF4444'), (cx + s*0.10, '#44CC44')]:
-                    ax.add_patch(plt.Circle((bx, cy + s*0.30), s*0.07, facecolor=bc, edgecolor='#444', linewidth=1, zorder=6))
-                for side in [-1, 1]:
-                    ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
-                            color='#88AACC', linewidth=4, solid_capstyle='round', zorder=3)
-                    ax.plot([cx + side*s*0.46, cx + side*s*0.72], [cy + s*0.18, cy + s*0.38],
-                            color='#444', linewidth=1.5, solid_capstyle='round', zorder=3)
-
-            for i in range(self.num_agents):
-                target_row, target_col = target_positions[i]
-                is_controlling = (winning_agent == i)
-
-                if include_reached and targets_reached[i] != 0:
-                    draw_cat(grid_ax, target_col, target_row, 'darkgreen', idx=i)
-                    grid_ax.text(target_col, target_row - 0.5, '✓',
-                           ha='center', va='center', fontsize=8, fontweight='bold', color='darkgreen')
-                else:
-                    draw_cat(grid_ax, target_col, target_row, stick_colors[i % len(stick_colors)], idx=i)
-                    if is_controlling:
-                        grid_ax.text(target_col, target_row - 0.6, '⚡',
-                               ha='center', va='center', fontsize=8, color='gold')
-
-            if winning_agent is not None and 0 <= winning_agent < self.num_agents:
-                grid_ax.add_patch(plt.Circle((agent_col, agent_row), 0.35,
-                                       facecolor='none', edgecolor=edge_colors[winning_agent % len(edge_colors)], linewidth=3))
-
-            draw_robot(grid_ax, agent_col, agent_row)
-
-            grid_ax.set_title(f'Step {frame}', fontsize=11, fontweight='bold')
-
-            if self.grid_size <= 15:
-                tick_step = 1
-            elif self.grid_size <= 30:
-                tick_step = 2
-            else:
-                tick_step = 5
-
-            tick_positions = list(range(0, self.grid_size, tick_step))
-            grid_ax.set_xticks(tick_positions)
-            grid_ax.set_yticks(tick_positions)
-            grid_ax.invert_yaxis()
-
-            info_ax.axis('off')
-
-            info_lines = []
-            info_lines.append('MULTI-AGENT COMPETITION')
-            info_lines.append('')
-            info_lines.append(f'Grid: {self.grid_size}x{self.grid_size}')
-            info_lines.append(f'Agents: {self.num_agents}')
-            controller_label = str(winning_agent) if winning_agent is not None and winning_agent >= 0 else "None"
-            info_lines.append(f'Controller: {controller_label}')
-            info_lines.append('')
-
-            if step_detail and actions and rewards:
-                info_lines.append('AGENT DETAILS:')
-                direction_names = {0: "<", 1: ">", 2: "^", 3: "v"}
-
-                cumulative = {}
-                for i in range(self.num_agents):
-                    cumulative[f"agent_{i}"] = sum(
-                        episode_data["rewards"][f].get(f"agent_{i}", 0)
-                        for f in range(min(frame + 1, len(episode_data["rewards"])))
+            for target_idx, ((row, col), priority) in enumerate(
+                zip(target_positions, priorities)
+            ):
+                priority = int(priority)
+                identity_color = identity_colors[
+                    target_idx % len(identity_colors)
+                ]
+                target_facecolor = (
+                    priority_colors.get(priority, "#BDBDBD")
+                    if self.config.use_target_priorities
+                    else "#DCE6F1"
+                )
+                grid_ax.scatter(
+                    [col],
+                    [row],
+                    marker="o",
+                    s=205,
+                    facecolor=target_facecolor,
+                    edgecolor=identity_color,
+                    linewidth=2.2,
+                    zorder=5,
+                )
+                grid_ax.text(
+                    col,
+                    row,
+                    f"F{target_idx + 1}",
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="#17202A",
+                    fontweight="bold",
+                    zorder=6,
+                )
+                if self.config.use_target_priorities:
+                    grid_ax.text(
+                        col,
+                        row - 0.85,
+                        f"P{priority}",
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                        color="#17202A",
+                        fontweight="bold",
+                        bbox={
+                            "boxstyle": "round,pad=0.18",
+                            "facecolor": "white",
+                            "edgecolor": priority_colors.get(priority, "#BDBDBD"),
+                            "linewidth": 1.2,
+                        },
+                        zorder=7,
                     )
 
-                for i in range(self.num_agents):
-                    agent_key = f"agent_{i}"
-                    if agent_key in actions:
-                        action_data = actions[agent_key]
-                        bid = action_data.get('bid', 0)
-                        direction = direction_names.get(action_data.get('direction', 0), '?')
-                        window_steps = None
-                        if self.window_bidding and "window" in action_data:
-                            window_steps = int(action_data.get("window", 0)) + 1
-                        reward = cumulative.get(agent_key, 0)
-                        window_str = f' W:{window_steps:2d}' if window_steps is not None else ''
+            battery_fraction = (
+                float(battery) / float(self.config.battery_capacity)
+                if battery is not None and self.config.battery_capacity
+                else 1.0
+            )
+            battery_color = (
+                "#2E9D61"
+                if battery_fraction > 0.55
+                else "#E6A23C"
+                if battery_fraction > 0.25
+                else "#D64545"
+            )
+            controller_color = "#38B7C4"
+            if 0 <= winning_agent < self.num_agents:
+                controller_color = identity_colors[
+                    winning_agent % len(identity_colors)
+                ]
+            grid_ax.add_patch(
+                mpatches.Circle(
+                    (agent_col, agent_row),
+                    0.62,
+                    facecolor="white",
+                    edgecolor=controller_color,
+                    linewidth=3.2,
+                    zorder=8,
+                )
+            )
+            grid_ax.add_patch(
+                mpatches.FancyBboxPatch(
+                    (agent_col - 0.28, agent_row - 0.25),
+                    0.56,
+                    0.5,
+                    boxstyle="round,pad=0.04",
+                    facecolor="#D7E3EA",
+                    edgecolor="#263238",
+                    linewidth=1.4,
+                    zorder=9,
+                )
+            )
+            grid_ax.plot(
+                [agent_col - 0.13, agent_col + 0.13],
+                [agent_row - 0.07, agent_row - 0.07],
+                marker="o",
+                markersize=3,
+                linestyle="None",
+                color="#263238",
+                zorder=10,
+            )
+            if battery is not None:
+                grid_ax.add_patch(
+                    mpatches.Rectangle(
+                        (agent_col - 0.24, agent_row + 0.11),
+                        0.48 * battery_fraction,
+                        0.08,
+                        facecolor=battery_color,
+                        edgecolor="none",
+                        zorder=10,
+                    )
+                )
+            winner_action = actions.get(f"agent_{winning_agent}", {})
+            if winning_agent >= 0 and winner_action:
+                dx, dy = direction_delta.get(
+                    int(winner_action.get("direction", 0)), (0.0, 0.0)
+                )
+                grid_ax.arrow(
+                    agent_col,
+                    agent_row,
+                    dx,
+                    dy,
+                    width=0.05,
+                    head_width=0.3,
+                    head_length=0.25,
+                    length_includes_head=True,
+                    color=controller_color,
+                    zorder=7,
+                )
 
-                        if i == winning_agent:
-                            info_lines.append(f'  [{i}] * Bid:{bid:2d}{window_str} {direction} R:{reward:6.1f}')
-                        else:
-                            info_lines.append(f'  [{i}]   Bid:{bid:2d}{window_str} {direction} R:{reward:6.1f}')
+            if self.config.charging_agent_enabled:
+                motion_label = (
+                    "MOVING RECHARGE STATIONS"
+                    if self.config.moving_recharge_stations
+                    else "FIXED RECHARGE STATIONS"
+                )
+            else:
+                motion_label = (
+                    "MOVING TARGETS" if self.config.moving_targets else "STATIC TARGETS"
+                )
+            environment_label = (
+                "Priority Cat Feeder"
+                if self.config.use_target_priorities
+                else f"{self.num_agents}-Target Gridworld"
+            )
+            grid_ax.set_title(
+                f"{environment_label} | Step {frame_idx:,}\n{motion_label}",
+                fontsize=12,
+                fontweight="bold",
+                color="#1F2D3D",
+                pad=10,
+            )
+            grid_ax.set_xlabel("Column", fontsize=9, color="#5C6670")
+            grid_ax.set_ylabel("Row", fontsize=9, color="#5C6670")
 
-            info_text = '\n'.join(info_lines)
-            info_ax.text(0.05, 0.95, info_text,
-                        transform=info_ax.transAxes,
-                        fontfamily='monospace',
-                        fontsize=9,
-                        verticalalignment='top',
-                        horizontalalignment='left')
+            info_ax.set_facecolor("#F4F6F8")
+            info_ax.set_xlim(0, 1)
+            info_ax.set_ylim(0, 1)
+            info_ax.axis("off")
+            if self.config.charging_agent_enabled and winning_agent == charging_idx:
+                controller_label = "CHARGER"
+            elif 0 <= winning_agent < self.num_agents:
+                controller_label = (
+                    f"FEEDER {winning_agent + 1}"
+                    if self.config.use_target_priorities
+                    else f"AGENT {winning_agent + 1}"
+                )
+            else:
+                controller_label = "NONE"
+            info_ax.text(
+                0.02,
+                0.975,
+                "DECENTRALIZED BIDDING",
+                fontsize=14,
+                fontweight="bold",
+                color="#1F2D3D",
+                va="top",
+            )
+            info_ax.text(
+                0.02,
+                0.93,
+                f"Controller: {controller_label}",
+                fontsize=11,
+                fontweight="bold",
+                color=controller_color,
+                va="top",
+            )
+            info_ax.text(
+                0.98,
+                0.93,
+                "AUCTION" if detail.get("is_bidding_round") else "ACTION WINDOW",
+                fontsize=9,
+                color="#5C6670",
+                va="top",
+                ha="right",
+            )
 
-        frames = []
-        num_frames = len(episode_data["states"]) + 3
-        for frame_idx in range(num_frames):
-            animate(frame_idx)
+            if battery is not None:
+                info_ax.text(
+                    0.02,
+                    0.875,
+                    f"Battery {battery} -> {battery_after} / {self.config.battery_capacity}",
+                    fontsize=9,
+                    fontweight="bold",
+                    color="#263238",
+                    va="top",
+                )
+                info_ax.add_patch(
+                    mpatches.Rectangle(
+                        (0.02, 0.835),
+                        0.94,
+                        0.025,
+                        facecolor="#D5D8DC",
+                        edgecolor="#7B878D",
+                        linewidth=0.7,
+                    )
+                )
+                info_ax.add_patch(
+                    mpatches.Rectangle(
+                        (0.02, 0.835),
+                        0.94 * battery_fraction,
+                        0.025,
+                        facecolor=battery_color,
+                        edgecolor="none",
+                    )
+                )
+
+            if self.config.charging_agent_enabled:
+                active_label = (
+                    "ACTIVE" if detail.get("charging_bid_active") else "STANDBY"
+                )
+                summary_text = (
+                    f"Charging: {active_label}   Window remaining: "
+                    f"{detail.get('window_steps_remaining', 0)}\n"
+                    f"Priority collected: {cumulative_priority[frame_idx]}   "
+                    f"Feeds: {cumulative_reaches[frame_idx]}   "
+                    f"Expired: {cumulative_expired[frame_idx]}\n"
+                    f"Recharges: {cumulative_recharges[frame_idx]}   "
+                    f"Depletions: {cumulative_depletions[frame_idx]}"
+                )
+            elif self.config.use_target_priorities:
+                summary_text = (
+                    f"Window remaining: {detail.get('window_steps_remaining', 0)}\n"
+                    f"Priority collected: {cumulative_priority[frame_idx]}   "
+                    f"Feeds: {cumulative_reaches[frame_idx]}   "
+                    f"Expired: {cumulative_expired[frame_idx]}"
+                )
+            else:
+                net_targets = (
+                    cumulative_reaches[frame_idx] - cumulative_expired[frame_idx]
+                )
+                summary_text = (
+                    f"Window remaining: {detail.get('window_steps_remaining', 0)}\n"
+                    f"Targets reached: {cumulative_reaches[frame_idx]}   "
+                    f"Expired: {cumulative_expired[frame_idx]}\n"
+                    f"Net targets: {net_targets}"
+                )
+            info_ax.text(
+                0.02,
+                0.79,
+                summary_text,
+                fontsize=9,
+                fontfamily="monospace",
+                color="#263238",
+                va="top",
+                linespacing=1.45,
+            )
+            info_ax.plot([0.02, 0.98], [0.68, 0.68], color="#C6CDD2", lw=1)
+            info_ax.text(
+                0.02,
+                0.655,
+                "BIDS / ACTIONS",
+                fontsize=10,
+                fontweight="bold",
+                color="#1F2D3D",
+                va="top",
+            )
+            bid_lines = []
+            effective_bids = detail.get("effective_bids", [])
+            for bidder_idx in range(self.num_bidders):
+                action = actions.get(f"agent_{bidder_idx}", {})
+                bid = int(action.get("bid", 0))
+                effective = (
+                    int(effective_bids[bidder_idx])
+                    if bidder_idx < len(effective_bids)
+                    else bid
+                )
+                direction = direction_labels.get(
+                    int(action.get("direction", 0)), "?"
+                )
+                winner_mark = ">" if bidder_idx == winning_agent else " "
+                if self.config.charging_agent_enabled and bidder_idx == charging_idx:
+                    role = "CHG"
+                    priority_label = "  "
+                else:
+                    role = (
+                        f"F{bidder_idx + 1:02d}"
+                        if self.config.use_target_priorities
+                        else f"A{bidder_idx + 1:02d}"
+                    )
+                    priority_label = (
+                        f"P{int(priorities[bidder_idx])}"
+                        if self.config.use_target_priorities
+                        else "  "
+                    )
+                effective_label = (
+                    f"/{effective}" if effective != bid else "  "
+                )
+                bid_lines.append(
+                    f"{winner_mark} {role} {priority_label}  "
+                    f"bid {bid}{effective_label:>3}  {direction:<5}"
+                )
+            info_ax.text(
+                0.02,
+                0.62,
+                "\n".join(bid_lines),
+                fontsize=8.2,
+                fontfamily="monospace",
+                color="#263238",
+                va="top",
+                linespacing=1.25,
+            )
+
+            event_parts = []
+            reached_priorities = detail.get(
+                "target_priorities_just_reached", []
+            )
+            for feeder_idx, priority in enumerate(reached_priorities):
+                if int(priority) > 0:
+                    if self.config.use_target_priorities:
+                        event_parts.append(f"FED F{feeder_idx + 1} (+{priority})")
+                    else:
+                        event_parts.append(f"REACHED TARGET {feeder_idx + 1}")
+            expired_now = sum(
+                bool(value) for value in detail.get("targets_just_expired", [])
+            )
+            if expired_now:
+                event_parts.append(f"{expired_now} TARGET EXPIRED")
+            if detail.get("battery_recharged"):
+                event_parts.append("BATTERY RECHARGED")
+            if detail.get("battery_depleted"):
+                event_parts.append("BATTERY DEPLETED")
+            if detail.get("charging_navigation_active"):
+                event_parts.append(
+                    "CHARGER DIRECTION: "
+                    + (
+                        "OPTIMAL"
+                        if detail.get("charging_direction_optimal")
+                        else "NON-OPTIMAL"
+                    )
+                )
+            event_text = " | ".join(event_parts) if event_parts else "No event"
+            info_ax.plot([0.02, 0.98], [0.16, 0.16], color="#C6CDD2", lw=1)
+            info_ax.text(
+                0.02,
+                0.135,
+                "STEP EVENT",
+                fontsize=9,
+                fontweight="bold",
+                color="#1F2D3D",
+                va="top",
+            )
+            info_ax.text(
+                0.02,
+                0.1,
+                event_text,
+                fontsize=8.3,
+                color="#D64545" if detail.get("battery_depleted") else "#263238",
+                va="top",
+                wrap=True,
+            )
+            if self.config.charging_agent_enabled:
+                legend_text = (
+                    "Target fill = priority | target outline = feeder identity | "
+                    "diamond = recharge station"
+                )
+            elif self.config.use_target_priorities:
+                legend_text = "Target fill = priority | target outline = feeder identity"
+            else:
+                legend_text = "Target outline = agent identity | policy-generated bids and actions"
+            info_ax.text(
+                0.02,
+                0.025,
+                legend_text,
+                fontsize=7.5,
+                color="#6B747C",
+                va="bottom",
+            )
+
             fig.canvas.draw()
-            frame = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
-            frames.append(frame)
+            return np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
 
-        plt.close(fig)
+        frame_indices = list(range(0, len(render_states), frame_stride))
+        if frame_indices[-1] != len(render_states) - 1:
+            frame_indices.append(len(render_states) - 1)
+        output_path = Path(output_path)
+        output_path_mp4 = output_path.with_suffix(".mp4")
+        output_path_mp4.parent.mkdir(parents=True, exist_ok=True)
+        first_image = draw_frame(frame_indices[0])
+        height, width = first_image.shape[:2]
+        writer = cv2.VideoWriter(
+            str(output_path_mp4),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            plt.close(fig)
+            raise RuntimeError(f"could not open MP4 writer for {output_path_mp4}")
+        frame_count = 0
+        try:
+            writer.write(cv2.cvtColor(first_image, cv2.COLOR_RGB2BGR))
+            frame_count += 1
+            last_image = first_image
+            for frame_idx in frame_indices[1:]:
+                last_image = draw_frame(frame_idx)
+                writer.write(cv2.cvtColor(last_image, cv2.COLOR_RGB2BGR))
+                frame_count += 1
+            for _ in range(fps):
+                image = last_image
+                writer.write(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+                frame_count += 1
+        finally:
+            writer.release()
+            plt.close(fig)
+        print(
+            f"OK Competition video saved: {output_path_mp4} "
+            f"({frame_count} frames)"
+        )
 
-        if len(frames) > 0:
-            h, w = frames[0].shape[:2]
-            output_path_mp4 = str(output_path).replace('.gif', '.mp4')
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path_mp4, fourcc, fps, (w, h))
-
-            try:
-                for frame in frames:
-                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                out.release()
-                print(f"OK Competition video saved: {output_path_mp4}")
-            except Exception as e:
-                print(f"Warning: Could not save video {output_path_mp4}: {e}")
-                out.release()
+    def _legacy_render_states(
+        self, episode_data: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Decode older observation-only rollout data for video compatibility."""
+        states = episode_data.get("states", [])
+        if not states:
+            return []
+        cfg = self.config
+        denom = float(max(self.grid_size - 1, 1))
+        include_reached = not cfg.moving_targets
+        target_position_end = 2 + 2 * self.num_agents
+        reached_start = target_position_end
+        counter_start = reached_start + (self.num_agents if include_reached else 0)
+        priority_start = counter_start + self.num_agents
+        energy_start = priority_start + (
+            self.num_agents if cfg.use_target_priorities else 0
+        )
+        decoded = []
+        for state in states:
+            target_positions = np.rint(
+                np.asarray(state[2:target_position_end]).reshape(-1, 2) * denom
+            ).astype(int)
+            priorities = (
+                np.rint(
+                    np.asarray(
+                        state[priority_start : priority_start + self.num_agents]
+                    )
+                    * 4.0
+                ).astype(int)
+                if cfg.use_target_priorities
+                else np.ones(self.num_agents, dtype=int)
+            )
+            battery = None
+            stations = []
+            if self.battery_enabled:
+                battery = int(
+                    round(float(state[energy_start]) * cfg.battery_capacity)
+                )
+                station_values = state[
+                    energy_start
+                    + 1 : energy_start
+                    + 1
+                    + 2 * self.num_recharge_stations
+                ]
+                stations = np.rint(
+                    np.asarray(station_values).reshape(-1, 2) * denom
+                ).astype(int).tolist()
+            decoded.append(
+                {
+                    "agent_position": np.rint(
+                        np.asarray(state[:2]) * denom
+                    ).astype(int).tolist(),
+                    "target_positions": target_positions.tolist(),
+                    "target_priorities": priorities.tolist(),
+                    "target_counters": [0] * self.num_agents,
+                    "targets_reached_count": [0] * self.num_agents,
+                    "battery_level": battery,
+                    "recharge_station_positions": stations,
+                    "window_agent": -1,
+                    "window_steps_remaining": 0,
+                }
+            )
+        return decoded
 
     def partial_reset(self, mask: torch.Tensor) -> torch.Tensor:
         """Reset only the envs indicated by mask (bool, shape (num_envs,)).
@@ -1184,6 +2432,38 @@ class BiddingGridworld:
             mask, torch.zeros_like(self.window_steps_remaining), self.window_steps_remaining
         )
         self.step_count = torch.where(mask, torch.zeros_like(self.step_count), self.step_count)
+        if self.battery_enabled:
+            self.battery_level = torch.where(
+                mask,
+                torch.full_like(self.battery_level, int(cfg.battery_capacity)),
+                self.battery_level,
+            )
+            initial_stations = self.recharge_station_pos.unsqueeze(0).expand(
+                self.num_envs, -1, -1
+            )
+            self.current_recharge_station_pos = torch.where(
+                mask.view(-1, 1, 1),
+                initial_stations,
+                self.current_recharge_station_pos,
+            )
+            new_station_directions = torch.randint(
+                0,
+                4,
+                self.recharge_station_directions.shape,
+                generator=self.gen,
+                device=device,
+                dtype=torch.int32,
+            )
+            self.recharge_station_directions = torch.where(
+                mask.unsqueeze(-1),
+                new_station_directions,
+                self.recharge_station_directions,
+            )
+            self.recharge_station_move_counters = torch.where(
+                mask.unsqueeze(-1),
+                torch.zeros_like(self.recharge_station_move_counters),
+                self.recharge_station_move_counters,
+            )
 
         if cfg.moving_targets:
             new_dirs = torch.randint(
@@ -1239,6 +2519,10 @@ def evaluate_multi_agent_policy(
         "reached_priority_sum_per_episode": [],
         "reached_priority_sum_per_target_per_episode": [],
         "reached_count_by_priority_per_episode": [],
+        "battery_depletions_per_episode": [],
+        "battery_recharges_per_episode": [],
+        "charging_navigation_steps_per_episode": [],
+        "charging_optimal_direction_steps_per_episode": [],
         "episode_data_list": [],
         "bid_counts_per_episode": [],
         "control_steps_per_agent_per_episode": [],
@@ -1269,7 +2553,11 @@ def evaluate_multi_agent_policy(
         reached_count_by_priority = np.zeros(4, dtype=np.int32)
         expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
         bid_counts: dict = {}
-        control_steps = np.zeros(env.num_agents, dtype=np.int32)
+        control_steps = np.zeros(env.num_bidders, dtype=np.int32)
+        battery_depletions = 0
+        battery_recharges = 0
+        charging_navigation_steps = 0
+        charging_optimal_direction_steps = 0
 
         while not (terminated or truncated):
             episode_states.append(env._get_centralized_observation()[0].copy())
@@ -1281,7 +2569,7 @@ def evaluate_multi_agent_policy(
             action_batch = actions.unsqueeze(0)
 
             env_action = {}
-            for agent_idx in range(env.num_agents):
+            for agent_idx in range(env.num_bidders):
                 agent_action = {
                     "direction": int(actions[agent_idx, 0].item()),
                     "bid": int(actions[agent_idx, 1].item()),
@@ -1297,7 +2585,10 @@ def evaluate_multi_agent_policy(
             truncated = bool(truncations[0].item())
 
             rewards_cpu = rewards[0].detach().cpu().numpy()
-            rewards_dict = {f"agent_{i}": float(rewards_cpu[i]) for i in range(env.num_agents)}
+            rewards_dict = {
+                f"agent_{i}": float(rewards_cpu[i])
+                for i in range(env.num_bidders)
+            }
             episode_return += float(rewards_cpu.sum())
             episode_rewards.append(rewards_dict)
 
@@ -1321,6 +2612,15 @@ def evaluate_multi_agent_policy(
                 reached_priorities = priorities_just_reached[0].detach().cpu().numpy()
                 reached_priority_sum += reached_priorities
                 reached_count_by_priority += np.bincount(reached_priorities, minlength=5)[1:5]
+            battery_depletions += int(info["battery_depleted"][0].item())
+            battery_recharges += int(info["battery_recharged"][0].item())
+            if isinstance(info.get("charging_navigation_active"), torch.Tensor):
+                charging_navigation_steps += int(
+                    info["charging_navigation_active"][0].item()
+                )
+                charging_optimal_direction_steps += int(
+                    info["charging_direction_optimal"][0].item()
+                )
 
             winning_agent = info.get("winning_agent", torch.tensor([-1], device=env.device))
             if isinstance(winning_agent, torch.Tensor):
@@ -1366,6 +2666,14 @@ def evaluate_multi_agent_policy(
         eval_stats["reached_priority_sum_per_episode"].append(int(reached_priority_sum.sum()))
         eval_stats["reached_priority_sum_per_target_per_episode"].append(reached_priority_sum.tolist())
         eval_stats["reached_count_by_priority_per_episode"].append(reached_count_by_priority.tolist())
+        eval_stats["battery_depletions_per_episode"].append(battery_depletions)
+        eval_stats["battery_recharges_per_episode"].append(battery_recharges)
+        eval_stats["charging_navigation_steps_per_episode"].append(
+            charging_navigation_steps
+        )
+        eval_stats["charging_optimal_direction_steps_per_episode"].append(
+            charging_optimal_direction_steps
+        )
         eval_stats["bid_counts_per_episode"].append(bid_counts)
         eval_stats["control_steps_per_agent_per_episode"].append(control_steps.tolist())
         eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
@@ -1423,7 +2731,8 @@ def evaluate_multi_agent_policy_batched(
     policy_fn,
     num_episodes: int,
     target_expiry_penalty: float = 0.0,
-    verbose: bool = True
+    verbose: bool = True,
+    capture_episode_count: int = 0,
 ) -> Dict[str, List]:
     """
     Batched evaluation of a multi-agent policy.
@@ -1439,14 +2748,20 @@ def evaluate_multi_agent_policy_batched(
         num_episodes: Number of episodes (must equal env.num_envs)
         target_expiry_penalty: Unused; kept for API parity.
         verbose: Whether to print progress
+        capture_episode_count: Number of leading batched episodes for which
+            exact visualization state, actions, rewards, and events are saved.
     """
     N = env.num_envs
     A = env.num_agents
+    B = env.num_bidders
     bid_upper_bound = env.config.bid_upper_bound
     device = env.device
 
     if N != num_episodes:
         raise ValueError(f"env.num_envs ({N}) must equal num_episodes ({num_episodes})")
+    if capture_episode_count < 0:
+        raise ValueError("capture_episode_count must be non-negative")
+    capture_episode_count = min(capture_episode_count, N)
 
     if verbose:
         print(f"\n{'='*60}")
@@ -1463,14 +2778,57 @@ def evaluate_multi_agent_policy_batched(
     targets_reached_count = torch.zeros(N, A, dtype=torch.long, device=device)
     reached_priority_sum = torch.zeros(N, A, dtype=torch.long, device=device)
     reached_count_by_priority = torch.zeros(N, 4, dtype=torch.long, device=device)
+    battery_depletions = torch.zeros(N, dtype=torch.long, device=device)
+    battery_recharges = torch.zeros(N, dtype=torch.long, device=device)
+    charging_navigation_steps = torch.zeros(
+        N, dtype=torch.long, device=device
+    )
+    charging_optimal_direction_steps = torch.zeros(
+        N, dtype=torch.long, device=device
+    )
+    charging_activation_steps = torch.zeros(
+        N, dtype=torch.long, device=device
+    )
+    charging_active_auction_steps = torch.zeros(
+        N, dtype=torch.long, device=device
+    )
+    charging_active_auction_wins = torch.zeros(
+        N, dtype=torch.long, device=device
+    )
+    charging_active_feeder_max_bid_sum = torch.zeros(
+        N, dtype=torch.long, device=device
+    )
+    charging_active_feeder_tie_or_outbid_steps = torch.zeros(
+        N, dtype=torch.long, device=device
+    )
     expired_count = torch.zeros(N, A, dtype=torch.long, device=device)
-    control_steps = torch.zeros(N, A, dtype=torch.long, device=device)
+    control_steps = torch.zeros(N, B, dtype=torch.long, device=device)
+    depletion_control_steps = torch.zeros(
+        N, B, dtype=torch.long, device=device
+    )
     bid_count_tensor = torch.zeros(N, bid_upper_bound + 1, dtype=torch.long, device=device)
+    charging_bid_count_tensor = torch.zeros(
+        N, bid_upper_bound + 1, dtype=torch.long, device=device
+    )
 
     # active[i] is True while episode i has not terminated/truncated
     active = torch.ones(N, dtype=torch.bool, device=device)
+    captured_episodes = [
+        {
+            "render_states": [],
+            "states": [],
+            "actions": [],
+            "rewards": [],
+            "step_details": [],
+        }
+        for _ in range(capture_episode_count)
+    ]
 
     while active.any():
+        render_state = (
+            env.get_render_state() if capture_episode_count > 0 else None
+        )
+        active_before_step = active.clone()
         actions = policy_fn(obs)
         if not torch.is_tensor(actions):
             actions = torch.tensor(actions, device=device)
@@ -1506,6 +2864,20 @@ def evaluate_multi_agent_policy_batched(
                 reached_count_by_priority[:, priority - 1] += (
                     (active_priorities == priority) & active.unsqueeze(1)
                 ).sum(dim=1)
+        battery_depletions += info["battery_depleted"].long() * active.long()
+        battery_recharges += info["battery_recharged"].long() * active.long()
+        if isinstance(info.get("charging_navigation_active"), torch.Tensor):
+            charging_navigation_steps += (
+                info["charging_navigation_active"].long() * active.long()
+            )
+            charging_optimal_direction_steps += (
+                info["charging_direction_optimal"].long() * active.long()
+            )
+        charging_bid_active = info.get("charging_bid_active")
+        if isinstance(charging_bid_active, torch.Tensor):
+            charging_activation_steps += (
+                charging_bid_active.long() * active.long()
+            )
 
         winning_agent = info.get("winning_agent")
         if isinstance(winning_agent, torch.Tensor):
@@ -1518,6 +2890,15 @@ def evaluate_multi_agent_policy_batched(
                     winner_idx.unsqueeze(1),
                     valid_winner.long().unsqueeze(1)
                 )
+            depletion_with_controller = (
+                info["battery_depleted"] & valid_winner
+            )
+            if depletion_with_controller.any():
+                depletion_control_steps.scatter_add_(
+                    1,
+                    winner_idx.unsqueeze(1),
+                    depletion_with_controller.long().unsqueeze(1),
+                )
 
         bids = info.get("bids")
         is_bidding_round = info.get("is_bidding_round")
@@ -1526,12 +2907,176 @@ def evaluate_multi_agent_policy_batched(
             bidding_active = is_bidding_round & active  # (N,)
             if bidding_active.any():
                 bids_clamped = bids.clamp(0, bid_upper_bound).long()
-                for a_idx in range(A):
+                for a_idx in range(B):
                     bid_count_tensor.scatter_add_(
                         1,
                         bids_clamped[:, a_idx].unsqueeze(1),
                         bidding_active.long().unsqueeze(1)
                     )
+                if env.charging_agent_idx is not None:
+                    charging_bid_count_tensor.scatter_add_(
+                        1,
+                        bids_clamped[
+                            :, env.charging_agent_idx
+                        ].unsqueeze(1),
+                        bidding_active.long().unsqueeze(1),
+                    )
+                    charging_active_auction = (
+                        bidding_active & charging_bid_active
+                    )
+                    feeder_max_bid = bids[:, :A].max(dim=1).values
+                    charger_bid = bids[:, env.charging_agent_idx]
+                    charging_active_auction_steps += (
+                        charging_active_auction.long()
+                    )
+                    charging_active_feeder_max_bid_sum += (
+                        feeder_max_bid.long()
+                        * charging_active_auction.long()
+                    )
+                    charging_active_feeder_tie_or_outbid_steps += (
+                        (
+                            feeder_max_bid >= charger_bid
+                        )
+                        & charging_active_auction
+                    ).long()
+                    if isinstance(winning_agent, torch.Tensor):
+                        charging_active_auction_wins += (
+                            (
+                                winning_agent
+                                == env.charging_agent_idx
+                            )
+                            & charging_active_auction
+                        ).long()
+
+        if capture_episode_count > 0:
+            actions_cpu = actions.detach().cpu().numpy()
+            rewards_cpu = rewards.detach().cpu().numpy()
+            active_cpu = active_before_step.detach().cpu().numpy()
+            info_cpu = {
+                key: value.detach().cpu().numpy()
+                for key, value in info.items()
+                if isinstance(value, torch.Tensor)
+            }
+            for env_idx in range(capture_episode_count):
+                if not active_cpu[env_idx]:
+                    continue
+                snapshot = {
+                    "agent_position": render_state["agent_positions"][
+                        env_idx
+                    ].tolist(),
+                    "target_positions": render_state["target_positions"][
+                        env_idx
+                    ].tolist(),
+                    "target_priorities": render_state["target_priorities"][
+                        env_idx
+                    ].tolist(),
+                    "target_counters": render_state["target_counters"][
+                        env_idx
+                    ].tolist(),
+                    "targets_reached_count": render_state[
+                        "targets_reached_count"
+                    ][env_idx].tolist(),
+                    "battery_level": (
+                        int(render_state["battery_levels"][env_idx])
+                        if render_state["battery_levels"] is not None
+                        else None
+                    ),
+                    "recharge_station_positions": (
+                        render_state["recharge_station_positions"][
+                            env_idx
+                        ].tolist()
+                        if render_state["recharge_station_positions"]
+                        is not None
+                        else []
+                    ),
+                    "window_agent": int(
+                        render_state["window_agents"][env_idx]
+                    ),
+                    "window_steps_remaining": int(
+                        render_state["window_steps_remaining"][env_idx]
+                    ),
+                }
+                action_dict = {}
+                for bidder_idx in range(B):
+                    bidder_action = {
+                        "direction": int(actions_cpu[env_idx, bidder_idx, 0]),
+                        "bid": int(actions_cpu[env_idx, bidder_idx, 1]),
+                    }
+                    if env.window_bidding:
+                        bidder_action["window"] = int(
+                            actions_cpu[env_idx, bidder_idx, 2]
+                        )
+                    action_dict[f"agent_{bidder_idx}"] = bidder_action
+                reward_dict = {
+                    f"agent_{bidder_idx}": float(
+                        rewards_cpu[env_idx, bidder_idx]
+                    )
+                    for bidder_idx in range(B)
+                }
+                detail = {
+                    "winning_agent": int(
+                        info_cpu["winning_agent"][env_idx]
+                    ),
+                    "bids": info_cpu["bids"][env_idx].tolist(),
+                    "effective_bids": info_cpu["effective_bids"][
+                        env_idx
+                    ].tolist(),
+                    "is_bidding_round": bool(
+                        info_cpu["is_bidding_round"][env_idx]
+                    ),
+                    "window_agent": int(
+                        info_cpu["window_agent"][env_idx]
+                    ),
+                    "window_steps_remaining": int(
+                        info_cpu["window_steps_remaining"][env_idx]
+                    ),
+                    "bid_penalty_applied": bool(
+                        info_cpu["bid_penalty_applied"][env_idx]
+                    ),
+                    "battery_level_after": (
+                        int(info_cpu["battery_level"][env_idx])
+                        if "battery_level" in info_cpu
+                        else None
+                    ),
+                    "battery_recharged": bool(
+                        info_cpu["battery_recharged"][env_idx]
+                    ),
+                    "battery_depleted": bool(
+                        info_cpu["battery_depleted"][env_idx]
+                    ),
+                    "charging_bid_active": bool(
+                        info_cpu.get(
+                            "charging_bid_active",
+                            np.zeros(N, dtype=bool),
+                        )[env_idx]
+                    ),
+                    "charging_navigation_active": bool(
+                        info_cpu.get(
+                            "charging_navigation_active",
+                            np.zeros(N, dtype=bool),
+                        )[env_idx]
+                    ),
+                    "charging_direction_optimal": bool(
+                        info_cpu.get(
+                            "charging_direction_optimal",
+                            np.zeros(N, dtype=bool),
+                        )[env_idx]
+                    ),
+                    "targets_just_reached": info_cpu[
+                        "targets_just_reached"
+                    ][env_idx].astype(bool).tolist(),
+                    "target_priorities_just_reached": info_cpu[
+                        "target_priorities_just_reached"
+                    ][env_idx].tolist(),
+                    "targets_just_expired": info_cpu[
+                        "targets_just_expired"
+                    ][env_idx].astype(bool).tolist(),
+                }
+                episode = captured_episodes[env_idx]
+                episode["render_states"].append(snapshot)
+                episode["actions"].append(action_dict)
+                episode["rewards"].append(reward_dict)
+                episode["step_details"].append(detail)
 
         # Mark envs that are done as inactive
         active = active & ~done
@@ -1543,9 +3088,30 @@ def evaluate_multi_agent_policy_batched(
     targets_reached_cpu = targets_reached_count.cpu().numpy()
     reached_priority_cpu = reached_priority_sum.cpu().numpy()
     reached_count_by_priority_cpu = reached_count_by_priority.cpu().numpy()
+    battery_depletions_cpu = battery_depletions.cpu().tolist()
+    battery_recharges_cpu = battery_recharges.cpu().tolist()
+    charging_navigation_steps_cpu = charging_navigation_steps.cpu().tolist()
+    charging_optimal_direction_steps_cpu = (
+        charging_optimal_direction_steps.cpu().tolist()
+    )
+    charging_activation_steps_cpu = charging_activation_steps.cpu().tolist()
+    charging_active_auction_steps_cpu = (
+        charging_active_auction_steps.cpu().tolist()
+    )
+    charging_active_auction_wins_cpu = (
+        charging_active_auction_wins.cpu().tolist()
+    )
+    charging_active_feeder_max_bid_sum_cpu = (
+        charging_active_feeder_max_bid_sum.cpu().tolist()
+    )
+    charging_active_feeder_tie_or_outbid_steps_cpu = (
+        charging_active_feeder_tie_or_outbid_steps.cpu().tolist()
+    )
     expired_cpu = expired_count.cpu().numpy()
     control_steps_cpu = control_steps.cpu().tolist()
+    depletion_control_steps_cpu = depletion_control_steps.cpu().tolist()
     bid_count_np = bid_count_tensor.cpu().numpy()
+    charging_bid_count_np = charging_bid_count_tensor.cpu().numpy()
 
     eval_stats = {
         "episode_returns": [],
@@ -1558,9 +3124,20 @@ def evaluate_multi_agent_policy_batched(
         "reached_priority_sum_per_episode": [],
         "reached_priority_sum_per_target_per_episode": [],
         "reached_count_by_priority_per_episode": [],
-        "episode_data_list": [],  # empty — video not supported in batched mode
+        "battery_depletions_per_episode": [],
+        "battery_recharges_per_episode": [],
+        "charging_navigation_steps_per_episode": [],
+        "charging_optimal_direction_steps_per_episode": [],
+        "charging_activation_steps_per_episode": [],
+        "charging_active_auction_steps_per_episode": [],
+        "charging_active_auction_wins_per_episode": [],
+        "charging_active_feeder_max_bid_sum_per_episode": [],
+        "charging_active_feeder_tie_or_outbid_steps_per_episode": [],
+        "episode_data_list": captured_episodes,
         "bid_counts_per_episode": [],
+        "charging_bid_counts_per_episode": [],
         "control_steps_per_agent_per_episode": [],
+        "battery_depletions_per_agent_per_episode": [],
         "expired_count_per_target_per_episode": [],
         "avg_expired_per_episode": [],
         "max_expired_per_episode": [],
@@ -1582,6 +3159,10 @@ def evaluate_multi_agent_policy_batched(
         episode_expired_count = int(ec.sum())
 
         bid_counts_dict = {b: int(bid_count_np[i, b]) for b in range(bid_upper_bound + 1)}
+        charging_bid_counts_dict = {
+            b: int(charging_bid_count_np[i, b])
+            for b in range(bid_upper_bound + 1)
+        }
 
         eval_stats["episode_returns"].append(returns_cpu[i])
         eval_stats["episode_returns_no_bid"].append(returns_no_bid_cpu[i])
@@ -1593,8 +3174,37 @@ def evaluate_multi_agent_policy_batched(
         eval_stats["reached_priority_sum_per_episode"].append(int(priority_sum.sum()))
         eval_stats["reached_priority_sum_per_target_per_episode"].append(priority_sum.tolist())
         eval_stats["reached_count_by_priority_per_episode"].append(priority_counts.tolist())
+        eval_stats["battery_depletions_per_episode"].append(battery_depletions_cpu[i])
+        eval_stats["battery_recharges_per_episode"].append(battery_recharges_cpu[i])
+        eval_stats["charging_navigation_steps_per_episode"].append(
+            charging_navigation_steps_cpu[i]
+        )
+        eval_stats["charging_optimal_direction_steps_per_episode"].append(
+            charging_optimal_direction_steps_cpu[i]
+        )
+        eval_stats["charging_activation_steps_per_episode"].append(
+            charging_activation_steps_cpu[i]
+        )
+        eval_stats["charging_active_auction_steps_per_episode"].append(
+            charging_active_auction_steps_cpu[i]
+        )
+        eval_stats["charging_active_auction_wins_per_episode"].append(
+            charging_active_auction_wins_cpu[i]
+        )
+        eval_stats[
+            "charging_active_feeder_max_bid_sum_per_episode"
+        ].append(charging_active_feeder_max_bid_sum_cpu[i])
+        eval_stats[
+            "charging_active_feeder_tie_or_outbid_steps_per_episode"
+        ].append(charging_active_feeder_tie_or_outbid_steps_cpu[i])
         eval_stats["bid_counts_per_episode"].append(bid_counts_dict)
+        eval_stats["charging_bid_counts_per_episode"].append(
+            charging_bid_counts_dict
+        )
         eval_stats["control_steps_per_agent_per_episode"].append(control_steps_cpu[i])
+        eval_stats["battery_depletions_per_agent_per_episode"].append(
+            depletion_control_steps_cpu[i]
+        )
         eval_stats["expired_count_per_target_per_episode"].append(ec.tolist())
         eval_stats["avg_expired_per_episode"].append(float(np.mean(ec)))
         eval_stats["max_expired_per_episode"].append(float(np.max(ec)))
@@ -1673,6 +3283,8 @@ def evaluate_single_agent_policy(
         "reached_priority_sum_per_episode": [],
         "reached_priority_sum_per_target_per_episode": [],
         "reached_count_by_priority_per_episode": [],
+        "battery_depletions_per_episode": [],
+        "battery_recharges_per_episode": [],
         "episode_data_list": [],
         "expired_count_per_target_per_episode": [],
         "avg_expired_per_episode": [],
@@ -1698,6 +3310,8 @@ def evaluate_single_agent_policy(
         reached_priority_sum = np.zeros(env.num_agents, dtype=np.int32)
         reached_count_by_priority = np.zeros(4, dtype=np.int32)
         expired_targets_count = np.zeros(env.num_agents, dtype=np.int32)
+        battery_depletions = 0
+        battery_recharges = 0
 
         while not (terminated or truncated):
             episode_states.append(env._get_centralized_observation()[0].copy())
@@ -1737,6 +3351,8 @@ def evaluate_single_agent_policy(
                 reached_priorities = priorities_just_reached[0].detach().cpu().numpy()
                 reached_priority_sum += reached_priorities
                 reached_count_by_priority += np.bincount(reached_priorities, minlength=5)[1:5]
+            battery_depletions += int(info["battery_depleted"][0].item())
+            battery_recharges += int(info["battery_recharged"][0].item())
 
             step_count += 1
 
@@ -1754,6 +3370,8 @@ def evaluate_single_agent_policy(
         eval_stats["reached_priority_sum_per_episode"].append(int(reached_priority_sum.sum()))
         eval_stats["reached_priority_sum_per_target_per_episode"].append(reached_priority_sum.tolist())
         eval_stats["reached_count_by_priority_per_episode"].append(reached_count_by_priority.tolist())
+        eval_stats["battery_depletions_per_episode"].append(battery_depletions)
+        eval_stats["battery_recharges_per_episode"].append(battery_recharges)
         eval_stats["expired_count_per_target_per_episode"].append(expired_targets_count.tolist())
         eval_stats["avg_expired_per_episode"].append(float(np.mean(expired_targets_count)))
         eval_stats["max_expired_per_episode"].append(float(np.max(expired_targets_count)))
@@ -1842,6 +3460,8 @@ def evaluate_single_agent_policy_batched(
     targets_reached_count = torch.zeros(N, A, dtype=torch.long, device=device)
     reached_priority_sum = torch.zeros(N, A, dtype=torch.long, device=device)
     reached_count_by_priority = torch.zeros(N, 4, dtype=torch.long, device=device)
+    battery_depletions = torch.zeros(N, dtype=torch.long, device=device)
+    battery_recharges = torch.zeros(N, dtype=torch.long, device=device)
     expired_count = torch.zeros(N, A, dtype=torch.long, device=device)
 
     active = torch.ones(N, dtype=torch.bool, device=device)
@@ -1875,6 +3495,8 @@ def evaluate_single_agent_policy_batched(
                 reached_count_by_priority[:, priority - 1] += (
                     (active_priorities == priority) & active.unsqueeze(1)
                 ).sum(dim=1)
+        battery_depletions += info["battery_depleted"].long() * active.long()
+        battery_recharges += info["battery_recharged"].long() * active.long()
 
         active = active & ~done
 
@@ -1883,6 +3505,8 @@ def evaluate_single_agent_policy_batched(
     targets_reached_cpu = targets_reached_count.cpu().numpy()
     reached_priority_cpu = reached_priority_sum.cpu().numpy()
     reached_count_by_priority_cpu = reached_count_by_priority.cpu().numpy()
+    battery_depletions_cpu = battery_depletions.cpu().tolist()
+    battery_recharges_cpu = battery_recharges.cpu().tolist()
     expired_cpu = expired_count.cpu().numpy()
 
     eval_stats = {
@@ -1895,6 +3519,8 @@ def evaluate_single_agent_policy_batched(
         "reached_priority_sum_per_episode": [],
         "reached_priority_sum_per_target_per_episode": [],
         "reached_count_by_priority_per_episode": [],
+        "battery_depletions_per_episode": [],
+        "battery_recharges_per_episode": [],
         "episode_data_list": [],  # empty — video not supported in batched mode
         "expired_count_per_target_per_episode": [],
         "avg_expired_per_episode": [],
@@ -1925,6 +3551,8 @@ def evaluate_single_agent_policy_batched(
         eval_stats["reached_priority_sum_per_episode"].append(int(priority_sum.sum()))
         eval_stats["reached_priority_sum_per_target_per_episode"].append(priority_sum.tolist())
         eval_stats["reached_count_by_priority_per_episode"].append(priority_counts.tolist())
+        eval_stats["battery_depletions_per_episode"].append(battery_depletions_cpu[i])
+        eval_stats["battery_recharges_per_episode"].append(battery_recharges_cpu[i])
         eval_stats["expired_count_per_target_per_episode"].append(ec.tolist())
         eval_stats["avg_expired_per_episode"].append(float(np.mean(ec)))
         eval_stats["max_expired_per_episode"].append(float(np.max(ec)))
