@@ -14,6 +14,7 @@ from ppo_utils import (
     compute_gae,
     ppo_update_step,
     factorized_auction_ppo_update_step,
+    counterfactual_factorized_auction_ppo_update_step,
     compute_explained_variance,
     format_duration,
 )
@@ -259,6 +260,8 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
         rewards = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
         dones = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
         values = torch.zeros((args.num_steps, args.num_envs, args.num_agents)).to(self.device)
+        bid_values = torch.zeros_like(values)
+        bid_baselines = torch.zeros_like(values)
 
         global_step = initial_global_step
         start_time = time.time()
@@ -271,6 +274,9 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
         )
         factorized_auction_ppo = getattr(
             args, "factorized_auction_ppo", False
+        )
+        counterfactual_bid_advantages = getattr(
+            args, "counterfactual_bid_advantages", False
         )
 
         for iteration in range(start_iteration, args.num_iterations + 1):
@@ -299,6 +305,14 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
                             value,
                         ) = self.agent.get_factorized_action_and_value(flat_obs)
                         logprob = direction_logprob + bid_logprob
+                        if counterfactual_bid_advantages:
+                            (
+                                bid_value,
+                                bid_baseline,
+                                _,
+                            ) = self.agent.get_counterfactual_bid_values(
+                                flat_obs, action[..., 1]
+                            )
                     else:
                         action, logprob, _, value = policy_action_value_fn(flat_obs)
                     action = action.reshape(args.num_envs, args.num_agents, self.num_action_components)
@@ -312,6 +326,13 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
                         )
                     value = value.reshape(args.num_envs, args.num_agents)
                     values[step] = value
+                    if counterfactual_bid_advantages:
+                        bid_values[step] = bid_value.reshape(
+                            args.num_envs, args.num_agents
+                        )
+                        bid_baselines[step] = bid_baseline.reshape(
+                            args.num_envs, args.num_agents
+                        )
 
                 actions[step] = action
                 logprobs[step] = logprob
@@ -368,13 +389,44 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
             with torch.no_grad():
                 flat_next_obs = next_obs.reshape(-1, self.obs_dim)
                 next_value = self.agent.get_value(flat_next_obs).reshape(args.num_envs, args.num_agents)
-                advantages, returns = compute_gae(
+                direction_advantages, direction_returns = compute_gae(
                     rewards, values, dones, next_value, next_done, args.gamma, args.gae_lambda
                 )
+                if counterfactual_bid_advantages:
+                    _, next_bid_baseline, _ = (
+                        self.agent.get_counterfactual_bid_values(flat_next_obs)
+                    )
+                    next_bid_baseline = next_bid_baseline.reshape(
+                        args.num_envs, args.num_agents
+                    )
+                    bid_reward_advantages, bid_returns = compute_gae(
+                        rewards,
+                        bid_baselines,
+                        dones,
+                        next_bid_baseline,
+                        next_done,
+                        args.gamma,
+                        args.gae_lambda,
+                    )
+                    counterfactual_advantages = (
+                        bid_values - bid_baselines
+                    )
+                    counterfactual_mix = getattr(
+                        args, "counterfactual_bid_advantage_mix", 1.0
+                    )
+                    bid_advantages = (
+                        (1.0 - counterfactual_mix) * bid_reward_advantages
+                        + counterfactual_mix * counterfactual_advantages
+                    )
+                else:
+                    bid_advantages = direction_advantages
+                    bid_returns = direction_returns
             self._last_rollout_stats = {
                 "rewards": rewards.detach(),
                 "values": values.detach(),
-                "advantages": advantages.detach(),
+                "advantages": direction_advantages.detach(),
+                "direction_advantages": direction_advantages.detach(),
+                "bid_advantages": bid_advantages.detach(),
             }
 
             b_obs = obs.reshape(-1, self.obs_dim)
@@ -384,9 +436,12 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
             b_direction_masks = direction_masks.reshape(-1)
             b_bid_masks = bid_masks.reshape(-1)
             b_actions = actions.reshape(-1, self.num_action_components)
-            b_advantages = advantages.reshape(-1)
-            b_returns = returns.reshape(-1)
+            b_direction_advantages = direction_advantages.reshape(-1)
+            b_bid_advantages = bid_advantages.reshape(-1)
+            b_direction_returns = direction_returns.reshape(-1)
+            b_bid_returns = bid_returns.reshape(-1)
             b_values = values.reshape(-1)
+            b_bid_values = bid_values.reshape(-1)
 
             clipfracs: list[float] = []
             for epoch in range(args.update_epochs):
@@ -394,7 +449,37 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
                 for start in range(0, args.batch_size, args.minibatch_size):
                     end = start + args.minibatch_size
                     mb_inds = b_inds[start:end]
-                    if factorized_auction_ppo:
+                    if counterfactual_bid_advantages:
+                        metrics = (
+                            counterfactual_factorized_auction_ppo_update_step(
+                                self.agent,
+                                self.optimizer,
+                                b_obs[mb_inds],
+                                b_actions[mb_inds],
+                                b_direction_logprobs[mb_inds],
+                                b_bid_logprobs[mb_inds],
+                                b_direction_masks[mb_inds],
+                                b_bid_masks[mb_inds],
+                                b_direction_advantages[mb_inds],
+                                b_bid_advantages[mb_inds],
+                                b_direction_returns[mb_inds],
+                                b_bid_returns[mb_inds],
+                                b_values[mb_inds],
+                                b_bid_values[mb_inds],
+                                args.clip_coef,
+                                args.ent_coef,
+                                args.vf_coef,
+                                (
+                                    args.bid_vf_coef
+                                    if args.bid_vf_coef is not None
+                                    else args.vf_coef
+                                ),
+                                args.max_grad_norm,
+                                args.norm_adv,
+                                args.clip_vloss,
+                            )
+                        )
+                    elif factorized_auction_ppo:
                         metrics = factorized_auction_ppo_update_step(
                             self.agent,
                             self.optimizer,
@@ -404,8 +489,8 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
                             b_bid_logprobs[mb_inds],
                             b_direction_masks[mb_inds],
                             b_bid_masks[mb_inds],
-                            b_advantages[mb_inds],
-                            b_returns[mb_inds],
+                            b_direction_advantages[mb_inds],
+                            b_direction_returns[mb_inds],
                             b_values[mb_inds],
                             args.clip_coef,
                             args.ent_coef,
@@ -421,8 +506,8 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
                             b_obs[mb_inds],
                             b_actions[mb_inds],
                             b_logprobs[mb_inds],
-                            b_advantages[mb_inds],
-                            b_returns[mb_inds],
+                            b_direction_advantages[mb_inds],
+                            b_direction_returns[mb_inds],
                             b_values[mb_inds],
                             args.clip_coef,
                             args.ent_coef,
@@ -437,7 +522,7 @@ class MultiAgentPPOTrainerBase(PPOTrainerBase):
                     break
 
             y_pred = b_values.detach().cpu().numpy()
-            y_true = b_returns.detach().cpu().numpy()
+            y_true = b_direction_returns.detach().cpu().numpy()
             explained_var = compute_explained_variance(y_pred, y_true)
 
             sps = int(global_step / (time.time() - start_time))

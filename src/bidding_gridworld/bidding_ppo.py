@@ -108,6 +108,12 @@ class Args:
     """rescale mixed credit to preserve cooperative team-reward magnitude"""
     factorized_auction_ppo: bool = False
     """mask PPO direction/bid losses to executed directions and real auctions"""
+    counterfactual_bid_advantages: bool = False
+    """use a bid-conditioned critic and policy-marginalized bid baseline"""
+    counterfactual_bid_advantage_mix: float = 1.0
+    """fraction of bid actor advantage supplied by the counterfactual critic"""
+    bid_vf_coef: Optional[float] = None
+    """bid-critic loss coefficient; None uses vf_coef"""
     battery_capacity: Optional[int] = None
     """shared robot battery capacity; None disables recharge mechanics"""
     recharge_station_positions: Optional[Tuple[Tuple[int, int], ...]] = None
@@ -279,6 +285,7 @@ class SharedAgent(nn.Module):
         separate_bid_actor: bool = False,
         bid_actor_hidden_sizes: Optional[Tuple[int, ...]] = None,
         ordinal_bid_head: bool = False,
+        counterfactual_bid_critic: bool = False,
     ):
         """
         Initialize shared actor-critic network.
@@ -297,11 +304,16 @@ class SharedAgent(nn.Module):
         self.separate_direction_actor = separate_direction_actor
         self.separate_bid_actor = separate_bid_actor
         self.ordinal_bid_head = ordinal_bid_head
+        self.counterfactual_bid_critic = counterfactual_bid_critic
         self.bid_upper_bound = None
         self.use_target_priorities = use_target_priorities
+        self._critic_sizes = critic_sizes = (
+            list(critic_hidden_sizes)
+            if critic_hidden_sizes is not None
+            else [256, 256, 256]
+        )
 
         actor_sizes = list(actor_hidden_sizes) if actor_hidden_sizes is not None else [128, 128, 128]
-        critic_sizes = list(critic_hidden_sizes) if critic_hidden_sizes is not None else [256, 256, 256]
 
         if self.use_target_attention_pooling:
             encoder_sizes = target_encoder_hidden_sizes if target_encoder_hidden_sizes is not None else (64, 64)
@@ -391,6 +403,7 @@ class SharedAgent(nn.Module):
             nn.Linear(direction_feature_dim, 4), std=0.01
         )
         self.bid_head = None  # Will be set based on bid_upper_bound
+        self.bid_critic = None
         self.window_head = None  # Will be set based on action_window if window_bidding is True
 
     def _encode_obs(self, x: torch.Tensor) -> torch.Tensor:
@@ -510,6 +523,24 @@ class SharedAgent(nn.Module):
                 self.bid_head.bias[1] = torch.log(torch.expm1(torch.tensor(4.0)))
         # Move to same device as the rest of the model
         self.bid_head = self.bid_head.to(next(self.parameters()).device)
+        if self.counterfactual_bid_critic:
+            critic_layers = []
+            critic_in_dim = self.encoded_obs_dim
+            for hidden_size in self._critic_sizes:
+                critic_layers.append(
+                    layer_init(nn.Linear(critic_in_dim, hidden_size))
+                )
+                critic_layers.append(nn.ELU())
+                critic_in_dim = hidden_size
+            critic_layers.append(
+                layer_init(
+                    nn.Linear(critic_in_dim, self.bid_upper_bound + 1),
+                    std=1.0,
+                )
+            )
+            self.bid_critic = nn.Sequential(*critic_layers).to(
+                next(self.parameters()).device
+            )
 
     def _bid_logits(self, bid_features: torch.Tensor) -> torch.Tensor:
         raw = self.bid_head(bid_features)
@@ -545,6 +576,37 @@ class SharedAgent(nn.Module):
         """
         encoded = self._encode_obs(x)
         return self.critic(encoded)
+
+    def get_counterfactual_bid_values(self, x, bid_action=None):
+        """Return selected-bid Q and the current-policy counterfactual baseline.
+
+        The bid critic predicts a value for every legal bid from the same fully
+        observable controller state.  Marginalizing those values under the
+        controller's current bid distribution supplies the COMA-style baseline;
+        it contains no programmatic geometry or privileged target selector.
+        """
+        if self.bid_critic is None:
+            raise RuntimeError(
+                "counterfactual bid values require counterfactual_bid_critic"
+            )
+        encoded = self._encode_obs(x)
+        shared_features = self.actor_shared(encoded)
+        bid_features = (
+            self.bid_actor(encoded)
+            if self.bid_actor is not None
+            else shared_features
+        )
+        bid_logits = self._bid_logits(bid_features)
+        bid_probabilities = torch.softmax(bid_logits, dim=-1)
+        bid_q_values = self.bid_critic(encoded)
+        baseline = (bid_probabilities * bid_q_values).sum(dim=-1)
+        if bid_action is None:
+            # Callers that only need the baseline should not consume policy RNG.
+            bid_action = torch.zeros_like(baseline, dtype=torch.long)
+        selected = bid_q_values.gather(
+            -1, bid_action.long().unsqueeze(-1)
+        ).squeeze(-1)
+        return selected, baseline, bid_q_values
 
     def get_action_and_value(
         self,
@@ -1302,6 +1364,17 @@ class PPOTrainer(MultiAgentPPOTrainerBase):
             raise ValueError(
                 "factorized_auction_ppo currently supports target bidders only"
             )
+        if (
+            self.args.counterfactual_bid_advantages
+            and not self.args.factorized_auction_ppo
+        ):
+            raise ValueError(
+                "counterfactual_bid_advantages requires factorized_auction_ppo"
+            )
+        if not 0.0 <= self.args.counterfactual_bid_advantage_mix <= 1.0:
+            raise ValueError(
+                "counterfactual_bid_advantage_mix must be between 0 and 1"
+            )
         # Environment setup (torch batched only)
         env_config = BiddingGridworldConfig(
             grid_size=self.args.grid_size,
@@ -1394,6 +1467,9 @@ class PPOTrainer(MultiAgentPPOTrainerBase):
             separate_bid_actor=self.args.separate_bid_actor,
             bid_actor_hidden_sizes=self.args.bid_actor_hidden_sizes,
             ordinal_bid_head=self.args.ordinal_bid_head,
+            counterfactual_bid_critic=(
+                self.args.counterfactual_bid_advantages
+            ),
         ).to(self.device)
         self.agent.set_bid_head(self.args.bid_upper_bound)
         if self.args.window_bidding:

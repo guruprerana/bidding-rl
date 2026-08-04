@@ -296,6 +296,173 @@ def factorized_auction_ppo_update_step(
     }
 
 
+def counterfactual_factorized_auction_ppo_update_step(
+    agent,
+    optimizer,
+    obs: torch.Tensor,
+    actions: torch.Tensor,
+    old_direction_logprobs: torch.Tensor,
+    old_bid_logprobs: torch.Tensor,
+    direction_mask: torch.Tensor,
+    bid_mask: torch.Tensor,
+    direction_advantages: torch.Tensor,
+    bid_advantages: torch.Tensor,
+    direction_returns: torch.Tensor,
+    bid_returns: torch.Tensor,
+    direction_values: torch.Tensor,
+    bid_values: torch.Tensor,
+    clip_coef: float,
+    ent_coef: float,
+    direction_vf_coef: float,
+    bid_vf_coef: float,
+    max_grad_norm: float,
+    norm_adv: bool,
+    clip_vloss: bool,
+):
+    """Factorized auction PPO with distinct navigation and bid critics.
+
+    The navigation critic is a scalar state-value model.  The bid critic emits
+    one Q estimate per legal bid and is trained only at the sampled bid.  The
+    caller supplies the counterfactual bid advantage computed from the rollout
+    policy's selected-bid Q minus its policy-marginalized Q baseline.
+    """
+
+    def masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        mask_f = mask.to(value.dtype)
+        return (value * mask_f).sum() / mask_f.sum().clamp_min(1.0)
+
+    def normalized(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if not norm_adv:
+            return value
+        mask_f = mask.to(value.dtype)
+        count = mask_f.sum().clamp_min(1.0)
+        mean = (value * mask_f).sum() / count
+        variance = ((value - mean).square() * mask_f).sum() / count
+        return (value - mean) / torch.sqrt(variance + 1e-8)
+
+    (
+        _,
+        direction_logprobs,
+        bid_logprobs,
+        direction_entropy,
+        bid_entropy,
+        new_direction_values,
+    ) = agent.get_factorized_action_and_value(obs, actions)
+    new_bid_values, _, _ = agent.get_counterfactual_bid_values(
+        obs, actions[..., 1]
+    )
+
+    direction_advantages = normalized(direction_advantages, direction_mask)
+    bid_advantages = normalized(bid_advantages, bid_mask)
+
+    direction_logratio = direction_logprobs - old_direction_logprobs
+    direction_ratio = direction_logratio.exp()
+    direction_pg = masked_mean(
+        torch.maximum(
+            -direction_advantages * direction_ratio,
+            -direction_advantages
+            * torch.clamp(direction_ratio, 1 - clip_coef, 1 + clip_coef),
+        ),
+        direction_mask,
+    )
+
+    bid_logratio = bid_logprobs - old_bid_logprobs
+    bid_ratio = bid_logratio.exp()
+    bid_pg = masked_mean(
+        torch.maximum(
+            -bid_advantages * bid_ratio,
+            -bid_advantages
+            * torch.clamp(bid_ratio, 1 - clip_coef, 1 + clip_coef),
+        ),
+        bid_mask,
+    )
+    pg_loss = direction_pg + bid_pg
+
+    new_direction_values = new_direction_values.view(-1)
+    new_bid_values = new_bid_values.view(-1)
+    if clip_vloss:
+        direction_unclipped = (
+            new_direction_values - direction_returns
+        ).square()
+        direction_clipped_values = direction_values + torch.clamp(
+            new_direction_values - direction_values, -clip_coef, clip_coef
+        )
+        direction_clipped = (
+            direction_clipped_values - direction_returns
+        ).square()
+        direction_v_loss = 0.5 * torch.maximum(
+            direction_unclipped, direction_clipped
+        ).mean()
+
+        bid_unclipped = (new_bid_values - bid_returns).square()
+        bid_clipped_values = bid_values + torch.clamp(
+            new_bid_values - bid_values, -clip_coef, clip_coef
+        )
+        bid_clipped = (bid_clipped_values - bid_returns).square()
+        bid_v_loss = 0.5 * masked_mean(
+            torch.maximum(bid_unclipped, bid_clipped), bid_mask
+        )
+    else:
+        direction_v_loss = 0.5 * (
+            new_direction_values - direction_returns
+        ).square().mean()
+        bid_v_loss = 0.5 * masked_mean(
+            (new_bid_values - bid_returns).square(), bid_mask
+        )
+
+    entropy_loss = masked_mean(
+        direction_entropy, direction_mask
+    ) + masked_mean(bid_entropy, bid_mask)
+    loss = (
+        pg_loss
+        - ent_coef * entropy_loss
+        + direction_vf_coef * direction_v_loss
+        + bid_vf_coef * bid_v_loss
+    )
+
+    optimizer.zero_grad()
+    loss.backward()
+    nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+    optimizer.step()
+
+    active_count = (
+        direction_mask.to(torch.float32).sum()
+        + bid_mask.to(torch.float32).sum()
+    ).clamp_min(1.0)
+    with torch.no_grad():
+        old_approx_kl = masked_mean(
+            -direction_logratio, direction_mask
+        ) + masked_mean(-bid_logratio, bid_mask)
+        approx_kl = masked_mean(
+            (direction_ratio - 1.0) - direction_logratio,
+            direction_mask,
+        ) + masked_mean((bid_ratio - 1.0) - bid_logratio, bid_mask)
+        direction_clipped = (
+            (direction_ratio - 1.0).abs() > clip_coef
+        ).to(torch.float32)
+        bid_clipped = ((bid_ratio - 1.0).abs() > clip_coef).to(
+            torch.float32
+        )
+        clipfrac = (
+            (direction_clipped * direction_mask).sum()
+            + (bid_clipped * bid_mask).sum()
+        ) / active_count
+
+    return {
+        "pg_loss": pg_loss.item(),
+        "direction_pg_loss": direction_pg.item(),
+        "bid_pg_loss": bid_pg.item(),
+        "v_loss": (direction_v_loss + bid_v_loss).item(),
+        "direction_v_loss": direction_v_loss.item(),
+        "bid_v_loss": bid_v_loss.item(),
+        "entropy_loss": entropy_loss.item(),
+        "old_approx_kl": old_approx_kl.item(),
+        "approx_kl": approx_kl.item(),
+        "clipfrac": clipfrac.item(),
+        "auxiliary_loss": 0.0,
+    }
+
+
 def compute_explained_variance(y_pred: np.ndarray, y_true: np.ndarray) -> float:
     """Compute explained variance."""
     var_y = np.var(y_true)

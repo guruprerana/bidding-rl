@@ -101,19 +101,31 @@ def main():
     )
     NUM_VIDEO_EPISODES = 0  # Number of episodes to save as MP4s
     VIDEO_FREQ = 0  # Save video rollouts every N iterations (0 = use eval freq)
-    EVAL_NUM_AGENTS = None  # Multi-agent only: override number of agents/targets during eval (requires attention pooling)
-    EVAL_NUM_TARGETS = None  # Single-agent only: override number of targets during eval (fixed obs; keep None)
+    EVAL_NUM_AGENTS = (
+        env_value("EVAL_NUM_AGENTS", 0, int)
+        if "EVAL_NUM_AGENTS" in os.environ
+        else None
+    )
+    EVAL_NUM_TARGETS = (
+        env_value("EVAL_NUM_TARGETS", 0, int)
+        if "EVAL_NUM_TARGETS" in os.environ
+        else None
+    )
 
     # Environment parameters
-    GRID_SIZE = 30
-    NUM_AGENTS = 8  # For multi-agent: number of bidding agents; For single-agent: number of targets
+    GRID_SIZE = env_value("GRID_SIZE", 30, int)
+    NUM_AGENTS = env_value("NUM_AGENTS", 8, int)
     # E[priority] = 2.5, so coefficient 20 preserves the original mean feeding reward of 50.
     TARGET_REWARD = env_value("TARGET_REWARD", 20.0, float)
-    MAX_STEPS = 2000  # Maximum steps per episode during training
-    EVAL_MAX_STEPS = 2000  # Maximum steps per episode during evaluation (typically longer than training)
-    DISTANCE_REWARD_SCALE = 0.6
-    TARGET_EXPIRY_STEPS = 200
-    TARGET_EXPIRY_PENALTY = 50.0
+    MAX_STEPS = env_value("MAX_STEPS", 2000, int)
+    EVAL_MAX_STEPS = env_value("EVAL_MAX_STEPS", 2000, int)
+    DISTANCE_REWARD_SCALE = env_value(
+        "DISTANCE_REWARD_SCALE", 0.6, float
+    )
+    TARGET_EXPIRY_STEPS = env_value("TARGET_EXPIRY_STEPS", 200, int)
+    TARGET_EXPIRY_PENALTY = env_value(
+        "TARGET_EXPIRY_PENALTY", 50.0, float
+    )
     REWARD_DECAY_FACTOR = 0.0  # Single-agent only: decay rewards for over-visited targets (0.0 = no decay, 0.5 = moderate)
     URGENCY_WEIGHTED_SCALARIZATION = env_value(
         "URGENCY_WEIGHTED_SCALARIZATION",
@@ -274,6 +286,19 @@ def main():
     )
     FACTORIZED_AUCTION_PPO = env_value(
         "FACTORIZED_AUCTION_PPO", False, lambda x: x.lower() == "true"
+    )
+    COUNTERFACTUAL_BID_ADVANTAGES = env_value(
+        "COUNTERFACTUAL_BID_ADVANTAGES",
+        False,
+        lambda x: x.lower() == "true",
+    )
+    COUNTERFACTUAL_BID_ADVANTAGE_MIX = env_value(
+        "COUNTERFACTUAL_BID_ADVANTAGE_MIX", 1.0, float
+    )
+    BID_VF_COEF = (
+        env_value("BID_VF_COEF", 0.0, float)
+        if "BID_VF_COEF" in os.environ
+        else None
     )
 
     # Moving targets parameters (only used if MOVING_TARGETS = True)
@@ -468,6 +493,13 @@ def main():
             bid_other_reward_fraction=BID_OTHER_REWARD_FRACTION,
             bid_mixed_reward_normalize=BID_MIXED_REWARD_NORMALIZE,
             factorized_auction_ppo=FACTORIZED_AUCTION_PPO,
+            counterfactual_bid_advantages=(
+                COUNTERFACTUAL_BID_ADVANTAGES
+            ),
+            counterfactual_bid_advantage_mix=(
+                COUNTERFACTUAL_BID_ADVANTAGE_MIX
+            ),
+            bid_vf_coef=BID_VF_COEF,
             battery_capacity=BATTERY_CAPACITY,
             recharge_station_positions=RECHARGE_STATION_POSITIONS,
             moving_recharge_stations=MOVING_RECHARGE_STATIONS,

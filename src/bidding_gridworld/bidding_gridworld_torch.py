@@ -2216,16 +2216,34 @@ class BiddingGridworld:
                     f"{winner_mark} {role} {priority_label}  "
                     f"bid {bid}{effective_label:>3}  {direction:<5}"
                 )
-            info_ax.text(
-                0.02,
-                0.62,
-                "\n".join(bid_lines),
-                fontsize=8.2,
-                fontfamily="monospace",
-                color="#263238",
-                va="top",
-                linespacing=1.25,
-            )
+            if len(bid_lines) > 18:
+                # Large auctions need columns so the rows do not collide with
+                # the event summary at the bottom of the panel.
+                split = (len(bid_lines) + 1) // 2
+                for column, lines in enumerate(
+                    (bid_lines[:split], bid_lines[split:])
+                ):
+                    info_ax.text(
+                        0.02 + 0.49 * column,
+                        0.62,
+                        "\n".join(lines),
+                        fontsize=7.2,
+                        fontfamily="monospace",
+                        color="#263238",
+                        va="top",
+                        linespacing=1.15,
+                    )
+            else:
+                info_ax.text(
+                    0.02,
+                    0.62,
+                    "\n".join(bid_lines),
+                    fontsize=8.2,
+                    fontfamily="monospace",
+                    color="#263238",
+                    va="top",
+                    linespacing=1.25,
+                )
 
             event_parts = []
             reached_priorities = detail.get(
